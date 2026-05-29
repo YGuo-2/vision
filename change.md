@@ -1143,14 +1143,14 @@ git diff -- docs/yolo_migration_plan.md change.md
 
 ### 修改内容
 
-- 在 GitHub 当前账号 `TriciaDoctor` 下创建私有仓库 `vision`。
-- 将本地 `origin` 从 `https://github.com/gy212/vision.git` 更新为 `https://github.com/TriciaDoctor/vision.git`。
-- 准备将当前本地提交和工作区文档改动推送到新远端。
+- 在 GitHub 当前账号 `YGuo-2` 下创建私有仓库 `vision`。
+- 将本地 `origin` 从旧账号远端更新为 `https://github.com/YGuo-2/vision.git`。
+- 修正第一次误用 `TriciaDoctor` 登录态创建远端的问题，并准备将当前本地提交推送到正确远端。
 
 ### 验证方法
 
 ```powershell
-gh repo view TriciaDoctor/vision --json nameWithOwner,url,isPrivate
+gh repo view YGuo-2/vision --json nameWithOwner,url,isPrivate
 git remote -v
 git push -u origin master
 ```
