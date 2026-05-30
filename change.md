@@ -71,3 +71,48 @@
 
 - `e:\CodeProject\vision\.venv\Scripts\python.exe -m py_compile .\analysis\spike_yolo_baseline.py`
 - `e:\CodeProject\vision\.venv\Scripts\python.exe -m analysis.spike_yolo_baseline --help`
+
+---
+
+## 2026-05-30: YOLO 迁移 S1 起点（Issue #3：pose33_v3 golden 回归基线，安全网先行）
+
+### 问题描述
+
+S1 后续 Issue（#4 layout shape 参数化 + 周期裁切修复、#5 valid_mask 契约迁移）会改动
+`_extract_pose_features()` 缺帧补零、`mirror_pose_features()`、`_select_representative_cycle()`、
+双模板关节误差统计、`tech_eval._valid` / `rule_scoring._valid_frame` 等热路径。
+`py_compile` 对“行为不变”零保证，必须在动这些代码前先把 pose33_v3 默认路径的现状冻结成
+golden，作为重构“行为不变”的唯一硬门槛。
+
+### 修改内容
+
+- **测试框架（方案 A，pytest）落地**：新增 `requirements-dev.txt`（`pytest==8.4.2`）。
+  后续所有 Issue 的新增测试统一沿用 pytest 风格，验收命令
+  `.\.venv\Scripts\python.exe -m pytest tests\xxx.py`。
+- **确定性回放 harness**：新增 `tests/golden_harness.py`，把 `cv2.VideoCapture` 与
+  `MediaPipePipeline` 替换为读取已保存 `(T,33,4)` landmark 序列的假对象。所有上层入口
+  （`compare_video_to_template` / `compare_video_to_dual_templates` / `evaluate_video_full`
+  / `extract_pose_raw` / `score_rules` / `extract_pose_and_view_scores`）都走真实代码路径，
+  但输入确定，golden 只反映本仓库代码行为，不受 MediaPipe 模型版本影响。
+- **fixture 入库**：`tests/fixtures/pose33_v3/` 下提交小体积确定性数据——
+  `front_src_raw.npz` / `side_src_raw.npz` / `student_raw.npz`（裁剪自本地骨架序列，
+  约 170KB），以及由其生成的 `front_template.npz` / `side_template.npz` / `golden.json`。
+  - `tests/fixtures/_build_raw_fixtures.py`：从本地（gitignored）`outputs/` 裁剪 raw fixture，
+    仅在源样本/裁剪范围有意调整时运行。
+  - `tests/fixtures/regen_pose33_v3_golden.py`：用已提交 raw fixture 重生成模板与 golden，
+    仅在“有意变更行为”且确认正确后运行。
+- **golden 回归测试**：新增 `tests/test_pose33_v3_golden.py`（16 个用例），覆盖三类输出：
+  1. 单模板 `compare_video_to_template` 分数；
+  2. 双模板 `compare_video_to_dual_templates` 的 `combined_percent` + 各视角分（含规则扣分
+     明细、关节误差统计，关节顺序敏感以冻结 mirror 的 L/R 交换）；
+  3. `tech_eval` 各指标 `status` + 关键 `detail`。
+  数值断言用 `pytest.approx(abs=1e-4)`，状态/分类/整数（percent、rule_score、segment、
+  primary_cause 等）用精确相等。
+- **.gitignore**：补 `core/models/*.task`，避免误提交本地模型权重。
+
+### 验证方法
+
+- `.\.venv\Scripts\python.exe -m pytest tests\test_pose33_v3_golden.py` → 16 passed（未改动代码全绿）。
+- 安全网有效性自检：临时在 `mirror_pose_features()` 注入 `+0.001` 扰动 → `test_dual_joint_errors[side]`
+  如期失败；还原后重新全绿，证明 golden 能捕获热路径漂移。
+- `git check-ignore` 确认 fixtures/golden/模板均不被忽略、会随提交入库；`core/models/*.task` 已被忽略。
