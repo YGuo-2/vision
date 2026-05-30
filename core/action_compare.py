@@ -21,6 +21,7 @@ from .pose_features import (
     subsequence_dtw,
     subsequence_dtw_with_path,
 )
+from .feature_layout import POSE33_V3, FeatureLayoutSpec, is_valid_feature_shape
 from .rule_scoring import RuleViolation, extract_pose_raw, score_rules
 from .vision_pipeline import MediaPipePipeline, PipelineConfig
 from .video_writer import open_video_writer
@@ -93,14 +94,19 @@ def _extract_pose_features(
     workers: int = 1,
     normalizer: Callable = normalize_pose_xy,
     compute_view: bool = False,
+    layout: FeatureLayoutSpec = POSE33_V3,
     progress_cb: ProgressCb | None = None,
     stop_evt: Event | None = None,
 ) -> tuple[np.ndarray, float, np.ndarray | None]:
     """
     Extract normalized pose features for the entire video.
-    Returns (features[T,22,2], fps, view_scores[T] or None).
+    Returns (features[T,J,2], fps, view_scores[T] or None), where J/D come from `layout`.
+
+    本期默认 `layout=POSE33_V3`（即 (22,2)），行为与旧路径一致；缺帧补零按 layout
+    shape 生成，不再写死 (22,2)。
     """
     stop_evt = stop_evt or Event()
+    zero_frame_shape = tuple(int(x) for x in layout.shape)
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         raise RuntimeError(f"无法打开视频：{video_path}")
@@ -135,7 +141,7 @@ def _extract_pose_features(
                 if feats:
                     f = feats[-1].copy()
                 else:
-                    f = np.zeros((22, 2), dtype=np.float32)
+                    f = np.zeros(zero_frame_shape, dtype=np.float32)
             feats.append(f)
             if views is not None:
                 v = pose_view_score(pose_landmarks)
@@ -165,6 +171,7 @@ def _extract_pose_features(
             workers=1,
             normalizer=normalizer,
             compute_view=compute_view,
+            layout=layout,
             progress_cb=progress_cb,
             stop_evt=stop_evt,
         )
@@ -172,7 +179,7 @@ def _extract_pose_features(
     cap.release()
 
     models_dir = Path(__file__).resolve().parent / "models"
-    feat_arr = np.zeros((total, 22, 2), dtype=np.float32)
+    feat_arr = np.zeros((total, *zero_frame_shape), dtype=np.float32)
     view_arr = np.zeros((total,), dtype=np.float32) if compute_view else None
 
     done_lock = Lock()
@@ -213,7 +220,7 @@ def _extract_pose_features(
             pose_landmarks, _hands = pipe.infer(frame, timestamp_ms=ts)
             f = normalizer(pose_landmarks)
             if f is None:
-                f = last.copy() if last is not None else np.zeros((22, 2), dtype=np.float32)
+                f = last.copy() if last is not None else np.zeros(zero_frame_shape, dtype=np.float32)
             else:
                 last = f
 
@@ -297,6 +304,48 @@ def _trimmed_mean(scores: list[float]) -> float:
     return float(sum(scores) / len(scores))
 
 
+def _feature_frame_shape(features: np.ndarray) -> tuple[int, ...]:
+    arr = np.asarray(features)
+    if arr.ndim < 2:
+        return tuple(int(x) for x in arr.shape)
+    if arr.ndim == 2:
+        return tuple(int(x) for x in arr.shape)
+    return tuple(int(x) for x in arr.shape[1:])
+
+
+def _assert_feature_layout_match(
+    left: np.ndarray,
+    right: np.ndarray,
+    *,
+    left_label: str,
+    right_label: str,
+    left_layout: str | None = None,
+    right_layout: str | None = None,
+) -> None:
+    left_arr = np.asarray(left)
+    right_arr = np.asarray(right)
+    left_shape = _feature_frame_shape(left_arr)
+    right_shape = _feature_frame_shape(right_arr)
+    layout_matches = (
+        left_layout is None
+        or right_layout is None
+        or str(left_layout) == str(right_layout)
+    )
+    if left_arr.ndim == 3 and right_arr.ndim == 3 and left_shape == right_shape and layout_matches:
+        return
+
+    def _desc(label: str, arr: np.ndarray, frame_shape: tuple[int, ...], layout: str | None) -> str:
+        layout_part = "" if layout is None else f", feature_layout={layout!r}"
+        return f"{label}: sequence_shape={tuple(arr.shape)}, frame_shape={frame_shape}{layout_part}"
+
+    raise ValueError(
+        "Feature layout mismatch: 不允许静默比对不同 layout 的特征。"
+        f" {_desc(left_label, left_arr, left_shape, left_layout)};"
+        f" {_desc(right_label, right_arr, right_shape, right_layout)}。"
+        " 请使用相同 feature_layout 重新生成模板或特征。"
+    )
+
+
 def _estimate_period_frames(energy: np.ndarray, fps: float) -> int | None:
     """
     Estimate dominant repetition period (in frames) via normalized autocorrelation on motion energy.
@@ -338,8 +387,13 @@ def _select_representative_cycle(features: np.ndarray, fps: float) -> np.ndarray
     """
     For a repeated standard video, pick a single representative repetition as the matching query.
     If we can't estimate a stable period, return the original features.
+
+    布局守卫泛化（Issue #4）：旧实现写死 ``if features.shape[1:] != (22, 2): return features``，
+    会让任意非 22 点布局 **静默跳过周期裁切**（DTW query 退化成整段模板，不报错最难查）。
+    现改为只依赖 ``features.shape[1:]`` 是否为合法 ``(J, 2)`` 布局（``J >= 下限``即可裁切），
+    不再写死 22 点；这样任意 ``(T, J, 2)`` 输入都能正常裁切代表周期。
     """
-    if features.ndim != 3 or features.shape[1:] != (22, 2):
+    if features.ndim != 3 or not is_valid_feature_shape(features.shape[1:]):
         return features
     if features.shape[0] < 30:
         return features
@@ -582,6 +636,14 @@ def compare_video_to_template(
         progress_cb=progress_cb,
         stop_evt=stop_evt,
     )
+    _assert_feature_layout_match(
+        query,
+        seq,
+        left_label=f"template {template_path}",
+        right_label=f"video {video_path}",
+        left_layout=layout,
+        right_layout=layout,
+    )
 
     if progress_cb is not None:
         progress_cb("计算相似度", 0, 1)
@@ -663,6 +725,15 @@ def compare_video_to_dual_templates(
 
     layout_f = str(meta_f.get("feature_layout", "pose_indices_11_32_xy_rot_scale_norm"))
     layout_s = str(meta_s.get("feature_layout", "pose_indices_11_32_xy_rot_scale_norm"))
+    _assert_feature_layout_match(
+        feat_f,
+        feat_s,
+        left_label=f"front template {front_template_path}",
+        right_label=f"side template {side_template_path}",
+        left_layout=layout_f,
+        right_layout=layout_s,
+    )
+
     def _layout_ver(layout: str) -> str:
         if layout.endswith("_v3"):
             return "v3"
@@ -695,6 +766,22 @@ def compare_video_to_dual_templates(
         compute_view=True,
         progress_cb=progress_cb,
         stop_evt=stop_evt,
+    )
+    _assert_feature_layout_match(
+        feat_f,
+        seq,
+        left_label=f"front template {front_template_path}",
+        right_label=f"video {video_path}",
+        left_layout=layout_f,
+        right_layout=layout_f,
+    )
+    _assert_feature_layout_match(
+        feat_s,
+        seq,
+        left_label=f"side template {side_template_path}",
+        right_label=f"video {video_path}",
+        left_layout=layout_s,
+        right_layout=layout_s,
     )
 
     # 双模板比对核心流程：
@@ -751,30 +838,12 @@ def compare_video_to_dual_templates(
         rule_front = _score_rules_for_seg(front_seg, view="front")
         rule_side = _score_rules_for_seg(side_seg, view="side")
 
-    joint_names_11_32 = [
-        "L_SHOULDER",
-        "R_SHOULDER",
-        "L_ELBOW",
-        "R_ELBOW",
-        "L_WRIST",
-        "R_WRIST",
-        "L_PINKY",
-        "R_PINKY",
-        "L_INDEX",
-        "R_INDEX",
-        "L_THUMB",
-        "R_THUMB",
-        "L_HIP",
-        "R_HIP",
-        "L_KNEE",
-        "R_KNEE",
-        "L_ANKLE",
-        "R_ANKLE",
-        "L_HEEL",
-        "R_HEEL",
-        "L_FOOT_INDEX",
-        "R_FOOT_INDEX",
-    ]
+    # 关节误差统计按 layout 取名/取数：本期双模板固定走 pose33_v3 布局（(22,2)）。
+    # joint_names / source_indices / num_joints 全部来自 layout，热路径不再写死 22 / 列表字面量。
+    error_layout = POSE33_V3
+    joint_names = list(error_layout.joint_names)
+    src_idx = list(error_layout.source_indices)
+    num_joints = error_layout.num_joints
 
     def _swap_lr(name: str) -> str:
         if name.startswith("L_"):
@@ -866,25 +935,25 @@ def compare_video_to_dual_templates(
                     end_frame=int(seg_offset + int(seg_seq.shape[0]) - 1),
                 )
                 thr_vis = 0.5
-                dists: list[list[float]] = [[] for _ in range(22)]
+                dists: list[list[float]] = [[] for _ in range(num_joints)]
                 for qi, sj in path:
                     qi_i = int(qi)
                     sj_i = int(sj)
                     if qi_i < 0 or qi_i >= int(q_eff.shape[0]) or sj_i < 0 or sj_i >= int(seg_seq.shape[0]):
                         continue
-                    vis = raw[sj_i, 11:33, 3].astype(np.float32)
+                    vis = raw[sj_i, src_idx, 3].astype(np.float32)
                     a = q_eff[qi_i].astype(np.float32)
                     b = seg_seq[sj_i].astype(np.float32)
-                    for k in range(22):
+                    for k in range(num_joints):
                         if float(vis[k]) < thr_vis:
                             continue
                         d = float(np.linalg.norm(a[k] - b[k]))
                         if np.isfinite(d):
                             dists[k].append(d)
 
-                names = joint_names_11_32 if not mirrored else [_swap_lr(n) for n in joint_names_11_32]
+                names = joint_names if not mirrored else [_swap_lr(n) for n in joint_names]
                 joint_stats = []
-                for k in range(22):
+                for k in range(num_joints):
                     arr = np.array(dists[k], dtype=np.float32)
                     if arr.size == 0:
                         joint_stats.append(
