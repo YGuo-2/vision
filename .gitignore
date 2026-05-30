@@ -4,12 +4,16 @@ __pycache__/
 .trae/
 .claude/
 models/*.task
+models/*.pt
+models/*.onnx
 analysis/models/*.task
 *.mp4
 *.avi
 *.zip
 templates/
 outputs/
+vision_old/
+_pip_*.log
 标准样本/
 学员样本/
 标准动作要点/

@@ -1,0 +1,9 @@
+# S0 决策 Spike 专用依赖（仅供 analysis/spike_yolo_baseline.py 使用，不接主链路）。
+# 主链路依赖见 requirements.txt。安装命令（经本地代理 7890）：
+#   .\.venv\Scripts\python.exe -m pip install -r requirements-spike.txt --proxy http://127.0.0.1:7890
+#
+# 注意：Ultralytics 为 AGPL-3.0 / Enterprise 双许可。本依赖当前仅用于内部研发/评估，
+# 闭源或商业部署前须按 docs/yolo_baseline_report.md 的许可结论处理。
+ultralytics==8.4.57
+torch==2.12.0
+torchvision==0.27.0
