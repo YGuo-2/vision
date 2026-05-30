@@ -304,6 +304,48 @@ def _trimmed_mean(scores: list[float]) -> float:
     return float(sum(scores) / len(scores))
 
 
+def _feature_frame_shape(features: np.ndarray) -> tuple[int, ...]:
+    arr = np.asarray(features)
+    if arr.ndim < 2:
+        return tuple(int(x) for x in arr.shape)
+    if arr.ndim == 2:
+        return tuple(int(x) for x in arr.shape)
+    return tuple(int(x) for x in arr.shape[1:])
+
+
+def _assert_feature_layout_match(
+    left: np.ndarray,
+    right: np.ndarray,
+    *,
+    left_label: str,
+    right_label: str,
+    left_layout: str | None = None,
+    right_layout: str | None = None,
+) -> None:
+    left_arr = np.asarray(left)
+    right_arr = np.asarray(right)
+    left_shape = _feature_frame_shape(left_arr)
+    right_shape = _feature_frame_shape(right_arr)
+    layout_matches = (
+        left_layout is None
+        or right_layout is None
+        or str(left_layout) == str(right_layout)
+    )
+    if left_arr.ndim == 3 and right_arr.ndim == 3 and left_shape == right_shape and layout_matches:
+        return
+
+    def _desc(label: str, arr: np.ndarray, frame_shape: tuple[int, ...], layout: str | None) -> str:
+        layout_part = "" if layout is None else f", feature_layout={layout!r}"
+        return f"{label}: sequence_shape={tuple(arr.shape)}, frame_shape={frame_shape}{layout_part}"
+
+    raise ValueError(
+        "Feature layout mismatch: 不允许静默比对不同 layout 的特征。"
+        f" {_desc(left_label, left_arr, left_shape, left_layout)};"
+        f" {_desc(right_label, right_arr, right_shape, right_layout)}。"
+        " 请使用相同 feature_layout 重新生成模板或特征。"
+    )
+
+
 def _estimate_period_frames(energy: np.ndarray, fps: float) -> int | None:
     """
     Estimate dominant repetition period (in frames) via normalized autocorrelation on motion energy.
@@ -594,6 +636,14 @@ def compare_video_to_template(
         progress_cb=progress_cb,
         stop_evt=stop_evt,
     )
+    _assert_feature_layout_match(
+        query,
+        seq,
+        left_label=f"template {template_path}",
+        right_label=f"video {video_path}",
+        left_layout=layout,
+        right_layout=layout,
+    )
 
     if progress_cb is not None:
         progress_cb("计算相似度", 0, 1)
@@ -675,6 +725,15 @@ def compare_video_to_dual_templates(
 
     layout_f = str(meta_f.get("feature_layout", "pose_indices_11_32_xy_rot_scale_norm"))
     layout_s = str(meta_s.get("feature_layout", "pose_indices_11_32_xy_rot_scale_norm"))
+    _assert_feature_layout_match(
+        feat_f,
+        feat_s,
+        left_label=f"front template {front_template_path}",
+        right_label=f"side template {side_template_path}",
+        left_layout=layout_f,
+        right_layout=layout_s,
+    )
+
     def _layout_ver(layout: str) -> str:
         if layout.endswith("_v3"):
             return "v3"
@@ -707,6 +766,22 @@ def compare_video_to_dual_templates(
         compute_view=True,
         progress_cb=progress_cb,
         stop_evt=stop_evt,
+    )
+    _assert_feature_layout_match(
+        feat_f,
+        seq,
+        left_label=f"front template {front_template_path}",
+        right_label=f"video {video_path}",
+        left_layout=layout_f,
+        right_layout=layout_f,
+    )
+    _assert_feature_layout_match(
+        feat_s,
+        seq,
+        left_label=f"side template {side_template_path}",
+        right_label=f"video {video_path}",
+        left_layout=layout_s,
+        right_layout=layout_s,
     )
 
     # 双模板比对核心流程：

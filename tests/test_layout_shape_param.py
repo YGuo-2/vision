@@ -38,6 +38,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 import core.action_compare as ac  # noqa: E402
 from core.action_compare import _extract_pose_features, _select_representative_cycle  # noqa: E402
+from core.action_compare import _assert_feature_layout_match  # noqa: E402
 from core.feature_layout import (  # noqa: E402
     POSE33_V3,
     FeatureLayoutSpec,
@@ -185,6 +186,39 @@ def test_missing_frame_padding_uses_layout_shape():
     assert feats.shape == (T, *POSE33_V3.shape)
     assert np.allclose(feats, 0.0, atol=ABS_TOL)
     assert float(fps) == pytest.approx(30.0, abs=ABS_TOL)
+
+
+# --------------------------------------------------------------------------- #
+# 不同 layout / shape 不允许静默比对
+# --------------------------------------------------------------------------- #
+def test_feature_layout_mismatch_raises_clear_error():
+    query = np.zeros((8, 22, 2), dtype=np.float32)
+    seq = np.zeros((12, 12, 2), dtype=np.float32)
+
+    with pytest.raises(ValueError, match="Feature layout mismatch"):
+        _assert_feature_layout_match(
+            query,
+            seq,
+            left_label="template",
+            right_label="video",
+            left_layout="pose33_v3",
+            right_layout="body_core_v1",
+        )
+
+
+def test_feature_layout_name_mismatch_raises_even_with_same_shape():
+    query = np.zeros((8, *POSE33_V3.shape), dtype=np.float32)
+    seq = np.zeros((12, *POSE33_V3.shape), dtype=np.float32)
+
+    with pytest.raises(ValueError, match="Feature layout mismatch"):
+        _assert_feature_layout_match(
+            query,
+            seq,
+            left_label="front template",
+            right_label="side template",
+            left_layout="pose33_v3",
+            right_layout="legacy_pose33_alias",
+        )
 
 
 # --------------------------------------------------------------------------- #
