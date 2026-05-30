@@ -7,6 +7,7 @@ models/*.task
 models/*.pt
 models/*.onnx
 analysis/models/*.task
+core/models/*.task
 *.mp4
 *.avi
 *.zip
