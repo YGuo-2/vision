@@ -30,6 +30,19 @@ vision/
 
 ## Build, Test, and Development Commands
 
+> **网络代理约定**：凡是需要联网下载、但国内无法正常访问的资源（pip 包、模型权重 `.task`/`.pt`、GitHub/HuggingFace 资源等），一律走本地代理，端口号为 `7890`。
+>
+> PowerShell（当前会话临时设置）：
+> ```powershell
+> $env:HTTP_PROXY  = "http://127.0.0.1:7890"
+> $env:HTTPS_PROXY = "http://127.0.0.1:7890"
+> ```
+> pip 单次下载：
+> ```powershell
+> .\.venv\Scripts\python.exe -m pip install -r requirements.txt --proxy http://127.0.0.1:7890
+> ```
+> 下载模型/外部资源时同样需带上 `127.0.0.1:7890` 代理（`curl --proxy`、`git config --global http.proxy` 等）。
+
 Create/install (from repo root):
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
