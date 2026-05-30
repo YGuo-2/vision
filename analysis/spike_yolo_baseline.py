@@ -4,7 +4,8 @@ r"""S0b 决策 Spike：YOLO vs MediaPipe 基线对照脚本（临时脚本，不
 用途
 ====
 对照 issue #2（S0b）：用一份独立脚本跑通 YOLO-pose 与 MediaPipe-pose 在同一批
-样本上的关键点提取对照，导出 FPS、漏检帧率、关键点抖动、初始化耗时等客观数据，
+样本上的关键点提取对照，导出 keypoints、track_id、FPS、漏检帧率、关键点抖动、
+初始化耗时等客观数据，
 供 ``docs/yolo_baseline_report.md`` 的预注册阈值表对照。
 
 强约束（来自迁移计划 / AGENTS.md）
@@ -38,6 +39,7 @@ r"""S0b 决策 Spike：YOLO vs MediaPipe 基线对照脚本（临时脚本，不
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import platform
@@ -108,6 +110,10 @@ class BackendRun:
     valid_mask: np.ndarray | None = None
     multi_person_frames: int = 0
     max_persons: int = 0
+    person_counts: list[int] = field(default_factory=list)
+    track_ids: list[int | None] = field(default_factory=list)
+    selected_indices: list[int | None] = field(default_factory=list)
+    boxes_xywh_norm: list[list[float] | None] = field(default_factory=list)
     extra: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -179,6 +185,10 @@ def run_mediapipe(video_path: Path, *, pose_variant: str, models_dir: Path) -> B
                 vis = float(getattr(lm, "visibility", 0.0))
                 arr[j] = (float(lm.x), float(lm.y), float(getattr(lm, "z", 0.0)), vis)
                 mask[j] = vis >= 0.5
+        run.person_counts.append(1 if pose_landmarks is not None else 0)
+        run.track_ids.append(None)
+        run.selected_indices.append(0 if pose_landmarks is not None else None)
+        run.boxes_xywh_norm.append(None)
         lms.append(arr)
         masks.append(mask)
         run.wall_sec += time.perf_counter() - t_wall
@@ -195,6 +205,47 @@ def run_mediapipe(video_path: Path, *, pose_variant: str, models_dir: Path) -> B
     run.extra["valid_conf_thr"] = 0.5
     run.extra["fps"] = fps
     return run
+
+
+@dataclass
+class SimpleTrackAssigner:
+    """Spike-only selected-target tracker for recording a reproducible track_id."""
+
+    next_id: int = 1
+    active_id: int | None = None
+    active_box: np.ndarray | None = None
+    missed: int = 0
+    max_missed: int = 5
+    max_center_dist: float = 0.18
+    min_iou: float = 0.05
+
+    def update(self, box_xywh_norm: list[float] | None) -> int | None:
+        if box_xywh_norm is None:
+            self.missed += 1
+            if self.missed > self.max_missed:
+                self.active_id = None
+                self.active_box = None
+            return None
+
+        box = np.asarray(box_xywh_norm, dtype=np.float32)
+        if self.active_id is None or self.active_box is None:
+            return self._start_track(box)
+
+        center_dist = float(np.linalg.norm(box[:2] - self.active_box[:2]))
+        iou = _xywh_iou(self.active_box, box)
+        if center_dist > self.max_center_dist and iou < self.min_iou:
+            return self._start_track(box)
+
+        self.active_box = box
+        self.missed = 0
+        return self.active_id
+
+    def _start_track(self, box: np.ndarray) -> int:
+        self.active_id = self.next_id
+        self.next_id += 1
+        self.active_box = box
+        self.missed = 0
+        return self.active_id
 
 
 # ---------------------------------------------------------------------------
@@ -223,6 +274,7 @@ def run_yolo(
     run = BackendRun(backend="yolo", model_name=Path(yolo_model).name, init_sec=init_sec)
     lms: list[np.ndarray] = []
     masks: list[np.ndarray] = []
+    track_assigner = SimpleTrackAssigner()
 
     i = 0
     while True:
@@ -237,12 +289,16 @@ def run_yolo(
         arr = np.zeros((33, 4), dtype=np.float32)
         mask = np.zeros((33,), dtype=bool)
         n_persons = 0
+        selected_idx: int | None = None
+        selected_box_xywh_norm: list[float] | None = None
         res = results[0] if results else None
         kpts = getattr(res, "keypoints", None) if res is not None else None
         if kpts is not None and kpts.data is not None and len(kpts.data) > 0:
             n_persons = int(len(kpts.data))
             # 单人 MVP：取面积最大的框对应实例（多人闸门统计另记）。
             best = _select_main_person(res)
+            selected_idx = best
+            selected_box_xywh_norm = _box_xywh_norm(res, best, w, h)
             xy = kpts.xyn[best].cpu().numpy() if kpts.xyn is not None else None   # (17,2) 归一化
             conf = kpts.conf[best].cpu().numpy() if kpts.conf is not None else None  # (17,)
             if xy is not None and xy.shape[0] >= 17:
@@ -257,6 +313,10 @@ def run_yolo(
         if n_persons > 1:
             run.multi_person_frames += 1
         run.max_persons = max(run.max_persons, n_persons)
+        run.person_counts.append(n_persons)
+        run.selected_indices.append(selected_idx)
+        run.boxes_xywh_norm.append(selected_box_xywh_norm)
+        run.track_ids.append(track_assigner.update(selected_box_xywh_norm))
         lms.append(arr)
         masks.append(mask)
         run.wall_sec += time.perf_counter() - t_wall
@@ -273,6 +333,8 @@ def run_yolo(
     run.extra["fps"] = fps
     run.extra["width"] = w
     run.extra["height"] = h
+    run.extra["track_policy"] = "spike_selected_largest_box_iou_center"
+    run.extra["track_note"] = "Spike-only track_id for data audit; production multi-person gate is S2."
     return run
 
 
@@ -284,6 +346,39 @@ def _select_main_person(res: Any) -> int:
     xywh = boxes.xywh.cpu().numpy()
     areas = xywh[:, 2] * xywh[:, 3]
     return int(np.argmax(areas))
+
+
+def _box_xywh_norm(res: Any, idx: int, width: int, height: int) -> list[float] | None:
+    boxes = getattr(res, "boxes", None)
+    if boxes is None or boxes.xywh is None or len(boxes.xywh) <= idx or width <= 0 or height <= 0:
+        return None
+    xywh = boxes.xywh[idx].cpu().numpy().astype(np.float32)
+    return [
+        round(float(xywh[0] / width), 6),
+        round(float(xywh[1] / height), 6),
+        round(float(xywh[2] / width), 6),
+        round(float(xywh[3] / height), 6),
+    ]
+
+
+def _xywh_iou(a: np.ndarray, b: np.ndarray) -> float:
+    ax1, ay1, ax2, ay2 = _xywh_to_xyxy(a)
+    bx1, by1, bx2, by2 = _xywh_to_xyxy(b)
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
+    inter = iw * ih
+    if inter <= 0.0:
+        return 0.0
+    area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+    area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+    union = area_a + area_b - inter
+    return float(inter / union) if union > 0.0 else 0.0
+
+
+def _xywh_to_xyxy(box: np.ndarray) -> tuple[float, float, float, float]:
+    x, y, w, h = [float(v) for v in box[:4]]
+    return x - w / 2.0, y - h / 2.0, x + w / 2.0, y + h / 2.0
 
 
 # ---------------------------------------------------------------------------
@@ -371,6 +466,7 @@ def process_video(
     yolo_model: str,
     models_dir: Path,
     yolo_conf_thr: float,
+    keypoints_jsonl: Path | None = None,
 ) -> dict[str, Any]:
     print(f"[spike] 处理：{video_path}", flush=True)
     mp_run = run_mediapipe(video_path, pose_variant=pose_variant, models_dir=models_dir)
@@ -398,17 +494,70 @@ def process_video(
             "multi_person_frames": yolo_run.multi_person_frames,
             "max_persons": yolo_run.max_persons,
             "calibration_status": yolo_run.extra.get("calibration_status"),
+            "track_policy": yolo_run.extra.get("track_policy"),
         },
         "cross_backend_body_core_diff": cross_backend_position_diff(mp_run, yolo_run, body_core),
         "fps_speedup_infer": _round_or_none(
             yolo_run.fps_infer / mp_run.fps_infer if mp_run.fps_infer > 0 else None
         ),
     }
+    if keypoints_jsonl is not None:
+        _append_keypoints_jsonl(keypoints_jsonl, video_path, mp_run, yolo_run)
+        rec["keypoints_export"] = str(keypoints_jsonl)
     return rec
 
 
 def _round_or_none(x: float | None, ndigits: int = 4) -> float | None:
     return None if x is None else round(float(x), ndigits)
+
+
+def _append_keypoints_jsonl(path: Path, video_path: Path, mp_run: BackendRun, yolo_run: BackendRun) -> None:
+    """Append one JSON line per frame for S0 audit and later calibration replay."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    n = max(mp_run.n_frames, yolo_run.n_frames)
+    video_id = _stable_video_id(video_path)
+    with path.open("a", encoding="utf-8") as fh:
+        for t in range(n):
+            rec = {
+                "schema_version": 1,
+                "video_id": video_id,
+                "video": str(video_path),
+                "frame_index": t,
+                "mediapipe": _frame_export(mp_run, t),
+                "yolo": _frame_export(yolo_run, t),
+            }
+            fh.write(json.dumps(rec, ensure_ascii=False, separators=(",", ":")) + "\n")
+
+
+def _stable_video_id(video_path: Path) -> str:
+    return hashlib.sha1(str(video_path).encode("utf-8")).hexdigest()[:12]
+
+
+def _frame_export(run: BackendRun, frame_index: int) -> dict[str, Any]:
+    has_frame = run.landmarks is not None and frame_index < run.landmarks.shape[0]
+    person_count = run.person_counts[frame_index] if frame_index < len(run.person_counts) else 0
+    return {
+        "backend": run.backend,
+        "model": run.model_name,
+        "detected": bool(person_count > 0),
+        "person_count": int(person_count),
+        "selected_person_index": run.selected_indices[frame_index]
+        if frame_index < len(run.selected_indices) else None,
+        "track_id": run.track_ids[frame_index] if frame_index < len(run.track_ids) else None,
+        "bbox_xywh_norm": run.boxes_xywh_norm[frame_index]
+        if frame_index < len(run.boxes_xywh_norm) else None,
+        "keypoints_blaze33": _rounded_landmarks(run.landmarks[frame_index]) if has_frame else [],
+        "valid_mask": run.valid_mask[frame_index].astype(bool).tolist()
+        if run.valid_mask is not None and frame_index < run.valid_mask.shape[0] else [],
+        "confidence_kind": run.extra.get("confidence_kind"),
+        "validity_policy": run.extra.get("validity_policy"),
+        "valid_conf_thr": run.extra.get("valid_conf_thr"),
+        "calibration_status": run.extra.get("calibration_status"),
+    }
+
+
+def _rounded_landmarks(arr: np.ndarray) -> list[list[float]]:
+    return np.round(arr.astype(np.float32), 6).tolist()
 
 
 def load_samples(samples_json: Path) -> list[Path]:
@@ -434,6 +583,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--models-dir", type=str, default="models")
     ap.add_argument("--yolo-conf-thr", type=float, default=0.5, help="YOLO 有效性占位阈值（待 S3 标定）")
     ap.add_argument("--out", type=str, default="outputs/spike")
+    ap.add_argument(
+        "--no-keypoints-export",
+        action="store_true",
+        help="不写出 spike_keypoints.jsonl（默认写出 YOLO/MediaPipe keypoints 与 track_id）",
+    )
     args = ap.parse_args(argv)
 
     repo_root = Path(__file__).resolve().parent.parent
@@ -449,6 +603,9 @@ def main(argv: list[str] | None = None) -> int:
 
     out_dir = (repo_root / args.out).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
+    keypoints_jsonl = None if args.no_keypoints_export else out_dir / "spike_keypoints.jsonl"
+    if keypoints_jsonl is not None and keypoints_jsonl.exists():
+        keypoints_jsonl.unlink()
 
     env = collect_env()
     print(f"[spike] 环境：{json.dumps(env, ensure_ascii=False)}", flush=True)
@@ -466,6 +623,7 @@ def main(argv: list[str] | None = None) -> int:
                     yolo_model=str((repo_root / args.yolo_model).resolve()),
                     models_dir=models_dir,
                     yolo_conf_thr=args.yolo_conf_thr,
+                    keypoints_jsonl=keypoints_jsonl,
                 )
             )
         except Exception as exc:  # noqa: BLE001
@@ -488,6 +646,8 @@ def main(argv: list[str] | None = None) -> int:
     json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     _write_csv(out_dir / "spike_baseline.csv", records)
     print(f"[spike] 已写出：{json_path}", flush=True)
+    if keypoints_jsonl is not None:
+        print(f"[spike] 已写出 keypoints：{keypoints_jsonl}", flush=True)
     print(f"[spike] 汇总：{json.dumps(summary, ensure_ascii=False, indent=2)}", flush=True)
     return 0
 

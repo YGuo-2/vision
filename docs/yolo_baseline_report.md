@@ -4,7 +4,7 @@
 日期：2026-05-30
 覆盖范围：S0a（许可 + 环境 + 样本集，Issue #1）+ S0b（技术 spike + 核心指标降级清单 + 预注册阈值，Issue #2）
 关联 spike 脚本：`analysis/spike_yolo_baseline.py`（独立脚本，不接主链路）
-关联原始数据：`outputs/spike/spike_baseline.json`、`outputs/spike/spike_baseline.csv`
+关联原始数据：`outputs/spike/spike_baseline.json`、`outputs/spike/spike_baseline.csv`、`outputs/spike/spike_keypoints.jsonl`
 
 > **方法论提醒**：本报告严格遵循"先预注册阈值、后对照数据"。下文阈值表在跑数据前确定方向；
 > 由于本仓暂无业务给定的硬性目标值，阈值数值按"基于本次 CPU 实测 MediaPipe 基线反推"的方式给出，
@@ -109,6 +109,8 @@
   --pose-variant full --out outputs/spike
 ```
 
+默认会额外写出 `outputs/spike/spike_keypoints.jsonl`：逐帧保存 MediaPipe / YOLO 的 Pose33-like keypoints、`valid_mask`、YOLO 选中目标的 `track_id`、`person_count` 与归一化 bbox。`track_id` 由 spike 内部的最大框 + IoU/中心距离简易策略生成，仅用于 S0 数据审计和后续标定复核；S2 多人闸门仍需实现正式策略。
+
 ### 6.1 汇总（6 段样本均值）
 
 | 指标 | MediaPipe full | YOLO11n-pose | 对比 |
@@ -118,7 +120,7 @@
 | body_core 抖动（均值，归一化） | 0.0035 | 0.0061 | YOLO 抖动约 1.7× |
 | 跨后端 body_core 位置差中位数（均值） | — | — | 0.0147 |
 
-### 6.2 逐样本要点（完整数据见 `outputs/spike/spike_baseline.json`）
+### 6.2 逐样本要点（完整数据见 `outputs/spike/spike_baseline.json`；逐帧 keypoints / track_id 见 `outputs/spike/spike_keypoints.jsonl`）
 
 | 样本 | 帧 | MP FPS | YOLO FPS | speedup | 跨后端差(中位/ P90) | YOLO 多人帧 / 最大人数 |
 |---|---:|---:|---:|---:|---|---:|
@@ -200,7 +202,10 @@ $env:HTTPS_PROXY = "http://127.0.0.1:7890"
   --yolo-model models/yolo11n-pose.pt `
   --pose-variant full --out outputs/spike
 
-# 输出：outputs/spike/spike_baseline.json + spike_baseline.csv
+# 输出：
+# - outputs/spike/spike_baseline.json
+# - outputs/spike/spike_baseline.csv
+# - outputs/spike/spike_keypoints.jsonl
 ```
 
 ---
