@@ -8,6 +8,46 @@ from .feature_layout import (
     resolve_layout_by_shape,
 )
 
+# ---------------------------------------------------------------------------
+# valid_mask 契约（YOLO 迁移 S1 / Issue #5）
+# ---------------------------------------------------------------------------
+# “此点是否可用”的唯一判据集中在此，不再散落 `lm[idx, 3] >= thr` / `_lm_vis(...) >= thr`。
+# - MediaPipe 路径：第 4 通道存 visibility，按 `visibility >= 0.5` 灌入，
+#   故 validity_policy=visibility_thr、valid_conf_thr=0.5（视为已标定）。
+# - 阈值只允许出现在 `derive_valid_mask`，避免再次散落。
+DEFAULT_VALID_CONF_THR: float = 0.5
+# MediaPipe 路径的有效性策略名（写入 meta/config，便于下游区分可信/待标定）。
+MEDIAPIPE_VALIDITY_POLICY: str = "visibility_thr"
+
+
+def derive_valid_mask(landmarks: np.ndarray, thr: float = DEFAULT_VALID_CONF_THR) -> np.ndarray:
+    """集中式有效性判据：``landmarks[..., 3] >= thr``。
+
+    这是把散落在 ``analysis/tech_eval.py`` 与 ``core/rule_scoring.py`` 的
+    ``lm[idx, 3] >= thr`` 风格判据统一收口的唯一入口（YOLO 迁移 Issue #5）。
+    下游一律读返回的 mask，不再各自比较第 4 通道。
+
+    参数
+    ----
+    landmarks:
+        ``(33, 4)`` 单帧或 ``(T, 33, 4)`` 序列。第 4 通道按 ``confidence_kind``
+        语义存储（MediaPipe 为 visibility）。
+    thr:
+        有效阈值。MediaPipe 侧默认 ``0.5``（已标定）。
+
+    返回
+    ----
+    与输入对应的 bool mask：单帧返回 ``(33,)``，序列返回 ``(T, 33)``。
+    其逐元素结果与旧式 ``float(lm[idx, 3]) >= thr`` 完全一致（float32→float64
+    拓宽无精度损失，``0.5`` 在两种精度下均可精确表示）。
+    """
+    arr = np.asarray(landmarks)
+    if arr.ndim not in (2, 3) or arr.shape[-1] < 4:
+        raise ValueError(
+            f"derive_valid_mask 期望 (33,4) 或 (T,33,4) 的关键点数组，实际 shape={arr.shape}"
+        )
+    return arr[..., 3] >= float(thr)
+
 
 def pose_view_score(pose_landmarks) -> float | None:
     """

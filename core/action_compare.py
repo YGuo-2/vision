@@ -11,6 +11,8 @@ import cv2
 import numpy as np
 
 from .pose_features import (
+    DEFAULT_VALID_CONF_THR,
+    derive_valid_mask,
     find_active_range,
     mirror_pose_features,
     motion_energy,
@@ -28,6 +30,15 @@ from .video_writer import open_video_writer
 
 
 ProgressCb = Callable[[str, int, int], None]  # (stage, done, total)
+
+
+def _valid_mask_from_raw(landmarks: np.ndarray, meta: dict) -> np.ndarray:
+    """Return the pose33 valid_mask emitted by raw extraction, deriving only for legacy meta."""
+    mask = meta.get("valid_mask")
+    if mask is not None:
+        return np.asarray(mask, dtype=bool)
+    thr = float(meta.get("valid_conf_thr") or DEFAULT_VALID_CONF_THR)
+    return derive_valid_mask(landmarks, thr)
 
 
 @dataclass(frozen=True)
@@ -827,13 +838,18 @@ def compare_video_to_dual_templates(
                 s = e = None
             else:
                 s, e = int(seg[0]), int(seg[1])
-            raw, _meta = extract_pose_raw(
+            raw, raw_meta = extract_pose_raw(
                 video_path,
                 pose_variant=pv,
                 start_frame=s,
                 end_frame=e,
             )
-            return score_rules(raw, view=view, action_scope=action_scope)
+            return score_rules(
+                raw,
+                view=view,
+                action_scope=action_scope,
+                valid_mask=_valid_mask_from_raw(raw, raw_meta),
+            )
 
         rule_front = _score_rules_for_seg(front_seg, view="front")
         rule_side = _score_rules_for_seg(side_seg, view="side")
@@ -928,24 +944,24 @@ def compare_video_to_dual_templates(
                 mirrored = False
 
             if start_i <= end_i and path:
-                raw, _meta = extract_pose_raw(
+                raw, raw_meta = extract_pose_raw(
                     video_path,
                     pose_variant=pv,
                     start_frame=int(seg_offset),
                     end_frame=int(seg_offset + int(seg_seq.shape[0]) - 1),
                 )
-                thr_vis = 0.5
+                raw_mask = _valid_mask_from_raw(raw, raw_meta)
                 dists: list[list[float]] = [[] for _ in range(num_joints)]
                 for qi, sj in path:
                     qi_i = int(qi)
                     sj_i = int(sj)
                     if qi_i < 0 or qi_i >= int(q_eff.shape[0]) or sj_i < 0 or sj_i >= int(seg_seq.shape[0]):
                         continue
-                    vis = raw[sj_i, src_idx, 3].astype(np.float32)
+                    visible = raw_mask[sj_i, src_idx]
                     a = q_eff[qi_i].astype(np.float32)
                     b = seg_seq[sj_i].astype(np.float32)
                     for k in range(num_joints):
-                        if float(vis[k]) < thr_vis:
+                        if not bool(visible[k]):
                             continue
                         d = float(np.linalg.norm(a[k] - b[k]))
                         if np.isfinite(d):
