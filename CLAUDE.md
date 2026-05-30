@@ -99,5 +99,5 @@ For comparing a student video (containing front+side views) against standard fro
 
 ## 任务完成规范
 
-- **每次完成任务后，必须将修改总结写入 `change.md` 文件**
+- **每次完成任务后，必须将修改总结写入当前 `change.md` 文件；历史记录归档于 `change（start~2026.5）.md`**
 - 记录内容应包括：修改日期、问题描述、修改内容、验证方法

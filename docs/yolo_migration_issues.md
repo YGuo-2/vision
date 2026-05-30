@@ -23,7 +23,7 @@
 ## 约定
 
 - 所有命令以仓库根为工作目录，Python 解释器为 `.\.venv\Scripts\python.exe`。
-- 每个 Issue 完成后，按 `AGENTS.md` 规范把修改总结写入 `change.md`。
+- 每个 Issue 完成后，按 `AGENTS.md` 规范把修改总结写入当前 `change.md`（历史记录见 `change（start~2026.5）.md`）。
 - **测试框架前置（重要）**：当前 `requirements.txt` 只有 `mediapipe/opencv-python/numpy/pillow`，**没有 pytest**；现有 `tests/test_standard_video.py`、`tests/test_force_sequence.py` 是 `if __name__ == "__main__"` 脚本风格。本清单的新增测试需要结构化断言，因此 **#3 必须先把测试框架确定下来**，二选一并在 #3 内落地：
   - 方案 A（推荐）：新增 `requirements-dev.txt` 写入 `pytest`，新测试用 `pytest` 风格，验收命令 `.\.venv\Scripts\python.exe -m pytest tests\xxx.py`。
   - 方案 B：不引入第三方依赖，新测试用标准库 `unittest`，验收命令 `.\.venv\Scripts\python.exe -m unittest tests.xxx`。
