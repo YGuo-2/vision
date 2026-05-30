@@ -8,7 +8,12 @@ from typing import Any, Literal
 import cv2
 import numpy as np
 
-from core.pose_features import pose_view_score
+from core.pose_features import (
+    DEFAULT_VALID_CONF_THR,
+    MEDIAPIPE_VALIDITY_POLICY,
+    derive_valid_mask,
+    pose_view_score,
+)
 from core.vision_pipeline import MediaPipePipeline, PipelineConfig
 
 Status = Literal["合格", "不合格", "无法判定"]
@@ -87,10 +92,6 @@ def _lm_xy(lm: np.ndarray, idx: int) -> np.ndarray:
     return lm[idx, :2].astype(np.float32)
 
 
-def _lm_vis(lm: np.ndarray, idx: int) -> float:
-    return float(lm[idx, 3])
-
-
 def _angle_deg(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> float:
     """Angle ABC in degrees (2D points)."""
     ba = a - b
@@ -101,8 +102,24 @@ def _angle_deg(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> float:
     return float(np.degrees(np.arccos(cosang)))
 
 
-def _valid(lm: np.ndarray, idxs: tuple[int, ...], *, thr: float) -> bool:
-    return all(_lm_vis(lm, i) >= thr for i in idxs)
+def _valid(mask_row: np.ndarray, idxs: tuple[int, ...] | list[int]) -> bool:
+    """该帧给定关键点是否全部可用。
+
+    读取由 ``derive_valid_mask`` 产出的单帧 ``(33,)`` bool 切片，不再现场比较
+    ``lm[idx, 3] >= thr``（阈值只存在于 ``derive_valid_mask``，YOLO 迁移 Issue #5）。
+    """
+    return all(bool(mask_row[i]) for i in idxs)
+
+
+def _resolve_mask(landmarks: np.ndarray, valid_mask: np.ndarray | None, vis_thr: float) -> np.ndarray:
+    """统一解析 ``valid_mask``。
+
+    ``None`` 时由集中式 ``derive_valid_mask`` 按 ``vis_thr`` 现场推导，等价旧式
+    ``visibility >= vis_thr``，保证旧调用方（不传 mask）行为逐位不变。
+    """
+    if valid_mask is None:
+        return derive_valid_mask(landmarks, vis_thr)
+    return np.asarray(valid_mask, dtype=bool)
 
 
 def extract_pose_and_view_scores(
@@ -179,6 +196,11 @@ def extract_pose_and_view_scores(
         "start_frame": int(start_i),
         "end_frame": int(start_i + len(lms) - 1),
         "landmark_layout": "pose33_normalized_xyzw(visibility)",
+        # valid_mask 契约（YOLO 迁移 Issue #5）：声明有效性策略与阈值，便于下游区分
+        # 可信/待标定。本入口的 meta 会被序列化进 JSON 报告，故只落地标量字段；
+        # valid_mask 由下游按同一 `valid_conf_thr` 现场推导（逐位等价）。
+        "validity_policy": MEDIAPIPE_VALIDITY_POLICY,
+        "valid_conf_thr": float(DEFAULT_VALID_CONF_THR),
     }
     return np.stack(lms, axis=0), np.asarray(vs, dtype=np.float32), meta
 
@@ -299,32 +321,32 @@ def _classify_single_view(view_scores: np.ndarray, *, side_thr: float, front_thr
     return "unknown"
 
 
-def _center_x(lm: np.ndarray, idx_a: int, idx_b: int, *, vis_thr: float) -> float | None:
-    va, vb = _lm_vis(lm, idx_a), _lm_vis(lm, idx_b)
+def _center_x(lm: np.ndarray, mask_row: np.ndarray, idx_a: int, idx_b: int) -> float | None:
+    va, vb = bool(mask_row[idx_a]), bool(mask_row[idx_b])
     xa, xb = float(_lm_xy(lm, idx_a)[0]), float(_lm_xy(lm, idx_b)[0])
-    if va >= vis_thr and vb >= vis_thr:
+    if va and vb:
         return 0.5 * (xa + xb)
-    if va >= vis_thr:
+    if va:
         return xa
-    if vb >= vis_thr:
+    if vb:
         return xb
     return None
 
 
-def _frame_dir(lm: np.ndarray, *, vis_thr: float) -> float | None:
-    ref = _center_x(lm, L_HIP, R_HIP, vis_thr=vis_thr)
+def _frame_dir(lm: np.ndarray, mask_row: np.ndarray) -> float | None:
+    ref = _center_x(lm, mask_row, L_HIP, R_HIP)
     if ref is None:
-        ref = _center_x(lm, L_SHOULDER, R_SHOULDER, vis_thr=vis_thr)
+        ref = _center_x(lm, mask_row, L_SHOULDER, R_SHOULDER)
     if ref is None:
         return None
 
     face_x = None
-    if _lm_vis(lm, NOSE) >= vis_thr:
+    if bool(mask_row[NOSE]):
         face_x = float(_lm_xy(lm, NOSE)[0])
     else:
         cand: list[float] = []
         for idx in (MOUTH_L, MOUTH_R, L_EAR, R_EAR):
-            if _lm_vis(lm, idx) >= vis_thr:
+            if bool(mask_row[idx]):
                 cand.append(float(_lm_xy(lm, idx)[0]))
         if cand:
             face_x = float(np.mean(np.asarray(cand, dtype=np.float32)))
@@ -337,33 +359,34 @@ def _frame_dir(lm: np.ndarray, *, vis_thr: float) -> float | None:
     return 1.0 if dx >= 0.0 else -1.0
 
 
-def _foot_edges_x(lm: np.ndarray, *, side: str, dir_x: float, vis_thr: float) -> tuple[float, float] | None:
+def _foot_edges_x(lm: np.ndarray, mask_row: np.ndarray, *, side: str, dir_x: float) -> tuple[float, float] | None:
     if side.upper() == "L":
         heel, toe, ankle = L_HEEL, L_FOOT_INDEX, L_ANKLE
     else:
         heel, toe, ankle = R_HEEL, R_FOOT_INDEX, R_ANKLE
 
-    if _valid(lm, (heel, toe), thr=vis_thr):
+    if _valid(mask_row, (heel, toe)):
         hx = float(_lm_xy(lm, heel)[0]) * float(dir_x)
         tx = float(_lm_xy(lm, toe)[0]) * float(dir_x)
         return (min(hx, tx), max(hx, tx))
 
-    if _lm_vis(lm, ankle) >= vis_thr:
+    if bool(mask_row[ankle]):
         ax = float(_lm_xy(lm, ankle)[0]) * float(dir_x)
         return (ax, ax)
 
     return None
 
 
-def _infer_front_leg_side(landmarks: np.ndarray, *, vis_thr: float, fallback: str = "L") -> str:
+def _infer_front_leg_side(landmarks: np.ndarray, valid_mask: np.ndarray, *, fallback: str = "L") -> str:
     # Determine which ankle tends to be more "forward" (+x) after applying per-frame dir.
     cnt_l = 0
     cnt_r = 0
-    for lm in landmarks:
-        d = _frame_dir(lm, vis_thr=vis_thr)
+    for i, lm in enumerate(landmarks):
+        mask_row = valid_mask[i]
+        d = _frame_dir(lm, mask_row)
         if d is None:
             continue
-        if not _valid(lm, (L_ANKLE, R_ANKLE), thr=vis_thr):
+        if not _valid(mask_row, (L_ANKLE, R_ANKLE)):
             continue
         xl = float(_lm_xy(lm, L_ANKLE)[0]) * float(d)
         xr = float(_lm_xy(lm, R_ANKLE)[0]) * float(d)
@@ -388,6 +411,7 @@ def eval_cog_side(
     trigger_ratio: float = 0.3,
     min_valid_frames: int = 15,
     stance_fallback: str = "L",
+    valid_mask: np.ndarray | None = None,
 ) -> IndicatorResult:
     if landmarks.size == 0:
         detail = {
@@ -397,13 +421,15 @@ def eval_cog_side(
         }
         return IndicatorResult(status="无法判定", reason="无有效帧", detail=detail)
 
-    front_leg = _infer_front_leg_side(landmarks, vis_thr=vis_thr, fallback=stance_fallback)
+    mask = _resolve_mask(landmarks, valid_mask, vis_thr)
+    front_leg = _infer_front_leg_side(landmarks, mask, fallback=stance_fallback)
     back_leg = "R" if front_leg == "L" else "L"
 
     forward = backward = center = unknown = 0
 
-    for lm in landmarks:
-        d = _frame_dir(lm, vis_thr=vis_thr)
+    for i, lm in enumerate(landmarks):
+        mask_row = mask[i]
+        d = _frame_dir(lm, mask_row)
         if d is None:
             unknown += 1
             continue
@@ -415,7 +441,7 @@ def eval_cog_side(
             else:
                 idxs = (R_HIP, R_KNEE, R_ANKLE)
                 hip, knee, ankle = R_HIP, R_KNEE, R_ANKLE
-            if not _valid(lm, idxs, thr=vis_thr):
+            if not _valid(mask_row, idxs):
                 return None
             return _angle_deg(_lm_xy(lm, hip), _lm_xy(lm, knee), _lm_xy(lm, ankle))
 
@@ -433,12 +459,12 @@ def eval_cog_side(
         # Center by knee projection on the front foot.
         if front_leg == "L":
             knee_idx = L_KNEE
-            foot_edges = _foot_edges_x(lm, side="L", dir_x=d, vis_thr=vis_thr)
+            foot_edges = _foot_edges_x(lm, mask_row, side="L", dir_x=d)
         else:
             knee_idx = R_KNEE
-            foot_edges = _foot_edges_x(lm, side="R", dir_x=d, vis_thr=vis_thr)
+            foot_edges = _foot_edges_x(lm, mask_row, side="R", dir_x=d)
 
-        if foot_edges is not None and _lm_vis(lm, knee_idx) >= vis_thr:
+        if foot_edges is not None and bool(mask_row[knee_idx]):
             fb, ff = foot_edges
             foot_len = float(ff - fb)
             if foot_len >= 0.02:
@@ -449,13 +475,13 @@ def eval_cog_side(
                     continue
 
         # Scheme 1: hip projection ratio in the overall support area.
-        hip_x = _center_x(lm, L_HIP, R_HIP, vis_thr=vis_thr)
+        hip_x = _center_x(lm, mask_row, L_HIP, R_HIP)
         if hip_x is None:
             unknown += 1
             continue
 
-        left_edges = _foot_edges_x(lm, side="L", dir_x=d, vis_thr=vis_thr)
-        right_edges = _foot_edges_x(lm, side="R", dir_x=d, vis_thr=vis_thr)
+        left_edges = _foot_edges_x(lm, mask_row, side="L", dir_x=d)
+        right_edges = _foot_edges_x(lm, mask_row, side="R", dir_x=d)
         if left_edges is None or right_edges is None:
             unknown += 1
             continue
@@ -525,6 +551,7 @@ def eval_cog_front(
     ankle_acute_thr: float = 90.0,
     trigger_ratio: float = 0.3,
     min_valid_frames: int = 15,
+    valid_mask: np.ndarray | None = None,
 ) -> IndicatorResult:
     if landmarks.size == 0:
         detail = {
@@ -534,12 +561,14 @@ def eval_cog_front(
         }
         return IndicatorResult(status="无法判定", reason="无有效帧", detail=detail)
 
+    mask = _resolve_mask(landmarks, valid_mask, vis_thr)
     stance = (stance or "left").lower()
     front_leg = "L" if stance == "left" else "R"
 
     forward = backward = center = unknown = 0
 
-    for lm in landmarks:
+    for i, lm in enumerate(landmarks):
+        mask_row = mask[i]
         if front_leg == "L":
             knee_idxs = (L_HIP, L_KNEE, L_ANKLE)
             ankle_idxs = (L_KNEE, L_ANKLE, L_FOOT_INDEX)
@@ -551,9 +580,9 @@ def eval_cog_front(
 
         knee_ang = None
         ankle_ang = None
-        if _valid(lm, knee_idxs, thr=vis_thr):
+        if _valid(mask_row, knee_idxs):
             knee_ang = _angle_deg(_lm_xy(lm, hip), _lm_xy(lm, knee), _lm_xy(lm, ankle))
-        if _valid(lm, ankle_idxs, thr=vis_thr):
+        if _valid(mask_row, ankle_idxs):
             ankle_ang = _angle_deg(_lm_xy(lm, knee), _lm_xy(lm, ankle), _lm_xy(lm, toe))
 
         if knee_ang is None and ankle_ang is None:
@@ -640,18 +669,18 @@ BODY_SEGMENT_MASS_RATIOS = {
 }
 
 
-def _compute_segment_center(lm: np.ndarray, indices: list[int], vis_thr: float = 0.5) -> np.ndarray | None:
+def _compute_segment_center(lm: np.ndarray, mask_row: np.ndarray, indices: list[int]) -> np.ndarray | None:
     """计算身体段的中心点坐标（基于可见关键点）"""
     points = []
     for idx in indices:
-        if _lm_vis(lm, idx) >= vis_thr:
+        if bool(mask_row[idx]):
             points.append(_lm_xy(lm, idx))
     if len(points) == 0:
         return None
     return np.mean(points, axis=0)
 
 
-def _compute_body_com_single(lm: np.ndarray, vis_thr: float = 0.5) -> tuple[np.ndarray | None, dict]:
+def _compute_body_com_single(lm: np.ndarray, mask_row: np.ndarray) -> tuple[np.ndarray | None, dict]:
     """
     计算单帧人体质心（CoM）
     返回: (com_coords, debug_info)
@@ -661,7 +690,7 @@ def _compute_body_com_single(lm: np.ndarray, vis_thr: float = 0.5) -> tuple[np.n
     segment_status = {}
 
     # 头部：使用鼻子和双耳
-    head_center = _compute_segment_center(lm, [NOSE, L_EAR, R_EAR], vis_thr)
+    head_center = _compute_segment_center(lm, mask_row, [NOSE, L_EAR, R_EAR])
     if head_center is not None:
         mass = BODY_SEGMENT_MASS_RATIOS["head"]
         weighted_sum += head_center * mass
@@ -671,7 +700,7 @@ def _compute_body_com_single(lm: np.ndarray, vis_thr: float = 0.5) -> tuple[np.n
         segment_status["head"] = None
 
     # 躯干：质心约在剑突-肚脐之间（偏下约40%，即肩:髋 = 0.6:0.4）
-    if _valid(lm, [L_SHOULDER, R_SHOULDER], thr=vis_thr) and _valid(lm, [L_HIP, R_HIP], thr=vis_thr):
+    if _valid(mask_row, [L_SHOULDER, R_SHOULDER]) and _valid(mask_row, [L_HIP, R_HIP]):
         shoulder_center = (_lm_xy(lm, L_SHOULDER) + _lm_xy(lm, R_SHOULDER)) / 2
         hip_center = (_lm_xy(lm, L_HIP) + _lm_xy(lm, R_HIP)) / 2
         trunk_com = shoulder_center * 0.6 + hip_center * 0.4
@@ -683,7 +712,7 @@ def _compute_body_com_single(lm: np.ndarray, vis_thr: float = 0.5) -> tuple[np.n
         segment_status["trunk"] = None
 
     # 左上臂
-    if _valid(lm, [L_SHOULDER, L_ELBOW], thr=vis_thr):
+    if _valid(mask_row, [L_SHOULDER, L_ELBOW]):
         shoulder = _lm_xy(lm, L_SHOULDER)
         elbow = _lm_xy(lm, L_ELBOW)
         com = (shoulder + elbow) / 2
@@ -695,7 +724,7 @@ def _compute_body_com_single(lm: np.ndarray, vis_thr: float = 0.5) -> tuple[np.n
         segment_status["upper_arm_l"] = None
 
     # 右上臂
-    if _valid(lm, [R_SHOULDER, R_ELBOW], thr=vis_thr):
+    if _valid(mask_row, [R_SHOULDER, R_ELBOW]):
         shoulder = _lm_xy(lm, R_SHOULDER)
         elbow = _lm_xy(lm, R_ELBOW)
         com = (shoulder + elbow) / 2
@@ -707,7 +736,7 @@ def _compute_body_com_single(lm: np.ndarray, vis_thr: float = 0.5) -> tuple[np.n
         segment_status["upper_arm_r"] = None
 
     # 左前臂
-    if _valid(lm, [L_ELBOW, L_WRIST], thr=vis_thr):
+    if _valid(mask_row, [L_ELBOW, L_WRIST]):
         elbow = _lm_xy(lm, L_ELBOW)
         wrist = _lm_xy(lm, L_WRIST)
         com = (elbow + wrist) / 2
@@ -719,7 +748,7 @@ def _compute_body_com_single(lm: np.ndarray, vis_thr: float = 0.5) -> tuple[np.n
         segment_status["forearm_l"] = None
 
     # 右前臂
-    if _valid(lm, [R_ELBOW, R_WRIST], thr=vis_thr):
+    if _valid(mask_row, [R_ELBOW, R_WRIST]):
         elbow = _lm_xy(lm, R_ELBOW)
         wrist = _lm_xy(lm, R_WRIST)
         com = (elbow + wrist) / 2
@@ -731,8 +760,8 @@ def _compute_body_com_single(lm: np.ndarray, vis_thr: float = 0.5) -> tuple[np.n
         segment_status["forearm_r"] = None
 
     # 左手
-    if _valid(lm, [L_WRIST, L_INDEX, L_PINKY], thr=vis_thr):
-        com = _compute_segment_center(lm, [L_WRIST, L_INDEX, L_PINKY], vis_thr)
+    if _valid(mask_row, [L_WRIST, L_INDEX, L_PINKY]):
+        com = _compute_segment_center(lm, mask_row, [L_WRIST, L_INDEX, L_PINKY])
         if com is not None:
             mass = BODY_SEGMENT_MASS_RATIOS["hand_l"]
             weighted_sum += com * mass
@@ -742,8 +771,8 @@ def _compute_body_com_single(lm: np.ndarray, vis_thr: float = 0.5) -> tuple[np.n
         segment_status["hand_l"] = None
 
     # 右手
-    if _valid(lm, [R_WRIST, R_INDEX, R_PINKY], thr=vis_thr):
-        com = _compute_segment_center(lm, [R_WRIST, R_INDEX, R_PINKY], vis_thr)
+    if _valid(mask_row, [R_WRIST, R_INDEX, R_PINKY]):
+        com = _compute_segment_center(lm, mask_row, [R_WRIST, R_INDEX, R_PINKY])
         if com is not None:
             mass = BODY_SEGMENT_MASS_RATIOS["hand_r"]
             weighted_sum += com * mass
@@ -753,7 +782,7 @@ def _compute_body_com_single(lm: np.ndarray, vis_thr: float = 0.5) -> tuple[np.n
         segment_status["hand_r"] = None
 
     # 左大腿
-    if _valid(lm, [L_HIP, L_KNEE], thr=vis_thr):
+    if _valid(mask_row, [L_HIP, L_KNEE]):
         hip = _lm_xy(lm, L_HIP)
         knee = _lm_xy(lm, L_KNEE)
         com = (hip + knee) / 2
@@ -765,7 +794,7 @@ def _compute_body_com_single(lm: np.ndarray, vis_thr: float = 0.5) -> tuple[np.n
         segment_status["thigh_l"] = None
 
     # 右大腿
-    if _valid(lm, [R_HIP, R_KNEE], thr=vis_thr):
+    if _valid(mask_row, [R_HIP, R_KNEE]):
         hip = _lm_xy(lm, R_HIP)
         knee = _lm_xy(lm, R_KNEE)
         com = (hip + knee) / 2
@@ -777,7 +806,7 @@ def _compute_body_com_single(lm: np.ndarray, vis_thr: float = 0.5) -> tuple[np.n
         segment_status["thigh_r"] = None
 
     # 左小腿
-    if _valid(lm, [L_KNEE, L_ANKLE], thr=vis_thr):
+    if _valid(mask_row, [L_KNEE, L_ANKLE]):
         knee = _lm_xy(lm, L_KNEE)
         ankle = _lm_xy(lm, L_ANKLE)
         com = (knee + ankle) / 2
@@ -789,7 +818,7 @@ def _compute_body_com_single(lm: np.ndarray, vis_thr: float = 0.5) -> tuple[np.n
         segment_status["shank_l"] = None
 
     # 右小腿
-    if _valid(lm, [R_KNEE, R_ANKLE], thr=vis_thr):
+    if _valid(mask_row, [R_KNEE, R_ANKLE]):
         knee = _lm_xy(lm, R_KNEE)
         ankle = _lm_xy(lm, R_ANKLE)
         com = (knee + ankle) / 2
@@ -801,8 +830,8 @@ def _compute_body_com_single(lm: np.ndarray, vis_thr: float = 0.5) -> tuple[np.n
         segment_status["shank_r"] = None
 
     # 左脚
-    if _valid(lm, [L_ANKLE, L_HEEL, L_FOOT_INDEX], thr=vis_thr):
-        com = _compute_segment_center(lm, [L_ANKLE, L_HEEL, L_FOOT_INDEX], vis_thr)
+    if _valid(mask_row, [L_ANKLE, L_HEEL, L_FOOT_INDEX]):
+        com = _compute_segment_center(lm, mask_row, [L_ANKLE, L_HEEL, L_FOOT_INDEX])
         if com is not None:
             mass = BODY_SEGMENT_MASS_RATIOS["foot_l"]
             weighted_sum += com * mass
@@ -812,8 +841,8 @@ def _compute_body_com_single(lm: np.ndarray, vis_thr: float = 0.5) -> tuple[np.n
         segment_status["foot_l"] = None
 
     # 右脚
-    if _valid(lm, [R_ANKLE, R_HEEL, R_FOOT_INDEX], thr=vis_thr):
-        com = _compute_segment_center(lm, [R_ANKLE, R_HEEL, R_FOOT_INDEX], vis_thr)
+    if _valid(mask_row, [R_ANKLE, R_HEEL, R_FOOT_INDEX]):
+        com = _compute_segment_center(lm, mask_row, [R_ANKLE, R_HEEL, R_FOOT_INDEX])
         if com is not None:
             mass = BODY_SEGMENT_MASS_RATIOS["foot_r"]
             weighted_sum += com * mass
@@ -838,6 +867,7 @@ def eval_cog_com(
     com_r_front: float = 0.62,
     trigger_ratio: float = 0.3,
     min_valid_frames: int = 15,
+    valid_mask: np.ndarray | None = None,
 ) -> IndicatorResult:
     """
     基于分段质心(CoM)的重心判定（方案3）
@@ -858,18 +888,20 @@ def eval_cog_com(
         }
         return IndicatorResult(status="无法判定", reason="无有效帧", detail=detail)
 
+    mask = _resolve_mask(landmarks, valid_mask, vis_thr)
     forward = backward = center = unknown = 0
     com_ratios = []
 
-    for lm in landmarks:
+    for i, lm in enumerate(landmarks):
+        mask_row = mask[i]
         # 计算该帧CoM
-        com, _info = _compute_body_com_single(lm, vis_thr)
+        com, _info = _compute_body_com_single(lm, mask_row)
 
         if com is None:
             unknown += 1
             continue
 
-        d = _frame_dir(lm, vis_thr=vis_thr)
+        d = _frame_dir(lm, mask_row)
         if d is None:
             unknown += 1
             continue
@@ -877,8 +909,8 @@ def eval_cog_com(
         com_x = float(com[0]) * float(d)
 
         # 计算支撑面边界（两脚heel/toe）
-        left_edges = _foot_edges_x(lm, side="L", dir_x=d, vis_thr=vis_thr)
-        right_edges = _foot_edges_x(lm, side="R", dir_x=d, vis_thr=vis_thr)
+        left_edges = _foot_edges_x(lm, mask_row, side="L", dir_x=d)
+        right_edges = _foot_edges_x(lm, mask_row, side="R", dir_x=d)
         
         if left_edges is None or right_edges is None:
             unknown += 1
@@ -968,6 +1000,7 @@ def eval_retract_speed_side(
     fatal_slow_ratio: float = 0.75,
     min_punches: int = 4,
     max_window_sec: float = 1.0,
+    valid_mask: np.ndarray | None = None,
 ) -> IndicatorResult:
     if landmarks.size == 0:
         detail = {
@@ -976,6 +1009,7 @@ def eval_retract_speed_side(
         }
         return IndicatorResult(status="无法判定", reason="无有效帧", detail=detail)
 
+    mask = _resolve_mask(landmarks, valid_mask, vis_thr)
     events = _detect_retract_events_side(
         landmarks,
         fps=fps,
@@ -985,6 +1019,7 @@ def eval_retract_speed_side(
         ext_forward_dx=ext_forward_dx,
         retract_sec_thr=retract_sec_thr,
         max_window_sec=max_window_sec,
+        valid_mask=mask,
     )
     events = sorted(events, key=lambda d: int(d.get("start") or 0))
 
@@ -1024,7 +1059,9 @@ def _detect_retract_events_side(
     ext_forward_dx: float,
     retract_sec_thr: float,
     max_window_sec: float,
+    valid_mask: np.ndarray | None = None,
 ) -> list[dict[str, Any]]:
+    mask = _resolve_mask(landmarks, valid_mask, vis_thr)
     max_window_frames = int(max(1, round(float(max_window_sec) * float(fps))))
 
     def arm_series(arm: str) -> tuple[np.ndarray, np.ndarray]:
@@ -1037,10 +1074,11 @@ def _detect_retract_events_side(
         dx = np.full_like(ang, np.nan)
 
         for i, lm in enumerate(landmarks):
-            d = _frame_dir(lm, vis_thr=vis_thr)
+            mask_row = mask[i]
+            d = _frame_dir(lm, mask_row)
             if d is None:
                 continue
-            if not _valid(lm, (sh, el, wr), thr=vis_thr):
+            if not _valid(mask_row, (sh, el, wr)):
                 continue
             a = _angle_deg(_lm_xy(lm, sh), _lm_xy(lm, el), _lm_xy(lm, wr))
             ang[i] = float(a)
@@ -1152,7 +1190,11 @@ def _merge_intervals(intervals: list[tuple[int, int]]) -> list[tuple[int, int]]:
     return out
 
 
-def _subset_by_intervals(landmarks: np.ndarray, intervals: list[tuple[int, int]]) -> tuple[np.ndarray, list[tuple[int, int]]]:
+def _subset_by_intervals(
+    landmarks: np.ndarray,
+    intervals: list[tuple[int, int]],
+    valid_mask: np.ndarray | None = None,
+) -> tuple[np.ndarray, list[tuple[int, int]], np.ndarray | None]:
     n = int(landmarks.shape[0])
     clipped: list[tuple[int, int]] = []
     for s, e in intervals:
@@ -1162,11 +1204,14 @@ def _subset_by_intervals(landmarks: np.ndarray, intervals: list[tuple[int, int]]
             clipped.append((s2, e2))
     clipped = _merge_intervals(clipped)
     if not clipped:
-        return np.zeros((0, 33, 4), dtype=np.float32), []
+        empty_mask = None if valid_mask is None else np.zeros((0, 33), dtype=bool)
+        return np.zeros((0, 33, 4), dtype=np.float32), [], empty_mask
     idxs: list[int] = []
     for s, e in clipped:
         idxs.extend(list(range(int(s), int(e) + 1)))
-    return landmarks[np.asarray(idxs, dtype=np.int32)], clipped
+    sel = np.asarray(idxs, dtype=np.int32)
+    sub_mask = None if valid_mask is None else valid_mask[sel]
+    return landmarks[sel], clipped, sub_mask
 
 
 def _detect_extension_events(
@@ -1175,7 +1220,10 @@ def _detect_extension_events(
     fps: float,
     vis_thr: float = 0.5,
     ext_angle_thr: float = 160.0,
+    valid_mask: np.ndarray | None = None,
 ) -> list[dict[str, Any]]:
+    mask = _resolve_mask(landmarks, valid_mask, vis_thr)
+
     def series(arm: str) -> np.ndarray:
         if arm.upper() == "L":
             sh, el, wr = L_SHOULDER, L_ELBOW, L_WRIST
@@ -1183,7 +1231,7 @@ def _detect_extension_events(
             sh, el, wr = R_SHOULDER, R_ELBOW, R_WRIST
         ang = np.full((landmarks.shape[0],), np.nan, dtype=np.float32)
         for i, lm in enumerate(landmarks):
-            if not _valid(lm, (sh, el, wr), thr=vis_thr):
+            if not _valid(mask[i], (sh, el, wr)):
                 continue
             ang[i] = float(_angle_deg(_lm_xy(lm, sh), _lm_xy(lm, el), _lm_xy(lm, wr)))
         return ang
@@ -1246,17 +1294,20 @@ def _eval_cog_side_prefer_punch_windows(
     *, 
     fps: float,
     use_com: bool = False,
+    valid_mask: np.ndarray | None = None,
 ) -> tuple[IndicatorResult, IndicatorResult | None]:
     """
     侧面重心评估（优先出拳窗口）
     
     Args:
         use_com: 是否同时返回CoM（方案3）评估结果
+        valid_mask: ``(T,33)`` 有效性掩码，``None`` 时现场推导（行为不变）。
     
     Returns:
         (主评估结果, CoM评估结果或None)
     """
-    seg_res = eval_cog_side(landmarks, fps=fps, stance_fallback="L")
+    mask = _resolve_mask(landmarks, valid_mask, DEFAULT_VALID_CONF_THR)
+    seg_res = eval_cog_side(landmarks, fps=fps, stance_fallback="L", valid_mask=mask)
     events = _detect_retract_events_side(
         landmarks,
         fps=fps,
@@ -1266,6 +1317,7 @@ def _eval_cog_side_prefer_punch_windows(
         ext_forward_dx=0.02,
         retract_sec_thr=0.2,
         max_window_sec=1.0,
+        valid_mask=mask,
     )
     
     com_res: IndicatorResult | None = None
@@ -1275,7 +1327,7 @@ def _eval_cog_side_prefer_punch_windows(
             seg_res.detail["eval_scope"] = "segment"
         # 无出拳事件时，全段使用CoM评估
         if use_com:
-            com_res = eval_cog_com(landmarks, fps=fps)
+            com_res = eval_cog_com(landmarks, fps=fps, valid_mask=mask)
         return seg_res, com_res
 
     pre = int(round(0.3 * float(fps)))
@@ -1290,10 +1342,10 @@ def _eval_cog_side_prefer_punch_windows(
             end = min(n - 1, s + int(round(1.0 * float(fps))))
         intervals.append((s - pre, int(end) + post))
 
-    subset, used = _subset_by_intervals(landmarks, intervals)
+    subset, used, subset_mask = _subset_by_intervals(landmarks, intervals, mask)
     
     # 方案1+2：基于髋部/膝角的评估
-    win_res = eval_cog_side(subset, fps=fps, stance_fallback="L")
+    win_res = eval_cog_side(subset, fps=fps, stance_fallback="L", valid_mask=subset_mask)
     if win_res.detail is not None:
         win_res.detail["eval_scope"] = "punch_windows"
         win_res.detail["punch_windows"] = used
@@ -1301,7 +1353,7 @@ def _eval_cog_side_prefer_punch_windows(
     
     # 方案3：基于分段质心的评估（出拳窗口）
     if use_com:
-        com_res = eval_cog_com(subset, fps=fps)
+        com_res = eval_cog_com(subset, fps=fps, valid_mask=subset_mask)
         if com_res.detail is not None:
             com_res.detail["eval_scope"] = "punch_windows"
             com_res.detail["punch_windows"] = used
@@ -1328,6 +1380,7 @@ def eval_wrist_angle(
     wrist_align_thr: float = 175.0,
     wrist_ok_ratio: float = 0.7,
     min_events: int = 2,
+    valid_mask: np.ndarray | None = None,
 ) -> IndicatorResult:
     if landmarks.size == 0:
         detail = {
@@ -1336,7 +1389,8 @@ def eval_wrist_angle(
         }
         return IndicatorResult(status="无法判定", reason="无有效帧", detail=detail)
 
-    events = _detect_extension_events(landmarks, fps=fps, vis_thr=vis_thr, ext_angle_thr=ext_angle_thr)
+    mask = _resolve_mask(landmarks, valid_mask, vis_thr)
+    events = _detect_extension_events(landmarks, fps=fps, vis_thr=vis_thr, ext_angle_thr=ext_angle_thr, valid_mask=mask)
     if len(events) < int(min_events):
         detail = {
             "primary_cause": "出拳次数不足",
@@ -1361,7 +1415,7 @@ def eval_wrist_angle(
                 el, wr, idx, pk = L_ELBOW, L_WRIST, L_INDEX, L_PINKY
             else:
                 el, wr, idx, pk = R_ELBOW, R_WRIST, R_INDEX, R_PINKY
-            if not _valid(lm, (el, wr, idx, pk), thr=vis_thr):
+            if not _valid(mask[i], (el, wr, idx, pk)):
                 continue
             mid = (_lm_xy(lm, idx) + _lm_xy(lm, pk)) * 0.5
             a = _angle_deg(_lm_xy(lm, el), _lm_xy(lm, wr), mid)
@@ -1414,28 +1468,33 @@ def eval_force_sequence(
     step_post_sec: float = 0.4,
     rotation_var_thr: float = 1820.0,
     rotation_min_frames: int = 12,
+    front_valid_mask: np.ndarray | None = None,
+    side_valid_mask: np.ndarray | None = None,
 ) -> IndicatorResult:
-    def _foot_center_x(lm: np.ndarray, side: str) -> float | None:
+    front_mask = _resolve_mask(front_landmarks, front_valid_mask, vis_thr)
+    side_mask = _resolve_mask(side_landmarks, side_valid_mask, vis_thr)
+
+    def _foot_center_x(lm: np.ndarray, mask_row: np.ndarray, side: str) -> float | None:
         if side.upper() == "L":
             heel, toe = L_HEEL, L_FOOT_INDEX
         else:
             heel, toe = R_HEEL, R_FOOT_INDEX
-        if not _valid(lm, (heel, toe), thr=vis_thr):
+        if not _valid(mask_row, (heel, toe)):
             return None
         return float((_lm_xy(lm, heel)[0] + _lm_xy(lm, toe)[0]) * 0.5)
 
-    def _foot_angle_deg(lm: np.ndarray, side: str) -> float | None:
+    def _foot_angle_deg(lm: np.ndarray, mask_row: np.ndarray, side: str) -> float | None:
         if side.upper() == "L":
             heel, toe = L_HEEL, L_FOOT_INDEX
         else:
             heel, toe = R_HEEL, R_FOOT_INDEX
-        if not _valid(lm, (heel, toe), thr=vis_thr):
+        if not _valid(mask_row, (heel, toe)):
             return None
         a = _lm_xy(lm, heel)
         b = _lm_xy(lm, toe)
         return float(np.degrees(np.arctan2(float(b[1] - a[1]), float(b[0] - a[0]))))
 
-    def _rotation_fail_front(lms: np.ndarray) -> tuple[bool, dict[str, Any]]:
+    def _rotation_fail_front(lms: np.ndarray, lms_mask: np.ndarray) -> tuple[bool, dict[str, Any]]:
         detail: dict[str, Any] = {
             "rotation_fail": False,
             "rotation_var_l": None,
@@ -1449,8 +1508,8 @@ def eval_force_sequence(
 
         def _series(side: str) -> np.ndarray:
             vals: list[float] = []
-            for lm in lms:
-                v = _foot_angle_deg(lm, side)
+            for i in range(int(lms.shape[0])):
+                v = _foot_angle_deg(lms[i], lms_mask[i], side)
                 if v is None or not np.isfinite(v):
                     continue
                 vals.append(float(v))
@@ -1481,7 +1540,7 @@ def eval_force_sequence(
         detail["rotation_fail"] = bool(fail)
         return bool(fail), detail
 
-    rotation_fail, rotation_detail = _rotation_fail_front(front_landmarks)
+    rotation_fail, rotation_detail = _rotation_fail_front(front_landmarks, front_mask)
     if rotation_fail:
         detail = {
             "events_total": 0,
@@ -1516,20 +1575,21 @@ def eval_force_sequence(
         ext_forward_dx=0.02,
         retract_sec_thr=0.2,
         max_window_sec=1.0,
+        valid_mask=side_mask,
     )
     if not events:
         detail = {"primary_cause": "未检测到出拳", "events": []}
         return IndicatorResult(status="无法判定", reason="发力顺序：未检测到出拳", detail=detail)
 
-    front_leg = _infer_front_leg_side(side_landmarks, vis_thr=vis_thr, fallback=("L" if (stance or "left").lower() == "left" else "R"))
+    front_leg = _infer_front_leg_side(side_landmarks, side_mask, fallback=("L" if (stance or "left").lower() == "left" else "R"))
     back_leg = "R" if front_leg == "L" else "L"
 
     def _wrap_deg(x: float) -> float:
         y = (float(x) + 180.0) % 360.0 - 180.0
         return float(y)
 
-    def _twist_deg(lm: np.ndarray) -> float | None:
-        if not _valid(lm, (L_SHOULDER, R_SHOULDER, L_HIP, R_HIP), thr=vis_thr):
+    def _twist_deg(lm: np.ndarray, mask_row: np.ndarray) -> float | None:
+        if not _valid(mask_row, (L_SHOULDER, R_SHOULDER, L_HIP, R_HIP)):
             return None
         ls = _lm_xy(lm, L_SHOULDER)
         rs = _lm_xy(lm, R_SHOULDER)
@@ -1539,20 +1599,20 @@ def eval_force_sequence(
         ha = float(np.degrees(np.arctan2(float(rh[1] - lh[1]), float(rh[0] - lh[0]))))
         return abs(_wrap_deg(sa - ha))
 
-    def _shoulder_drive(lm: np.ndarray, arm: str) -> float | None:
-        d = _frame_dir(lm, vis_thr=vis_thr)
+    def _shoulder_drive(lm: np.ndarray, mask_row: np.ndarray, arm: str) -> float | None:
+        d = _frame_dir(lm, mask_row)
         if d is None:
             return None
         if arm.upper() == "L":
             sh = L_SHOULDER
         else:
             sh = R_SHOULDER
-        if not _valid(lm, (sh, L_HIP, R_HIP), thr=vis_thr):
+        if not _valid(mask_row, (sh, L_HIP, R_HIP)):
             return None
         hip_x = float((_lm_xy(lm, L_HIP)[0] + _lm_xy(lm, R_HIP)[0]) * 0.5)
         return (float(_lm_xy(lm, sh)[0]) - hip_x) * float(d)
 
-    def _push_off_ok(lm: np.ndarray) -> bool | None:
+    def _push_off_ok(lm: np.ndarray, mask_row: np.ndarray) -> bool | None:
         """检测蹬地动作：后脚脚跟明显抬高 + 膝盖参与伸展发力。
         
         真正的蹬地特征：
@@ -1566,7 +1626,7 @@ def eval_force_sequence(
             heel, toe, hip, knee, ankle = R_HEEL, R_FOOT_INDEX, R_HIP, R_KNEE, R_ANKLE
         
         # 检查基本可见性
-        if not _valid(lm, (heel, toe, knee, ankle), thr=vis_thr):
+        if not _valid(mask_row, (heel, toe, knee, ankle)):
             return None
         
         # 1. 脚跟明显抬高检测
@@ -1594,13 +1654,13 @@ def eval_force_sequence(
         
         return heel_lift_ok and knee_ok
 
-    def _calc_heel_lift(lm: np.ndarray) -> float | None:
+    def _calc_heel_lift(lm: np.ndarray, mask_row: np.ndarray) -> float | None:
         """计算后脚脚跟抬高程度（dy / |dx| 的比例，范围 0~1+）。"""
         if back_leg == "L":
             heel, toe = L_HEEL, L_FOOT_INDEX
         else:
             heel, toe = R_HEEL, R_FOOT_INDEX
-        if not _valid(lm, (heel, toe), thr=vis_thr):
+        if not _valid(mask_row, (heel, toe)):
             return None
         heel_xy = _lm_xy(lm, heel)
         toe_xy = _lm_xy(lm, toe)
@@ -1610,13 +1670,13 @@ def eval_force_sequence(
             return 0.0
         return dy / (abs(dx) + 1e-6)
     
-    def _calc_knee_angle(lm: np.ndarray) -> float | None:
+    def _calc_knee_angle(lm: np.ndarray, mask_row: np.ndarray) -> float | None:
         """计算后腿膝盖角度。"""
         if back_leg == "L":
             hip, knee, ankle = L_HIP, L_KNEE, L_ANKLE
         else:
             hip, knee, ankle = R_HIP, R_KNEE, R_ANKLE
-        if not _valid(lm, (hip, knee, ankle), thr=vis_thr):
+        if not _valid(mask_row, (hip, knee, ankle)):
             return None
         return _angle_deg(_lm_xy(lm, hip), _lm_xy(lm, knee), _lm_xy(lm, ankle))
 
@@ -1633,13 +1693,14 @@ def eval_force_sequence(
         t_punch = int(e.get("start") or 0)
         s = max(0, t_punch - pre)
         lm_pre = side_landmarks[s : t_punch + 1]
+        mask_pre = side_mask[s : t_punch + 1]
         if lm_pre.size == 0:
             continue
 
         # 1. 首先尝试静态检测（单帧是否符合蹬地姿态）
         t_push = None
         for j in range(lm_pre.shape[0]):
-            ok_push = _push_off_ok(lm_pre[j])
+            ok_push = _push_off_ok(lm_pre[j], mask_pre[j])
             if ok_push is None:
                 continue
             if bool(ok_push):
@@ -1649,8 +1710,8 @@ def eval_force_sequence(
         # 2. 如果静态检测失败，尝试动态检测（脚跟是否有明显抬高趋势）
         push_dynamic_score = 0.0
         if t_push is None and lm_pre.shape[0] >= 5:
-            heel_lifts = [_calc_heel_lift(lm_pre[j]) for j in range(lm_pre.shape[0])]
-            knee_angles = [_calc_knee_angle(lm_pre[j]) for j in range(lm_pre.shape[0])]
+            heel_lifts = [_calc_heel_lift(lm_pre[j], mask_pre[j]) for j in range(lm_pre.shape[0])]
+            knee_angles = [_calc_knee_angle(lm_pre[j], mask_pre[j]) for j in range(lm_pre.shape[0])]
             
             # 寻找脚跟抬高的趋势：早期低 -> 晚期高
             valid_lifts = [(j, v) for j, v in enumerate(heel_lifts) if v is not None]
@@ -1683,7 +1744,7 @@ def eval_force_sequence(
 
         twists: list[tuple[int, float]] = []
         for j in range(lm_pre.shape[0]):
-            v = _twist_deg(lm_pre[j])
+            v = _twist_deg(lm_pre[j], mask_pre[j])
             if v is None:
                 continue
             twists.append((int(s + j), float(v)))
@@ -1696,7 +1757,7 @@ def eval_force_sequence(
 
         drives: list[tuple[int, float]] = []
         for j in range(lm_pre.shape[0]):
-            v = _shoulder_drive(lm_pre[j], arm)
+            v = _shoulder_drive(lm_pre[j], mask_pre[j], arm)
             if v is None:
                 continue
             drives.append((int(s + j), float(v)))
@@ -1717,22 +1778,25 @@ def eval_force_sequence(
         t_front_step_100 = None
         t_back_step_start = None
         step_ok = None
-        def _foot_series(lms: np.ndarray, side: str) -> np.ndarray:
+        def _foot_series(lms: np.ndarray, lms_mask: np.ndarray, side: str) -> np.ndarray:
             xs = np.full((lms.shape[0],), np.nan, dtype=np.float32)
             for i in range(lms.shape[0]):
                 lm = lms[i]
-                d = _frame_dir(lm, vis_thr=vis_thr)
+                mask_row = lms_mask[i]
+                d = _frame_dir(lm, mask_row)
                 if d is None:
                     continue
-                cx = _foot_center_x(lm, side)
+                cx = _foot_center_x(lm, mask_row, side)
                 if cx is None:
                     continue
                 xs[i] = float(cx) * float(d)
             return xs
 
-        lm_post = side_landmarks[t_punch : min(int(side_landmarks.shape[0]), int(t_punch + post_step + 1))]
-        front_x_pre = _foot_series(lm_pre, front_leg)
-        back_x_post = _foot_series(lm_post, back_leg) if lm_post.size > 0 else np.zeros((0,), dtype=np.float32)
+        post_end = min(int(side_landmarks.shape[0]), int(t_punch + post_step + 1))
+        lm_post = side_landmarks[t_punch : post_end]
+        mask_post = side_mask[t_punch : post_end]
+        front_x_pre = _foot_series(lm_pre, mask_pre, front_leg)
+        back_x_post = _foot_series(lm_post, mask_post, back_leg) if lm_post.size > 0 else np.zeros((0,), dtype=np.float32)
 
         def _first_idx(vals: np.ndarray, thr: float) -> int | None:
             for i in range(int(vals.size)):
@@ -1936,9 +2000,14 @@ def _evaluate_from_arrays(
     stance: str,
     view_hint: str,
     keep_detail: bool,
+    valid_mask: np.ndarray | None = None,
 ) -> TechEvalResult:
     fps = float(meta.get("fps") or 30.0)
     view_hint = (view_hint or "auto").lower()
+    # valid_mask 契约（YOLO 迁移 Issue #5）：在视频级入口解析一次，按段切片下发。
+    # `None` 时按 meta 的 `valid_conf_thr`（缺省 0.5）现场推导，逐位等价旧行为。
+    mask_thr = float(meta.get("valid_conf_thr") or DEFAULT_VALID_CONF_THR)
+    full_mask = _resolve_mask(landmarks, valid_mask, mask_thr)
 
     if view_hint in ("front", "side"):
         if view_hint == "front":
@@ -1957,27 +2026,39 @@ def _evaluate_from_arrays(
 
     front_lm = landmarks[slice(front_seg[0], front_seg[1] + 1)] if front_seg is not None else np.zeros((0, 33, 4), dtype=np.float32)
     side_lm = landmarks[slice(side_seg[0], side_seg[1] + 1)] if side_seg is not None else np.zeros((0, 33, 4), dtype=np.float32)
+    front_mask = full_mask[slice(front_seg[0], front_seg[1] + 1)] if front_seg is not None else np.zeros((0, 33), dtype=bool)
+    side_mask = full_mask[slice(side_seg[0], side_seg[1] + 1)] if side_seg is not None else np.zeros((0, 33), dtype=bool)
 
     # 重心评估：方案1+2（侧面优先）+ 方案3（CoM分段质心）
     cog_com: IndicatorResult | None = None
     if side_seg is not None:
-        cog_side, cog_com = _eval_cog_side_prefer_punch_windows(side_lm, fps=fps, use_com=True)
+        cog_side, cog_com = _eval_cog_side_prefer_punch_windows(side_lm, fps=fps, use_com=True, valid_mask=side_mask)
     else:
         cog_side = IndicatorResult(status="无法判定", reason="侧面段缺失")
         # 无侧面段时，全段使用CoM评估作为参考
-        cog_com = eval_cog_com(landmarks, fps=fps)
+        cog_com = eval_cog_com(landmarks, fps=fps, valid_mask=full_mask)
     if front_seg is not None:
-        cog_front = eval_cog_front(front_lm, fps=fps, stance=str(stance))
+        cog_front = eval_cog_front(front_lm, fps=fps, stance=str(stance), valid_mask=front_mask)
     else:
         cog_front = IndicatorResult(status="无法判定", reason="正面段缺失")
     cog_final = cog_side if cog_side.status != "无法判定" else cog_front
 
-    retract = eval_retract_speed_side(side_lm, fps=fps) if side_seg is not None else IndicatorResult(status="无法判定", reason="侧面段缺失")
+    retract = eval_retract_speed_side(side_lm, fps=fps, valid_mask=side_mask) if side_seg is not None else IndicatorResult(status="无法判定", reason="侧面段缺失")
 
-    wrist_src = side_lm if side_seg is not None else front_lm
-    wrist = eval_wrist_angle(wrist_src, fps=fps) if wrist_src.size != 0 else IndicatorResult(status="无法判定", reason="无有效帧")
+    if side_seg is not None:
+        wrist_src, wrist_mask = side_lm, side_mask
+    else:
+        wrist_src, wrist_mask = front_lm, front_mask
+    wrist = eval_wrist_angle(wrist_src, fps=fps, valid_mask=wrist_mask) if wrist_src.size != 0 else IndicatorResult(status="无法判定", reason="无有效帧")
 
-    force = eval_force_sequence(front_lm, side_lm, fps=fps, stance=str(stance))
+    force = eval_force_sequence(
+        front_lm,
+        side_lm,
+        fps=fps,
+        stance=str(stance),
+        front_valid_mask=front_mask,
+        side_valid_mask=side_mask,
+    )
 
     if not keep_detail:
         def strip_detail(r: IndicatorResult) -> IndicatorResult:
@@ -2015,6 +2096,7 @@ def evaluate_video_assets(
     pose_variant: str = "full",
     stance: str = "left",
     view_hint: str = "auto",
+    valid_mask: np.ndarray | None = None,
 ) -> tuple[TechEvalResult, np.ndarray, np.ndarray, dict[str, Any]]:
     landmarks, view_scores, meta = extract_pose_and_view_scores(video_path, pose_variant=str(pose_variant))
     res = _evaluate_from_arrays(
@@ -2025,6 +2107,7 @@ def evaluate_video_assets(
         stance=str(stance),
         view_hint=str(view_hint),
         keep_detail=True,
+        valid_mask=valid_mask,
     )
     return res, landmarks, view_scores, meta
 
@@ -2035,8 +2118,11 @@ def evaluate_video_detail(
     pose_variant: str = "full",
     stance: str = "left",
     view_hint: str = "auto",
+    valid_mask: np.ndarray | None = None,
 ) -> TechEvalResult:
-    res, _lm, _vs, _meta = evaluate_video_assets(video_path, pose_variant=pose_variant, stance=stance, view_hint=view_hint)
+    res, _lm, _vs, _meta = evaluate_video_assets(
+        video_path, pose_variant=pose_variant, stance=stance, view_hint=view_hint, valid_mask=valid_mask
+    )
     return res
 
 
@@ -2046,8 +2132,11 @@ def evaluate_video(
     pose_variant: str = "full",
     stance: str = "left",
     view_hint: str = "auto",
+    valid_mask: np.ndarray | None = None,
 ) -> TechEvalResult:
-    detail = evaluate_video_detail(video_path, pose_variant=pose_variant, stance=stance, view_hint=view_hint)
+    detail = evaluate_video_detail(
+        video_path, pose_variant=pose_variant, stance=stance, view_hint=view_hint, valid_mask=valid_mask
+    )
 
     def strip(r: IndicatorResult) -> IndicatorResult:
         return IndicatorResult(status=r.status, reason=r.reason, detail=None)
@@ -2075,8 +2164,11 @@ def evaluate_video_full(
     pose_variant: str = "full",
     stance: str = "left",
     view_hint: str = "auto",
+    valid_mask: np.ndarray | None = None,
 ) -> dict[str, Any]:
-    res, _landmarks, _view_scores, meta = evaluate_video_assets(video_path, pose_variant=pose_variant, stance=stance, view_hint=view_hint)
+    res, _landmarks, _view_scores, meta = evaluate_video_assets(
+        video_path, pose_variant=pose_variant, stance=stance, view_hint=view_hint, valid_mask=valid_mask
+    )
     return {
         "video_path": str(video_path),
         "pose_variant": str(pose_variant),

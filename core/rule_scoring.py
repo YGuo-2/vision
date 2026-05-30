@@ -7,6 +7,11 @@ from typing import Callable
 import cv2
 import numpy as np
 
+from .pose_features import (
+    DEFAULT_VALID_CONF_THR,
+    MEDIAPIPE_VALIDITY_POLICY,
+    derive_valid_mask,
+)
 from .vision_pipeline import MediaPipePipeline, PipelineConfig
 
 
@@ -45,7 +50,7 @@ class Rule:
     view: str  # "front" | "side" | "any"
     action: str  # "stance" | "punch" | "both"
     trigger_ratio: float
-    check_fn: Callable[[np.ndarray], tuple[np.ndarray, np.ndarray, str]]
+    check_fn: Callable[[np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray, str]]
 
 
 @dataclass(frozen=True)
@@ -70,10 +75,6 @@ def _lm_xy(lm: np.ndarray, idx: int) -> np.ndarray:
     return lm[idx, :2].astype(np.float32)
 
 
-def _lm_vis(lm: np.ndarray, idx: int) -> float:
-    return float(lm[idx, 3])
-
-
 def _angle_deg(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> float:
     """计算 ABC 夹角（度），适用于 2D 点。"""
     ba = a - b
@@ -90,8 +91,13 @@ def _torso_len(lm: np.ndarray) -> float:
     return float(np.linalg.norm(sh - hip) + 1e-9)
 
 
-def _valid_frame(lm: np.ndarray, idxs: tuple[int, ...], thr: float = 0.5) -> bool:
-    return all(_lm_vis(lm, i) >= thr for i in idxs)
+def _valid_frame(mask_row: np.ndarray, idxs: tuple[int, ...]) -> bool:
+    """该帧给定关键点是否全部可用。
+
+    读取由 ``derive_valid_mask`` 产出的单帧 ``(33,)`` bool 切片，不再现场比较
+    ``lm[idx, 3] >= thr``（阈值只存在于 ``derive_valid_mask``，YOLO 迁移 Issue #5）。
+    """
+    return all(bool(mask_row[i]) for i in idxs)
 
 
 def extract_pose_raw(
@@ -157,6 +163,9 @@ def extract_pose_raw(
     if not out:
         raise RuntimeError(f"未能从视频提取姿态：{video_path}")
 
+    landmarks = np.stack(out, axis=0)
+    # valid_mask 由集中式 helper 灌入（MediaPipe 路径：visibility >= 0.5）。
+    valid_mask = derive_valid_mask(landmarks, DEFAULT_VALID_CONF_THR)
     meta = {
         "video": str(video_path),
         "fps": float(fps),
@@ -167,16 +176,20 @@ def extract_pose_raw(
         "start_frame": int(start_i),
         "end_frame": int(start_i + len(out) - 1),
         "landmark_layout": "pose33_normalized_xyzw(visibility)",
+        # valid_mask 契约（YOLO 迁移 Issue #5）：MediaPipe 侧 0.5 视为已标定。
+        "validity_policy": MEDIAPIPE_VALIDITY_POLICY,
+        "valid_conf_thr": float(DEFAULT_VALID_CONF_THR),
+        "valid_mask": valid_mask,
     }
-    return np.stack(out, axis=0), meta
+    return landmarks, meta
 
 
-def _rule_elbow_front_arm_range(landmarks: np.ndarray) -> tuple[np.ndarray, np.ndarray, str]:
+def _rule_elbow_front_arm_range(landmarks: np.ndarray, valid_mask: np.ndarray) -> tuple[np.ndarray, np.ndarray, str]:
     """前手大小臂夹角 90-135 度（允许左右任一手满足）。"""
     valid = np.zeros((landmarks.shape[0],), dtype=bool)
     viol = np.zeros_like(valid)
     for i, lm in enumerate(landmarks):
-        if not _valid_frame(lm, (L_SHOULDER, L_ELBOW, L_WRIST, R_SHOULDER, R_ELBOW, R_WRIST)):
+        if not _valid_frame(valid_mask[i], (L_SHOULDER, L_ELBOW, L_WRIST, R_SHOULDER, R_ELBOW, R_WRIST)):
             continue
         valid[i] = True
         ang_l = _angle_deg(_lm_xy(lm, L_SHOULDER), _lm_xy(lm, L_ELBOW), _lm_xy(lm, L_WRIST))
@@ -186,12 +199,12 @@ def _rule_elbow_front_arm_range(landmarks: np.ndarray) -> tuple[np.ndarray, np.n
     return viol, valid, "前手肘角需在90-135度"
 
 
-def _rule_fist_height_near_nose(landmarks: np.ndarray) -> tuple[np.ndarray, np.ndarray, str]:
+def _rule_fist_height_near_nose(landmarks: np.ndarray, valid_mask: np.ndarray) -> tuple[np.ndarray, np.ndarray, str]:
     """拳峰高度与鼻尖同高（允许误差，使用归一化距离近似）。"""
     valid = np.zeros((landmarks.shape[0],), dtype=bool)
     viol = np.zeros_like(valid)
     for i, lm in enumerate(landmarks):
-        if not _valid_frame(lm, (NOSE, L_WRIST, R_WRIST)):
+        if not _valid_frame(valid_mask[i], (NOSE, L_WRIST, R_WRIST)):
             continue
         valid[i] = True
         nose_y = _lm_xy(lm, NOSE)[1]
@@ -204,12 +217,12 @@ def _rule_fist_height_near_nose(landmarks: np.ndarray) -> tuple[np.ndarray, np.n
     return viol, valid, "拳峰高度需与鼻尖接近"
 
 
-def _rule_back_arm_close(landmarks: np.ndarray) -> tuple[np.ndarray, np.ndarray, str]:
+def _rule_back_arm_close(landmarks: np.ndarray, valid_mask: np.ndarray) -> tuple[np.ndarray, np.ndarray, str]:
     """后手贴近肋骨与下颌（近似：手腕靠近嘴部，肘部靠近躯干）。"""
     valid = np.zeros((landmarks.shape[0],), dtype=bool)
     viol = np.zeros_like(valid)
     for i, lm in enumerate(landmarks):
-        if not _valid_frame(lm, (MOUTH_L, MOUTH_R, L_ELBOW, L_WRIST, R_ELBOW, R_WRIST, L_SHOULDER, R_SHOULDER, L_HIP, R_HIP)):
+        if not _valid_frame(valid_mask[i], (MOUTH_L, MOUTH_R, L_ELBOW, L_WRIST, R_ELBOW, R_WRIST, L_SHOULDER, R_SHOULDER, L_HIP, R_HIP)):
             continue
         valid[i] = True
         mouth = 0.5 * (_lm_xy(lm, MOUTH_L) + _lm_xy(lm, MOUTH_R))
@@ -225,12 +238,12 @@ def _rule_back_arm_close(landmarks: np.ndarray) -> tuple[np.ndarray, np.ndarray,
     return viol, valid, "后手应贴近下颌并靠近躯干"
 
 
-def _rule_knee_slight_bend(landmarks: np.ndarray) -> tuple[np.ndarray, np.ndarray, str]:
+def _rule_knee_slight_bend(landmarks: np.ndarray, valid_mask: np.ndarray) -> tuple[np.ndarray, np.ndarray, str]:
     """双膝微曲（膝角过直视为违规）。"""
     valid = np.zeros((landmarks.shape[0],), dtype=bool)
     viol = np.zeros_like(valid)
     for i, lm in enumerate(landmarks):
-        if not _valid_frame(lm, (L_HIP, L_KNEE, L_ANKLE, R_HIP, R_KNEE, R_ANKLE)):
+        if not _valid_frame(valid_mask[i], (L_HIP, L_KNEE, L_ANKLE, R_HIP, R_KNEE, R_ANKLE)):
             continue
         valid[i] = True
         ang_l = _angle_deg(_lm_xy(lm, L_HIP), _lm_xy(lm, L_KNEE), _lm_xy(lm, L_ANKLE))
@@ -239,12 +252,12 @@ def _rule_knee_slight_bend(landmarks: np.ndarray) -> tuple[np.ndarray, np.ndarra
     return viol, valid, "膝关节应微曲（过直扣分）"
 
 
-def _rule_stance_width(landmarks: np.ndarray) -> tuple[np.ndarray, np.ndarray, str]:
+def _rule_stance_width(landmarks: np.ndarray, valid_mask: np.ndarray) -> tuple[np.ndarray, np.ndarray, str]:
     """两脚间距≈肩宽（允许一定比例波动）。"""
     valid = np.zeros((landmarks.shape[0],), dtype=bool)
     viol = np.zeros_like(valid)
     for i, lm in enumerate(landmarks):
-        if not _valid_frame(lm, (L_ANKLE, R_ANKLE, L_SHOULDER, R_SHOULDER)):
+        if not _valid_frame(valid_mask[i], (L_ANKLE, R_ANKLE, L_SHOULDER, R_SHOULDER)):
             continue
         valid[i] = True
         foot_w = float(np.linalg.norm(_lm_xy(lm, L_ANKLE) - _lm_xy(lm, R_ANKLE)))
@@ -257,12 +270,12 @@ def _rule_stance_width(landmarks: np.ndarray) -> tuple[np.ndarray, np.ndarray, s
     return viol, valid, "站距应接近肩宽"
 
 
-def _rule_feet_parallel(landmarks: np.ndarray) -> tuple[np.ndarray, np.ndarray, str]:
+def _rule_feet_parallel(landmarks: np.ndarray, valid_mask: np.ndarray) -> tuple[np.ndarray, np.ndarray, str]:
     """两脚基本平行（用脚尖方向夹角近似）。"""
     valid = np.zeros((landmarks.shape[0],), dtype=bool)
     viol = np.zeros_like(valid)
     for i, lm in enumerate(landmarks):
-        if not _valid_frame(lm, (L_HEEL, L_FOOT_INDEX, R_HEEL, R_FOOT_INDEX)):
+        if not _valid_frame(valid_mask[i], (L_HEEL, L_FOOT_INDEX, R_HEEL, R_FOOT_INDEX)):
             continue
         valid[i] = True
         v_l = _lm_xy(lm, L_FOOT_INDEX) - _lm_xy(lm, L_HEEL)
@@ -277,12 +290,12 @@ def _rule_feet_parallel(landmarks: np.ndarray) -> tuple[np.ndarray, np.ndarray, 
     return viol, valid, "双脚方向应基本平行"
 
 
-def _rule_punch_elbow_straight(landmarks: np.ndarray) -> tuple[np.ndarray, np.ndarray, str]:
+def _rule_punch_elbow_straight(landmarks: np.ndarray, valid_mask: np.ndarray) -> tuple[np.ndarray, np.ndarray, str]:
     """直拳出拳时肘应接近伸直（只在“出拳帧”评估）。"""
     valid = np.zeros((landmarks.shape[0],), dtype=bool)
     viol = np.zeros_like(valid)
     for i, lm in enumerate(landmarks):
-        if not _valid_frame(lm, (L_SHOULDER, L_ELBOW, L_WRIST, R_SHOULDER, R_ELBOW, R_WRIST, L_HIP, R_HIP)):
+        if not _valid_frame(valid_mask[i], (L_SHOULDER, L_ELBOW, L_WRIST, R_SHOULDER, R_ELBOW, R_WRIST, L_HIP, R_HIP)):
             continue
         torso = _torso_len(lm)
         ext_l = np.linalg.norm(_lm_xy(lm, L_WRIST) - _lm_xy(lm, L_SHOULDER)) / torso
@@ -299,12 +312,12 @@ def _rule_punch_elbow_straight(landmarks: np.ndarray) -> tuple[np.ndarray, np.nd
     return viol, valid, "出拳时肘应接近伸直"
 
 
-def _rule_guard_hand(landmarks: np.ndarray) -> tuple[np.ndarray, np.ndarray, str]:
+def _rule_guard_hand(landmarks: np.ndarray, valid_mask: np.ndarray) -> tuple[np.ndarray, np.ndarray, str]:
     """直拳时另一手应保持护颌（近似：手腕靠近嘴部）。"""
     valid = np.zeros((landmarks.shape[0],), dtype=bool)
     viol = np.zeros_like(valid)
     for i, lm in enumerate(landmarks):
-        if not _valid_frame(lm, (MOUTH_L, MOUTH_R, L_SHOULDER, R_SHOULDER, L_WRIST, R_WRIST, L_HIP, R_HIP)):
+        if not _valid_frame(valid_mask[i], (MOUTH_L, MOUTH_R, L_SHOULDER, R_SHOULDER, L_WRIST, R_WRIST, L_HIP, R_HIP)):
             continue
         torso = _torso_len(lm)
         ext_l = np.linalg.norm(_lm_xy(lm, L_WRIST) - _lm_xy(lm, L_SHOULDER)) / torso
@@ -341,15 +354,22 @@ def score_rules(
     view: str,
     action_scope: str,
     min_valid: int = 5,
+    valid_mask: np.ndarray | None = None,
 ) -> RuleScore:
     """
     对单段视频关键点进行规则评分。
     - view: "front" | "side"，用于过滤只适用于某视角的规则
     - action_scope: "stance" | "punch" | "both"
     - min_valid: 单条规则至少需要的有效帧数（不足则标记“未评估”）
+    - valid_mask: ``(T,33)`` 有效性掩码（YOLO 迁移 Issue #5）。``None`` 时由
+      ``derive_valid_mask`` 现场推导（等价旧式 ``visibility >= 0.5``），保证旧调用方
+      （含 ``compare_video_to_dual_templates`` 内部 ``extract_pose_raw`` 调用）行为不变。
     """
     view = (view or "front").lower()
     action_scope = (action_scope or "both").lower()
+
+    if valid_mask is None:
+        valid_mask = derive_valid_mask(landmarks, DEFAULT_VALID_CONF_THR)
 
     deductions = 0
     violations: list[RuleViolation] = []
@@ -359,7 +379,7 @@ def score_rules(
             continue
         if action_scope != "both" and rule.action != action_scope:
             continue
-        viol, valid, detail = rule.check_fn(landmarks)
+        viol, valid, detail = rule.check_fn(landmarks, valid_mask)
         valid_cnt = int(valid.sum())
         if valid_cnt < min_valid:
             violations.append(
