@@ -1333,3 +1333,20 @@ git diff -- docs/yolo_migration_plan_optimized.md change.md
 
 - 纯文档与 GitHub Issue 元数据修订，无源码改动。
 - 通过 `rg` 检查本地文档关键口径；通过 `gh issue view` 复核 #7/#10/#11/#12 已同步。
+
+## 2026-05-30: 默认分支从 master 迁移到 main
+
+### 问题描述
+
+仓库当前本地与 GitHub 默认分支均为 `master`，需要统一迁移为更常用的 `main`。
+
+### 修改内容
+
+- 本地分支 `master` 重命名为 `main`。
+- 推送 `main` 到远端并设置为本地 upstream。
+- 将 GitHub 仓库 `YGuo-2/vision` 默认分支切换为 `main`。
+- 删除远端旧分支 `master`。
+
+### 验证方法
+
+- 使用 `git status -sb`、`git branch --show-current`、`gh repo view`、`git ls-remote --heads origin` 验证本地分支、远端分支与 GitHub 默认分支状态。
