@@ -1154,3 +1154,182 @@ gh repo view YGuo-2/vision --json nameWithOwner,url,isPrivate
 git remote -v
 git push -u origin master
 ```
+
+## 2026-05-29: 审批并优化 YOLO 迁移方案副本
+
+### 问题描述
+
+需要对 `docs/yolo_migration_plan.md` 进行多角度审批，检查是否存在更优路线、过度设计、遗漏风险，并在优化到可执行方案后另存副本。
+
+### 修改内容
+
+- 新增 `docs/yolo_migration_plan_optimized.md`：
+  - 汇总三个子 agent 的架构、精简落地、验证覆盖审查结论。
+  - 将原 P0-P6 大迁移改为 S0-S6：先决策 spike、再 layout 隔离、再最薄 YOLO 离线闭环。
+  - 明确保留 `MediaPipePipeline` 兼容入口，避免过早抽象完整后端协议。
+  - 新增 `FrameResult`、`extract_landmark_series()`、`FeatureLayoutSpec` 建议，解决 `(T,22,2)` 硬编码和缺失点污染 DTW 的风险。
+  - 将 Hybrid 补点、UI 后端选择、默认切换后置。
+  - 补充规则/技术评估的结构化未评估状态、验证矩阵、替代方案决策和外部事实边界。
+
+### 验证方法
+
+```powershell
+Get-Content -LiteralPath docs/yolo_migration_plan_optimized.md -Raw
+git diff -- docs/yolo_migration_plan_optimized.md change.md
+```
+
+### 结果
+
+已保留原迁移文档不动，并另存优化版副本；本次只修改文档，未运行代码测试。
+
+## 2026-05-30: YOLO 迁移计划文档二次复审与修订
+
+### 问题描述
+
+对 `docs/yolo_migration_plan_optimized.md` 做对照代码的二次复审。首轮审查方向正确，但存在两处措辞过硬、三条风险需固化。本次按代码事实收敛结论并落到文档。
+
+### 修改内容
+
+**文件**: `docs/yolo_migration_plan_optimized.md`
+
+#### 维持并强化的三条风险
+
+1. **S0 前移做 go/no-go**：YOLO-only（COCO17）缺脚跟脚尖、嘴角，会让重心支撑面退化为单踝、发力顺序蹬地/脚旋转判定失效、后手贴近/护手无法判定。已将“核心指标降级是否业务可接受”提升为 S0 显式任务、验收项与停止条件，不再拖到 S3/S4。代码佐证：`analysis/tech_eval.py` 的 `eval_cog_side`/`_foot_edges_x`（约 340-353）、`eval_force_sequence` 的 `_push_off_ok`/`_calc_heel_lift`/`_foot_angle_deg`/`_rotation_fail_front`（约 1418-1436、1555-1595）。
+2. **补 `_select_representative_cycle` 漏项**：`core/action_compare.py`（约 337-343）写死 `if features.shape[1:] != (22, 2): return features`，`body_core_v1`(12,2) 会静默跳过周期裁切、query 退化成整段模板且不报错。已写入“当前代码事实”、S1 任务清单，并新增回归测试建议 `tests/test_representative_cycle_layout.py`。
+3. **第 4 通道 / valid_mask 契约固化**：明确 `landmarks[...,3]` 按 `confidence_kind` 区分语义，`valid_mask[T,33]` 为唯一可用判据，下游须从读 `lm[idx,3]>=0.5` 迁移到读 mask。
+
+#### 收敛措辞的两处（首轮过硬）
+
+4. **`FrameResult`/`Landmark` 不是结构性错误**：它是兼容边界上的合理结果容器。约束改为“不得进入序列提取热路径”（逐帧构造冻结对象有分配开销、与 `(T,33,4)` numpy 契约割裂），并把 `source`/`model_name`/`keypoint_source`/`confidence_kind` 等常量字段移出逐帧容器、只进 `meta`。
+5. **段内 track_id 不是逻辑冲突**：文档已声明 `persist=True` 仅段内有效，问题是“段边界语义需写清”。S2 改为单人 MVP（最高分/最大框取单人），完整多人 track 策略推后；并要求把段边界 track_id 重置语义写进 metadata/注释。
+
+#### 其他
+
+- `rule_scoring.py` 收敛为“半结构化”：已有 `RuleScore`/`RuleViolation`，S4 改为补 `state`/`skip_reason` 字段，不推倒重来。
+- `FeatureLayoutSpec.required_landmarks` 延后到 S4 引入，S1 不带未使用字段。
+- S5 Hybrid 显式提示性能收益可能被抵消，要求 S0 即初判是否值得做。
+- 文档头部新增“二次复审修订摘要（2026-05-30）”与复审日期。
+
+### 验证方法
+
+- 文档类改动，无代码变更，无需编译/运行测试。
+- 已通读修订后全文，确认各阶段（S0/S1/S2/S4/S5）结论自洽、与 `core/action_compare.py`、`core/rule_scoring.py`、`analysis/tech_eval.py` 的当前实现一致。
+
+## 2026-05-30: YOLO 迁移文档第三次审查修订
+
+### 问题描述
+
+`docs/yolo_migration_plan_optimized.md` 经第三轮代码核对后，发现六处需要收口或补强：
+
+- 二审措辞“YOLO 绝对不能碰 tech_eval”过头，且未把“YOLO-only 不是 full tech_eval 候选”提为首页默认前提
+- `valid_mask` 迁移被当成一条 bullet，低估了 `tech_eval._valid`(约 104 行)/`rule_scoring._valid_frame`(约 93 行) 几十处调用面的重构成本
+- S0/S3 的 go/no-go 仍用“业务可接受/明显劣于/可用于评分”等主观词，缺数字阈值
+- S1 改热路径但验收只有 `py_compile` + layout 测试，缺“默认行为不变”的 golden 回归
+- S1 在 S0 可能毙掉的前提下就引入 `body_core_v1` normalizer/baseline，属提前建模
+- `confidence_kind` 只命名未落地为可消费的阈值策略
+- S2 仍“最大框取单人”，对学员批量视频（教练/路人/镜面入镜）有正确性风险
+- 实时链路前置写成无条件，未区分迁移动机
+
+### 修改内容
+
+**文件**: `docs/yolo_migration_plan_optimized.md`
+
+1. 顶部新增「三审修订摘要」八条，并加三审日期。
+2. 「审批结论」前新增**「默认前提（可证伪）」**节：YOLO 三档定位表（预览/模板匹配/skip-aware partial/full eval），明确 full eval 默认排除但可被 S0 数据推翻。
+3. 序列提取层 `valid_mask` 契约补 `validity_policy`/`valid_conf_thr` 字段及“S3 标定前 YOLO 阈值为待标定参数、禁止进正式评分”的时序约束。
+4. S0 新增「迁移动机判定」（实时 FPS → 必测 `annotate()` 全链路；离线 → 维持离线先行）与「预注册量化阈值表」，停止条件全部对照数字。
+5. S1 拆为 **S1a 防御性修复**（layout shape 参数化 + `_select_representative_cycle()` 静默退化修复）与 **S1b valid_mask 契约迁移**（逐位等价回归）；新增 `test_pose33_v3_golden.py`、`test_valid_mask_migration.py`；`body_core_v1` 下移 S2。
+6. S2 新增「多人闸门」（`num_persons>1` → `multi_person_detected` + 拒绝/降级人工复核）及 `body_core_v1` 引入（从 S1 下移）。
+7. S3 补「可用于评分」的预注册数字判据表（分数相关性、pass/fail 一致率、MAE、skip 比例等），并标定 YOLO `valid_conf_thr`。
+8. 「最小完成定义」更新为 8 条，纳入 golden 回归、valid_mask 等价、多人闸门、预注册阈值。
+
+### 验证方法
+
+- 纯文档修订，无代码改动；通过通读确认各阶段交叉引用一致（S1↔S2 的 `body_core_v1` 归属、S2↔S3 的 `valid_conf_thr` 标定衔接、首页前提与 S0 推翻条件呼应）。
+- 文档中所引代码事实（`_select_representative_cycle` 的 (22,2) 守卫、`_valid`/`_valid_frame` 阈值风格、tech_eval 对 heel/foot_index/mouth 的依赖、各包 `Path(__file__)/models`）均已对照当前仓库代码核实。
+
+## 2026-05-30: YOLO 迁移任务细化（Issue 清单）
+
+### 问题描述
+
+需要把 `docs/yolo_migration_plan_optimized.md`（三审定稿）的 S0–S6 阶段拆成可逐条提交到仓库的 Issue，每个含任务名、明细、规范、清单、验收标准。
+
+### 修改内容
+
+**文件**: `docs/yolo_migration_issues.md`（新建）
+
+- 中间粒度拆分，S0–S4 共 11 个实施 Issue，每个五段式（明细/规范/清单/验收）+ 阶段/类型标签 + 依赖关系。
+- 关键排序：#3 `pose33_v3` golden 基线先于 #4/#5 重构落地，作为“默认行为不变”的安全网；#4（layout 参数化+周期裁切修复）与 #5（valid_mask 迁移）并行。
+- `body_core_v1` 从 S1 下移到 #8（S2），与文档三审拆层一致。
+- S2 多人闸门独立为 #9；S3 标定含 YOLO `valid_conf_thr` 标定与预注册数字判据（#10）；S4 结构化状态分级（#11）。
+- S5/S6 作为后置决策阶段说明，注明暂不拆细原因（依赖 S3 数字结论）。
+- 附 mermaid 依赖图与 M0–M4 里程碑建议。
+
+### 验证方法
+
+- 纯文档，无代码改动。
+- 逐条核对 Issue 依赖关系与文档阶段定义一致（golden 先行、valid_mask 专项、body_core_v1 归属 S2、多人闸门、S0/S3 预注册阈值）。
+
+## 2026-05-30: YOLO 迁移 Issue 清单契约细节修订（第二轮审查）
+
+### 问题描述
+
+对 `docs/yolo_migration_issues.md` 的审查指出 10 处会在开工时卡住的契约细节，均成立。
+
+### 修改内容
+
+**文件**: `docs/yolo_migration_issues.md`
+
+1. （审查#5-pytest）核实 `requirements.txt` 无 pytest、现有测试是 `__main__` 脚本风格；约定部分新增「测试框架前置」，#3 二选一（pytest+requirements-dev.txt / unittest）。
+2. （审查#5）#5 valid_mask 补 API 传播边界：所有公开/半公开函数（`extract_pose_raw`/`extract_pose_and_view_scores`/`evaluate_video_*`/`score_rules`/`eval_*`）新增 `valid_mask: np.ndarray | None = None`，None 时由集中式 `derive_valid_mask` 推导，保证旧调用不炸；三方一致回归。
+3. （审查#2）#7 解决 synthetic 与序列热路径冲突：序列层只返回 numpy + valid_mask，`synthetic=True` 限定在 adapter 边界层断言，必要时另加 `synthetic_mask[T,33]`。
+4. （审查#3）#4 非 22 点测试改用 test-only dummy layout / 直接构造 `(T,12,2)`，`_select_representative_cycle` 泛化为只依赖 `shape[1:]`，不依赖 `body_core_v1` 注册。
+5. （审查#4）#4 “无残留字面量 22”软化为“热路径不得硬编码 shape 魔法值，注册定义/测试期望/注释除外”。
+6. （审查#6）#2 任务清单补实时动机显式步骤：动机为实时 FPS 时必须单独跑 `annotate()` 全链路、Hands 开/关两档。
+7. （审查#7）#8 标明 YOLO 分数仅供调试/标定，metadata 标 `calibration_status=unvalidated`，不进对外报告。
+8. （审查#8）#11 加 #10 结论分流前置：仅当“可 skip-aware partial eval”才实现 YOLO 评估分级，否则只做 MediaPipe 结构化状态改造或转 S5/S6。
+9. （审查#9）#6 任务清单补统一 `outputs/` root（含 app_ui/batch 各自输出路径）。
+10. （审查#10）#2 降级清单补 `eval_cog_com` 的足部分段依赖（第三套重心方案）。
+
+### 验证方法
+
+- 纯文档修订，无代码改动。
+- 核实点：`requirements.txt` 仅 mediapipe/opencv-python/numpy/pillow（无 pytest）；`tests/` 现有文件为 `__main__` 脚本风格。据此确定测试框架前置项。
+
+## 2026-05-30: YOLO 迁移仓库追踪落地（Issue/Milestone）+ 文档索引
+
+### 问题描述
+
+把 `docs/yolo_migration_issues.md` 的 11 个任务正式提到仓库，并补充组织结构（里程碑 + 总追踪），同时让文档与 AGENTS.md 与仓库对得上。
+
+### 修改内容
+
+- **仓库（YGuo-2/vision）**：
+  - 创建 11 个标签（`yolo-migration` + `S0`–`S4` + `spike`/`refactor`/`test`/`feature`/`infra`）。
+  - 创建实施 Issue #1–#11（中文，编号与文档「Issue #N」一一对应）。
+  - 创建 5 个 Milestone：M0 决策门(#1 #2)、M1 MediaPipe 加固(#3–#6)、M2 YOLO 离线闭环(#7–#9)、M3 标定与分级(#10 #11)、M4 决策与扩展(空)。
+  - 创建 Tracking Issue #12（分组清单 + mermaid 依赖图 + 关键提醒，子勾随子 Issue 关闭自动更新）。
+- **文件 `docs/yolo_migration_issues.md`**：顶部新增「仓库追踪索引」，列出 #12、#1–#11、M0–M4 映射。
+- **文件 `AGENTS.md`**：新增「YOLO 迁移任务（进行中）」段，含文档/Issue 索引、S0–S4 阶段概览、给后续 agent 的硬约束（旧路径不变、YOLO 非 full tech_eval 候选、valid_mask 统一判据、未标定分数不外发）。
+
+### 验证方法
+
+- `gh issue list` 确认 #1–#12 齐全；`gh api .../milestones` 确认计数 M0=2 / M1=4 / M2=3 / M3=2 / M4=0。
+- 纯文档/仓库元数据操作，无源码改动。
+
+## 2026-05-30: YOLO 迁移 Issue 清单清晰度优化
+
+### 问题描述
+
+复审发现已创建的 YOLO 迁移 Issue 整体明确，但仍有几处容易造成执行歧义：S3 pass/fail 判定口径未预注册、#11 前置分流不是可勾选检查项、#12 追踪勾选“自动更新”说法超过当前仓库自动化能力、#7 标题与本地文档符号不完全一致。
+
+### 修改内容
+
+- **文件 `docs/yolo_migration_issues.md`**：修正追踪索引的子任务勾选说明；#10 补 pass/fail 判定口径、阈值/标签来源和样本范围预注册要求；#11 前置条件改为可勾选清单。
+- **文件 `docs/yolo_migration_plan_optimized.md`**：S3 同步补 pass/fail 判定口径预注册要求，并在验收中要求报告记录口径、阈值/标签来源和样本范围。
+- **仓库 Issue（YGuo-2/vision）**：同步优化 #7 标题、#10/#11/#12 正文，保证 GitHub Issue 与本地文档一致。
+
+### 验证方法
+
+- 纯文档与 GitHub Issue 元数据修订，无源码改动。
+- 通过 `rg` 检查本地文档关键口径；通过 `gh issue view` 复核 #7/#10/#11/#12 已同步。
