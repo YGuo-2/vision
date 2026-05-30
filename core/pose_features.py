@@ -2,6 +2,12 @@ from __future__ import annotations
 
 import numpy as np
 
+from .feature_layout import (
+    FeatureLayoutSpec,
+    get_layout,
+    resolve_layout_by_shape,
+)
+
 
 def pose_view_score(pose_landmarks) -> float | None:
     """
@@ -58,32 +64,63 @@ def pose_view_score(pose_landmarks) -> float | None:
     return s
 
 
-def mirror_pose_features(features: np.ndarray) -> np.ndarray:
+def mirror_pose_features(
+    features: np.ndarray,
+    *,
+    layout: FeatureLayoutSpec | str | None = None,
+) -> np.ndarray:
     """
     Mirror normalized pose features along the X axis and swap left/right joints.
 
-    Input: (T,22,2) or (22,2) for BlazePose indices 11..32.
+    Input: ``(T, J, 2)`` or ``(J, 2)``. 左右互换按 layout 的 ``mirror_pairs`` 进行，
+    不再写死 22 点配对。
+
+    layout 解析顺序：
+      1. 显式传入的 ``layout``（``FeatureLayoutSpec`` 或已注册布局名）。
+      2. 未传时按单帧 shape 反查唯一匹配的已注册布局
+         （``pose33_v3`` 的 ``(22, 2)`` 即走此路径，行为与旧实现一致）。
+      3. 仍无法解析则报清晰错误，不静默按 22 点处理。
     """
+    if features.ndim not in (2, 3):
+        raise ValueError(f"Unsupported features shape: {features.shape}")
+
+    frame_shape = features.shape if features.ndim == 2 else features.shape[1:]
+
+    spec: FeatureLayoutSpec | None
+    if isinstance(layout, FeatureLayoutSpec):
+        spec = layout
+    elif isinstance(layout, str):
+        spec = get_layout(layout)
+    else:
+        spec = resolve_layout_by_shape(tuple(int(x) for x in frame_shape))
+
+    if spec is None:
+        raise ValueError(
+            f"无法为单帧 shape {tuple(int(x) for x in frame_shape)} 解析 feature layout；"
+            "请显式传入 layout 名或注册对应布局。"
+        )
+    if tuple(int(x) for x in frame_shape) != tuple(int(x) for x in spec.shape):
+        raise ValueError(
+            f"features 单帧 shape {tuple(int(x) for x in frame_shape)} 与 layout "
+            f"{spec.name!r} 的 shape {tuple(spec.shape)} 不一致"
+        )
+
     if features.ndim == 2:
         x = features.copy()
         x[:, 0] *= -1.0
-        # Swap pairs (0,1), (2,3), ... in-place via a temp copy.
         y = x.copy()
-        for a in range(0, 22, 2):
-            y[a] = x[a + 1]
-            y[a + 1] = x[a]
+        for a, b in spec.mirror_pairs:
+            y[a] = x[b]
+            y[b] = x[a]
         return y
 
-    if features.ndim == 3:
-        x = features.copy()
-        x[:, :, 0] *= -1.0
-        y = x.copy()
-        for a in range(0, 22, 2):
-            y[:, a] = x[:, a + 1]
-            y[:, a + 1] = x[:, a]
-        return y
-
-    raise ValueError(f"Unsupported features shape: {features.shape}")
+    x = features.copy()
+    x[:, :, 0] *= -1.0
+    y = x.copy()
+    for a, b in spec.mirror_pairs:
+        y[:, a] = x[:, b]
+        y[:, b] = x[:, a]
+    return y
 
 
 def normalize_pose_xy_v1(pose_landmarks) -> np.ndarray | None:
