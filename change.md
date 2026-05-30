@@ -44,6 +44,33 @@
 
 ---
 
+## 2026-05-30: PR #16 审查补强 - 双模板关节误差接入 valid_mask
+
+### 问题描述
+
+审查 PR #16 时发现 `core/action_compare.py` 的双模板关节误差统计仍直接读取
+`raw[..., 3]` 并在局部使用 `0.5` 阈值过滤可见点；规则评分入口虽已兼容 `valid_mask`，
+但外层调用没有把 `extract_pose_raw` 产出的 mask 传入。这会让 #5 的有效性合约在双模板路径
+留下一个绕行点。
+
+### 修改内容
+
+- 在 `core/action_compare.py` 新增 `_valid_mask_from_raw()`，优先使用 `extract_pose_raw` 的
+  `meta["valid_mask"]`，仅兼容旧 meta 时才按 `valid_conf_thr`/默认阈值调用 `derive_valid_mask`。
+- 双模板规则评分显式把 raw mask 传给 `score_rules`。
+- 双模板关节误差统计改为读取 raw mask 的 `source_indices` 切片，不再局部读取
+  `raw[..., 3]` 或维护独立可见度阈值。
+
+### 验证方法
+
+- `.\.venv\Scripts\python.exe -m pytest tests\test_valid_mask_migration.py tests\test_pose33_v3_golden.py`
+  → 31 passed。
+- `.\.venv\Scripts\python.exe -m py_compile .\apps\main.py .\apps\app_ui.py .\core\vision_pipeline.py .\core\pose_features.py .\core\rule_scoring.py .\core\action_compare.py .\analysis\tech_eval.py`
+  → 通过。
+- `.\.venv\Scripts\python.exe -m pytest tests` → 51 passed。
+
+---
+
 ## 2026-05-30: 变更日志归档与重建
 
 ### 问题描述
