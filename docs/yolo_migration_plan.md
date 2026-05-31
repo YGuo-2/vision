@@ -172,9 +172,12 @@ Hybrid 模式命名：
 - `mediapipe_full`：Pose33 + Hands，旧行为。
 - `yolo_body`：YOLO body only，最快，但规则不完整。
 - `yolo_body_mp_hands`：YOLO body + MediaPipe Hands，实时主链路候选。
-- `yolo_body_mp_pose_supplement`：YOLO body + MediaPipe Pose 补脚/脸，仅离线规则或技术评估候选。
+- `yolo_body_mp_pose_supplement`：已由 Issue #27 / `docs/yolo_gpu_recheck_report.md`
+  supersede；当前不实现，只保留为未来满足触发条件后另开实现子任务的历史命名。
 
-注意：MediaPipe Pose 补脚/脸不是轻量补点，实际仍要跑完整 PoseLandmarker。性能验收未通过前，不应默认在实时链路开启。
+注意：MediaPipe Pose 补脚/脸不是轻量补点，实际仍要跑完整 PoseLandmarker。Issue #27
+已基于 GPU 复测 no-go、S0 CPU speedup=0.41 和 COCO17 结构性缺点作出决议：当前不实现
+Hybrid，也不在代码库保留半成品 runtime 路径。
 
 ## 分阶段实施计划
 
@@ -268,16 +271,19 @@ Hybrid 模式命名：
 - 为 `Rule` 增加 `required_landmarks` 和 `required_capabilities`。
 - `score_rules()` 输出每条规则的状态：`evaluated`、`skipped_missing_landmarks`、`skipped_low_confidence`。
 - `extract_pose_raw()` 和 `analysis.extract_pose_and_view_scores()` 接受 backend/supplement 配置。
-- 将 `analysis/tech_eval.py` 的指标按 YOLO-only、Hybrid、MediaPipe-full 三档声明可用性。
-- 实现 `yolo_body_mp_pose_supplement`，只在离线规则/技术评估明确开启时跑 MediaPipe Pose。
+- 将 `analysis/tech_eval.py` 的指标按 YOLO-only、MediaPipe-full，以及“未来可能另开任务评估的
+  Hybrid”三档声明可用性；当前实现不得依赖 Hybrid。
+- 不实现 `yolo_body_mp_pose_supplement`。该项已由 Issue #27 / GPU 复测报告 supersede；
+  若未来要恢复，必须另开实现子任务并先满足 #27 的 CUDA 有效复测、Hybrid 专用 benchmark、
+  补点指标恢复证据等触发条件。
 
 注意：
 - 有效帧不足和关键点缺失要区分，避免把“无法评估”当成合格或不合格。
-- 补点模式会带来第二个 pose detector，必须记录耗时。
+- 补点模式会带来第二个 pose detector；当前不实现。未来另开实现子任务时必须先记录并验收额外耗时。
 
 验收标准：
 - YOLO-only 下可评估规则正常输出，不可评估规则有明确原因。
-- Hybrid 补充模式下脚尖/脚跟相关规则能恢复评估。
+- 当前不实现 Hybrid 补充模式；脚尖/脚跟相关规则缺失时必须输出未评估原因，不能伪造成有效点。
 - 技术评估 UI/CSV/JSONL 包含规则完整度和未评估原因。
 - 同一视频 MediaPipe 旧路径回归不退化。
 
@@ -309,12 +315,13 @@ Hybrid 模式命名：
 负责人：算法/产品/工程共同。
 
 任务：
-- 在标准动作和学员样本上跑 MediaPipe vs YOLO vs Hybrid 回归。
+- 在标准动作和学员样本上跑 MediaPipe vs YOLO 回归；Hybrid 已由 Issue #27 决议为当前不实现，
+  仅能在未来另开实现子任务后再纳入回归。
 - 标定 `body_core_v1` 的 DTW baseline 和规则阈值。
 - 统计 CPU/GPU FPS、初始化时间、显存/内存、失败帧率。
 - 决定默认后端：
   - 实时预览可默认 `yolo_body_mp_hands`，前提是 FPS 和许可达标。
-  - 规则/技术评估默认仍可使用 `mediapipe_full` 或 Hybrid，前提是结果稳定。
+  - 规则/技术评估默认仍使用 `mediapipe_full`；Hybrid 当前不实现，未来若恢复必须先另开实现子任务并重新决策。
 
 注意：
 - 默认切换必须有回滚开关。

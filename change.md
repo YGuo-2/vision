@@ -27,6 +27,36 @@ git diff --check
 
 ---
 
+## 2026-05-31: PR #31 审查补强 — Hybrid 决议同步迁移计划文档
+
+### 问题描述
+
+子 agent 审查 PR #31 时指出：虽然 GPU 复测报告已明确 Issue #27 当前不实现
+`yolo_body_mp_pose_supplement`，但 `docs/yolo_migration_plan.md` 与
+`docs/yolo_migration_plan_optimized.md` 仍保留“后置实现 Hybrid / 离线显式 Hybrid”的旧计划表述，
+可能误导后续 agent 或开发者继续实现已被 supersede 的路径。
+
+### 修改内容
+
+- `docs/yolo_migration_plan.md`：将 Hybrid 命名、P4、P6 中的旧实现表述同步为 Issue #27
+  决议：当前不实现，不保留半成品 runtime；未来必须另开实现子任务并满足 CUDA 有效复测、
+  Hybrid 专用 benchmark、补点指标恢复证据等触发条件。
+- `docs/yolo_migration_plan_optimized.md`：将 S5 与“审批后删减 / 后置项”表格同步为
+  Issue #27 supersede 结论，避免继续描述为“后置到 S5 且离线显式开启”。
+- `tests/test_s5_hybrid_decision.py`：新增计划文档一致性回归，锁住两个计划文档必须引用
+  Issue #27 / GPU 复测报告、写明当前不实现和未来另开实现子任务，并禁止旧 Hybrid 实现承诺回流。
+
+### 验证方法
+
+```powershell
+E:\CodeProject\vision\.venv\Scripts\python.exe -m pytest tests\test_s5_hybrid_decision.py -q
+E:\CodeProject\vision\.venv\Scripts\python.exe -m pytest tests -q
+E:\CodeProject\vision\.venv\Scripts\python.exe -m py_compile tests\test_s5_hybrid_decision.py
+git diff --check
+```
+
+---
+
 ## 2026-05-31: PR #30 审查补强 — batch_export_skeleton 已存在输出 meta 透传
 
 ### 问题描述
