@@ -194,11 +194,50 @@ def _write_manifest(rows: Iterable[dict], out_path: Path) -> None:
     rows = list(rows)
     if not rows:
         return
+    fieldnames: list[str] = []
+    for row in rows:
+        for key in row.keys():
+            if key not in fieldnames:
+                fieldnames.append(key)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8-sig", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        w = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         w.writeheader()
         w.writerows(rows)
+
+
+def _manifest_row(
+    *,
+    rel_parent: Path,
+    video_path: Path,
+    npz_path: Path,
+    skel_video_path: Path | None,
+    pose_variant: str,
+    meta: dict | None = None,
+) -> dict:
+    meta = dict(meta or {})
+    row = {
+        "action": str(rel_parent),
+        "video_name": video_path.name,
+        "source_video": str(video_path),
+        "skeleton_npz": str(npz_path),
+        "skeleton_video": "" if skel_video_path is None else str(skel_video_path),
+        "pose_variant": str(pose_variant),
+        "fps": meta.get("fps", ""),
+        "frame_count": meta.get("frame_count", ""),
+        "width": meta.get("width", ""),
+        "height": meta.get("height", ""),
+    }
+    row.update(csv_meta_fields(meta))
+    return row
+
+
+def _read_npz_meta(path: Path) -> dict:
+    try:
+        data = np.load(path, allow_pickle=True)
+        return dict(data["meta"].item() or {})
+    except Exception:  # noqa: BLE001 - stale/corrupt skipped files still get a manifest row.
+        return {}
 
 
 def main() -> None:
@@ -254,14 +293,14 @@ def main() -> None:
             if npz_path.exists() and (skel_video_path is None or skel_video_path.exists()):
                 print(f"[{idx}/{len(videos)}] Skip (exists): {video_path}")
                 manifest_rows.append(
-                    {
-                        "action": str(rel_parent),
-                        "video_name": video_path.name,
-                        "source_video": str(video_path),
-                        "skeleton_npz": str(npz_path),
-                        "skeleton_video": "" if skel_video_path is None else str(skel_video_path),
-                        "pose_variant": str(args.pose),
-                    }
+                    _manifest_row(
+                        rel_parent=rel_parent,
+                        video_path=video_path,
+                        npz_path=npz_path,
+                        skel_video_path=skel_video_path,
+                        pose_variant=str(args.pose),
+                        meta=_read_npz_meta(npz_path),
+                    )
                 )
                 continue
 
@@ -288,19 +327,14 @@ def main() -> None:
             np.savez_compressed(npz_path, features=features, meta=np.array(meta, dtype=object))
 
         manifest_rows.append(
-            {
-                "action": str(rel_parent),
-                "video_name": video_path.name,
-                "source_video": str(video_path),
-                "skeleton_npz": str(npz_path),
-                "skeleton_video": "" if skel_video_path is None else str(skel_video_path),
-                "pose_variant": str(args.pose),
-                "fps": float(meta.get("fps", 0.0)),
-                "frame_count": int(meta.get("frame_count", 0)),
-                "width": int(meta.get("width", 0)),
-                "height": int(meta.get("height", 0)),
-                **({} if is_default_pose33_path(backend, feature_layout) else csv_meta_fields(meta)),
-            }
+            _manifest_row(
+                rel_parent=rel_parent,
+                video_path=video_path,
+                npz_path=npz_path,
+                skel_video_path=skel_video_path,
+                pose_variant=str(args.pose),
+                meta=meta,
+            )
         )
 
     manifest_path = out_dir / "manifest.csv"

@@ -165,6 +165,76 @@ def test_export_skeleton_body_core_npz_meta_contains_issue24_fields(tmp_path, mo
     assert rows[0]["score_authorized"] == "False"
 
 
+def test_export_skeleton_skip_existing_body_core_keeps_manifest_meta(tmp_path, monkeypatch):
+    src = tmp_path / "src"
+    src.mkdir()
+    old_video = src / "a_old.mp4"
+    new_video = src / "b_new.mp4"
+    old_video.write_bytes(b"fake")
+    new_video.write_bytes(b"fake")
+    out_dir = tmp_path / "out"
+    existing_npz = out_dir / "a_old_yolo_body_core_v1.npz"
+    existing_npz.parent.mkdir(parents=True)
+    existing_meta = yolo_batch_meta({"model_name": "existing-yolo.pt"})
+    existing_meta.update({"fps": 24.0, "frame_count": 3, "width": 640, "height": 480})
+    np.savez_compressed(
+        existing_npz,
+        features=np.zeros((3, 12, 2), dtype=np.float32),
+        meta=np.array(existing_meta, dtype=object),
+    )
+
+    def fake_iter(_root: Path, *, skip_keywords: tuple[str, ...]):
+        return [old_video, new_video]
+
+    def fake_extract(video_path: Path, *, backend: str, pose_variant: str):
+        features = np.zeros((2, 12, 2), dtype=np.float32)
+        meta = yolo_batch_meta({"model_name": "new-yolo.pt"})
+        meta.update(
+            {
+                "video": str(video_path),
+                "name": video_path.stem,
+                "fps": 30.0,
+                "frame_count": 2,
+                "width": 1280,
+                "height": 720,
+                "landmark_layout": "body_core_v1_normalized_xy",
+                "skeleton_video": None,
+            }
+        )
+        return features, meta
+
+    monkeypatch.setattr(batch_export_skeleton, "_iter_videos", fake_iter)
+    monkeypatch.setattr(batch_export_skeleton, "_extract_body_core_features", fake_extract)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "batch_export_skeleton.py",
+            "--source_dir",
+            str(src),
+            "--out_dir",
+            str(out_dir),
+            "--backend",
+            "yolo",
+            "--feature-layout",
+            "body_core_v1",
+        ],
+    )
+
+    batch_export_skeleton.main()
+
+    manifest = out_dir / "manifest.csv"
+    rows = list(csv.DictReader(manifest.open(encoding="utf-8-sig")))
+    assert len(rows) == 2
+    assert rows[0]["video_name"] == "a_old.mp4"
+    assert rows[0]["backend"] == "yolo"
+    assert rows[0]["model_name"] == "existing-yolo.pt"
+    assert rows[0]["score_authorized"] == "False"
+    assert rows[1]["video_name"] == "b_new.mp4"
+    assert rows[1]["backend"] == "yolo"
+    assert rows[1]["model_name"] == "new-yolo.pt"
+
+
 def test_tech_eval_yolo_body_core_skips_outward_scoring(tmp_path):
     meta = yolo_batch_meta({"review_required": True})
     meta.update({"max_persons": 2, "multi_person_frames": 5})

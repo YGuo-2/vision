@@ -1,3 +1,32 @@
+## 2026-05-31: PR #30 审查补强 — batch_export_skeleton 已存在输出 meta 透传
+
+### 问题描述
+
+子 agent 审查 PR #30 时指出：`batch_export_skeleton.py` 在 `--backend yolo --feature-layout body_core_v1`
+且目标 `.npz` 已存在时会走 skip 分支，该分支只写短 manifest 行，没有补齐 Issue #24 要求的
+backend/layout/calibration/review meta；若同批次同时存在 skipped 行与新处理行，还可能因 CSV
+header 取第一行字段导致后续行多字段写入失败。
+
+### 修改内容
+
+- `batch/batch_export_skeleton.py`：新增统一 `_manifest_row()` 与 union fieldnames 写 CSV；skip
+  已存在 body_core npz 时读取现有 `.npz` meta 并透传 `backend` / `model_name` /
+  `feature_layout` / `confidence_kind` / `validity_policy` / `valid_conf_thr` /
+  `calibration_status` / `score_authorized` / `review_required`。
+- `tests/test_batch_backend_args.py`：新增 skipped + processed 混合场景测试，确认 manifest
+  两类行都含 #24 meta 字段且不会因字段不一致报错。
+
+### 验证方法
+
+```powershell
+E:\CodeProject\vision\.venv\Scripts\python.exe -m pytest tests\test_batch_backend_args.py -q
+E:\CodeProject\vision\.venv\Scripts\python.exe -m pytest tests -q
+E:\CodeProject\vision\.venv\Scripts\python.exe -m py_compile batch\backend_options.py batch\batch_dual_compare.py batch\batch_export_skeleton.py batch\batch_tech_eval.py
+git diff --check
+```
+
+---
+
 ## 2026-05-31: YOLO 迁移 S5a — batch backend/layout 参数与 metadata 透传（Issue #24）
 
 ### 问题描述
