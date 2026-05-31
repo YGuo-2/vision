@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Literal
 
 import cv2
 import numpy as np
@@ -11,9 +11,30 @@ from .pose_features import (
     DEFAULT_VALID_CONF_THR,
     MEDIAPIPE_VALIDITY_POLICY,
     derive_valid_mask,
+    landmark_capabilities,
+    landmark_names,
+    landmarks_missing_for_capabilities,
 )
 from .paths import models_dir
 from .vision_pipeline import MediaPipePipeline, PipelineConfig
+
+
+# ---------------------------------------------------------------------------
+# 结构化三态（YOLO 迁移 S4 / Issue #11）
+# ---------------------------------------------------------------------------
+# 此前规则三态靠 detail 中文字符串拼（（未评估）/（合格）），下游无法稳定判断。
+# 本期补结构化字段：state ∈ {evaluated, skipped}、skip_reason ∈
+# {missing_landmarks, low_confidence, insufficient_valid_frames}。detail 中文保留
+# 供 UI，下游判断只读 state / skip_reason。
+RuleState = Literal["evaluated", "skipped"]
+SkipReason = Literal["missing_landmarks", "low_confidence", "insufficient_valid_frames"]
+
+RULE_STATE_EVALUATED: RuleState = "evaluated"
+RULE_STATE_SKIPPED: RuleState = "skipped"
+
+SKIP_MISSING_LANDMARKS: SkipReason = "missing_landmarks"
+SKIP_LOW_CONFIDENCE: SkipReason = "low_confidence"
+SKIP_INSUFFICIENT_VALID_FRAMES: SkipReason = "insufficient_valid_frames"
 
 
 # 规则评分总体思路：
@@ -52,6 +73,9 @@ class Rule:
     action: str  # "stance" | "punch" | "both"
     trigger_ratio: float
     check_fn: Callable[[np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray, str]]
+    # YOLO 迁移 S4 / Issue #11：声明该规则依赖的关键点索引（BlazePose33）。
+    # required_landmarks / required_capabilities 由 source_indices 派生（见 _build_rules）。
+    required_indices: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -63,6 +87,14 @@ class RuleViolation:
     valid_frames: int
     total_frames: int
     detail: str
+    # YOLO 迁移 S4 / Issue #11：结构化三态。detail（中文）保留供 UI；
+    # 下游稳定判断只读 state / skip_reason，不再解析中文。
+    state: RuleState = RULE_STATE_EVALUATED
+    skip_reason: SkipReason | None = None
+    # 该规则依赖的关键点名 + 能力分组（声明）；missing_landmarks 为运行时缺失的点名。
+    required_landmarks: tuple[str, ...] = ()
+    required_capabilities: tuple[str, ...] = ()
+    missing_landmarks: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -336,16 +368,26 @@ def _rule_guard_hand(landmarks: np.ndarray, valid_mask: np.ndarray) -> tuple[np.
 
 
 def _build_rules() -> list[Rule]:
-    # 触发比例：当违规帧占比 >= trigger_ratio，扣该条分数一次
+    # 触发比例：当违规帧占比 >= trigger_ratio，扣该条分数一次。
+    # required_indices 必须与各 check_fn 内 _valid_frame(...) 的关键点集合一致
+    # （YOLO 迁移 S4 / Issue #11：用于声明 required_landmarks/capabilities 与缺点判定）。
     return [
-        Rule("stance_elbow", "前手肘角", 2, "front", "stance", 0.3, _rule_elbow_front_arm_range),
-        Rule("stance_fist_height", "拳峰高度", 2, "front", "stance", 0.3, _rule_fist_height_near_nose),
-        Rule("stance_back_arm", "后手贴近", 2, "front", "stance", 0.3, _rule_back_arm_close),
-        Rule("stance_knee", "双膝微曲", 2, "any", "stance", 0.3, _rule_knee_slight_bend),
-        Rule("stance_width", "站距合理", 2, "front", "stance", 0.3, _rule_stance_width),
-        Rule("stance_feet", "脚尖方向", 2, "front", "stance", 0.3, _rule_feet_parallel),
-        Rule("punch_elbow", "出拳伸直", 15, "any", "punch", 0.3, _rule_punch_elbow_straight),
-        Rule("punch_guard", "护手位置", 15, "any", "punch", 0.3, _rule_guard_hand),
+        Rule("stance_elbow", "前手肘角", 2, "front", "stance", 0.3, _rule_elbow_front_arm_range,
+             required_indices=(L_SHOULDER, L_ELBOW, L_WRIST, R_SHOULDER, R_ELBOW, R_WRIST)),
+        Rule("stance_fist_height", "拳峰高度", 2, "front", "stance", 0.3, _rule_fist_height_near_nose,
+             required_indices=(NOSE, L_WRIST, R_WRIST)),
+        Rule("stance_back_arm", "后手贴近", 2, "front", "stance", 0.3, _rule_back_arm_close,
+             required_indices=(MOUTH_L, MOUTH_R, L_ELBOW, L_WRIST, R_ELBOW, R_WRIST, L_SHOULDER, R_SHOULDER, L_HIP, R_HIP)),
+        Rule("stance_knee", "双膝微曲", 2, "any", "stance", 0.3, _rule_knee_slight_bend,
+             required_indices=(L_HIP, L_KNEE, L_ANKLE, R_HIP, R_KNEE, R_ANKLE)),
+        Rule("stance_width", "站距合理", 2, "front", "stance", 0.3, _rule_stance_width,
+             required_indices=(L_ANKLE, R_ANKLE, L_SHOULDER, R_SHOULDER)),
+        Rule("stance_feet", "脚尖方向", 2, "front", "stance", 0.3, _rule_feet_parallel,
+             required_indices=(L_HEEL, L_FOOT_INDEX, R_HEEL, R_FOOT_INDEX)),
+        Rule("punch_elbow", "出拳伸直", 15, "any", "punch", 0.3, _rule_punch_elbow_straight,
+             required_indices=(L_SHOULDER, L_ELBOW, L_WRIST, R_SHOULDER, R_ELBOW, R_WRIST, L_HIP, R_HIP)),
+        Rule("punch_guard", "护手位置", 15, "any", "punch", 0.3, _rule_guard_hand,
+             required_indices=(MOUTH_L, MOUTH_R, L_SHOULDER, R_SHOULDER, L_WRIST, R_WRIST, L_HIP, R_HIP)),
     ]
 
 
@@ -356,6 +398,7 @@ def score_rules(
     action_scope: str,
     min_valid: int = 5,
     valid_mask: np.ndarray | None = None,
+    supported_capabilities=None,
 ) -> RuleScore:
     """
     对单段视频关键点进行规则评分。
@@ -365,6 +408,16 @@ def score_rules(
     - valid_mask: ``(T,33)`` 有效性掩码（YOLO 迁移 Issue #5）。``None`` 时由
       ``derive_valid_mask`` 现场推导（等价旧式 ``visibility >= 0.5``），保证旧调用方
       （含 ``compare_video_to_dual_templates`` 内部 ``extract_pose_raw`` 调用）行为不变。
+    - supported_capabilities: 后端结构性支持的能力集合（YOLO 迁移 S4 / Issue #11）。
+      ``None`` 表示「全部支持」（MediaPipe full，默认），此时缺点判定不生效，行为与
+      旧版逐位一致。传入受限集合（如 ``COCO17_SUPPORTED_CAPABILITIES``）时，依赖
+      不支持能力的规则直接 ``state=skipped`` + ``skip_reason=missing_landmarks``，
+      不当合格/不合格。本期 #10 结论为「仅预览」，YOLO partial eval 未启用，该形参
+      仅供未来 YOLO 路径与测试使用。
+
+    结构化三态（Issue #11）：每条 ``RuleViolation`` 都带 ``state`` /（``skip_reason``）/
+    ``required_landmarks`` / ``required_capabilities`` / ``missing_landmarks``。
+    ``detail`` 中文保留供 UI，下游稳定判断只读结构化字段。
     """
     view = (view or "front").lower()
     action_scope = (action_scope or "both").lower()
@@ -380,9 +433,43 @@ def score_rules(
             continue
         if action_scope != "both" and rule.action != action_scope:
             continue
+
+        req_landmarks = landmark_names(rule.required_indices)
+        req_caps = landmark_capabilities(rule.required_indices)
+
+        # 缺点判定（YOLO 迁移 S4 / Issue #11）：后端结构性缺失所需关键点时，直接
+        # 跳过评估、标 skipped/missing_landmarks，不混入合格/不合格。
+        backend_missing = landmarks_missing_for_capabilities(
+            rule.required_indices, supported_capabilities
+        )
+        if backend_missing:
+            violations.append(
+                RuleViolation(
+                    rule_id=rule.rule_id,
+                    name=rule.name,
+                    penalty=0,
+                    violation_ratio=0.0,
+                    valid_frames=0,
+                    total_frames=int(total_frames),
+                    detail=f"{rule.name}（后端缺少关键点，未评估）",
+                    state=RULE_STATE_SKIPPED,
+                    skip_reason=SKIP_MISSING_LANDMARKS,
+                    required_landmarks=req_landmarks,
+                    required_capabilities=req_caps,
+                    missing_landmarks=tuple(backend_missing),
+                )
+            )
+            continue
+
         viol, valid, detail = rule.check_fn(landmarks, valid_mask)
         valid_cnt = int(valid.sum())
         if valid_cnt < min_valid:
+            # 有效帧不足：valid_cnt==0 视为关键点置信度始终不足（low_confidence），
+            # 0<valid_cnt<min_valid 视为有效帧数不足（insufficient_valid_frames）。
+            # detail 中文保持与旧版逐位一致（golden 不漂移），仅结构化字段区分。
+            skip_reason = (
+                SKIP_LOW_CONFIDENCE if valid_cnt == 0 else SKIP_INSUFFICIENT_VALID_FRAMES
+            )
             violations.append(
                 RuleViolation(
                     rule_id=rule.rule_id,
@@ -392,6 +479,10 @@ def score_rules(
                     valid_frames=int(valid_cnt),
                     total_frames=int(total_frames),
                     detail=f"{detail}（有效帧不足，未评估）",
+                    state=RULE_STATE_SKIPPED,
+                    skip_reason=skip_reason,
+                    required_landmarks=req_landmarks,
+                    required_capabilities=req_caps,
                 )
             )
             continue
@@ -407,6 +498,10 @@ def score_rules(
                     valid_frames=int(valid_cnt),
                     total_frames=int(total_frames),
                     detail=detail,
+                    state=RULE_STATE_EVALUATED,
+                    skip_reason=None,
+                    required_landmarks=req_landmarks,
+                    required_capabilities=req_caps,
                 )
             )
         else:
@@ -419,6 +514,10 @@ def score_rules(
                     valid_frames=int(valid_cnt),
                     total_frames=int(total_frames),
                     detail=f"{detail}（合格）",
+                    state=RULE_STATE_EVALUATED,
+                    skip_reason=None,
+                    required_landmarks=req_landmarks,
+                    required_capabilities=req_caps,
                 )
             )
 

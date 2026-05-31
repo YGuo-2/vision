@@ -368,8 +368,10 @@ S1 后续会改 `_extract_pose_features()`、`mirror_pose_features()`、`_select
 ### 前置条件（按 #10 结论分流，必读）
 本 Issue 的范围**取决于 #10 标定结论**：
 - [ ] 若 #10 = “可用于 skip-aware partial eval” → **完整执行**本 Issue（含 YOLO-only 指标分级）。
-- [ ] 若 #10 = “仅用于预览” 或 “可用于模板匹配（但不评分）” → **只做 MediaPipe 侧的结构化状态改造**（`state`/`skip_reason`/`required_landmarks`/`missing_landmarks`），**不实现 YOLO partial tech_eval 指标启用**；该结构化改造本身对 MediaPipe 也有价值，仍值得做。
+- [x] 若 #10 = “仅用于预览” 或 “可用于模板匹配（但不评分）” → **只做 MediaPipe 侧的结构化状态改造**（`state`/`skip_reason`/`required_landmarks`/`missing_landmarks`），**不实现 YOLO partial tech_eval 指标启用**；该结构化改造本身对 MediaPipe 也有价值，仍值得做。
 - [ ] 若 #10 = “不建议使用” → 本 Issue 退化为**仅 MediaPipe 结构化状态改造（可选）**，并直接转入 S5/S6 决策，不再投入 YOLO 评估工作。
+
+> **采用分支（已确认）**：#10 结论为「**仅用于预览**」（见 `docs/yolo_body_core_calibration.md` 第八节：跨视频 J1 corr=0.280、J4 一致率=0.50 未达标）。故本 Issue **只做 MediaPipe 侧结构化状态改造**，**不启用 YOLO partial tech_eval 指标**。`score_rules` 新增的 `supported_capabilities` 形参为后续 YOLO 路径预留，本期主链路不传（即 MediaPipe full，全部能力支持，行为与旧版逐位一致）。
 
 ### 任务明细
 让评估链路能诚实输出“能评估什么、不能评估什么”。`rule_scoring.py` 已有 `RuleScore`/`RuleViolation`，但三态靠中文 `detail` 字符串拼（`（未评估）`/`（合格）`），下游无法用稳定字段判断。改法是补字段，不推倒重来。
@@ -381,19 +383,19 @@ S1 后续会改 `_extract_pose_features()`、`mirror_pose_features()`、`_select
 - **YOLO 指标启用部分受上面「前置条件」约束**：仅当 #10 结论允许 partial eval 时才启用 COCO17 足够的 YOLO 指标。
 
 ### 任务清单
-- [ ] `Rule` 增加 `required_landmarks`、`required_capabilities`。
-- [ ] `RuleViolation` 增加 `state ∈ {evaluated, skipped}`、`skip_reason ∈ {missing_landmarks, low_confidence, insufficient_valid_frames}`。
-- [ ] `score_rules` 三态改为写结构化字段，不再靠拼字符串区分。
-- [ ] `tech_eval` 每指标声明 `required_landmarks` 并在结果带 `missing_landmarks`/`backend`。
-- [ ] （仅当 #10 允许 partial eval）YOLO-only 只启用 COCO17 足够的指标（肘角/膝角/站距/鼻尖-手腕高度等），阈值重标定；缺点指标默认 skipped。
+- [x] `Rule` 增加 `required_landmarks`、`required_capabilities`（由 `required_indices` 派生）。
+- [x] `RuleViolation` 增加 `state ∈ {evaluated, skipped}`、`skip_reason ∈ {missing_landmarks, low_confidence, insufficient_valid_frames}`。
+- [x] `score_rules` 三态改为写结构化字段，不再靠拼字符串区分（`detail` 中文保留供 UI）。
+- [x] `tech_eval` 每指标声明 `required_landmarks` 并在结果带 `missing_landmarks`/`backend`。
+- [ ] （仅当 #10 允许 partial eval）YOLO-only 只启用 COCO17 足够的指标（肘角/膝角/站距/鼻尖-手腕高度等），阈值重标定；缺点指标默认 skipped。 → **不适用**（#10 = 仅预览，不启用 YOLO partial eval）。
 
 ### 验收标准
-- [ ] `tests/test_rule_availability.py`：覆盖 skipped 及其 `skip_reason`。
-- [ ] `tests/test_tech_eval_contract.py`：每指标含 `status`/`reason`/`required_landmarks`/`missing_landmarks`/`backend`。
-- [ ] （仅当 #10 允许 partial eval）YOLO-only CSV/JSONL 未评估原因清晰，不把不可评估当合格/不合格。
-- [ ] MediaPipe 旧 tech_eval 回归不退化（golden 全绿）。
-- [ ] Issue 顶部已勾选所采用的 #10 分流分支，范围与之一致。
-- [ ] `change.md` 已记录。
+- [x] `tests/test_rule_availability.py`：覆盖 skipped 及其 `skip_reason`（含 low_confidence / insufficient_valid_frames / missing_landmarks）。
+- [x] `tests/test_tech_eval_contract.py`：每指标含 `status`/`reason`/`required_landmarks`/`missing_landmarks`/`backend`。
+- [ ] （仅当 #10 允许 partial eval）YOLO-only CSV/JSONL 未评估原因清晰，不把不可评估当合格/不合格。 → **不适用**（不启用 YOLO partial eval）；MediaPipe 侧 CSV/JSONL 已补缺失关键点列。
+- [x] MediaPipe 旧 tech_eval 回归不退化（golden 全绿）。
+- [x] Issue 顶部已勾选所采用的 #10 分流分支，范围与之一致（仅预览 → 仅 MediaPipe 结构化改造）。
+- [x] `change.md` 已记录。
 
 ---
 

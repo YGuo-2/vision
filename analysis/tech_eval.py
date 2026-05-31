@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import asdict, dataclass, is_dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -12,12 +12,18 @@ from core.pose_features import (
     DEFAULT_VALID_CONF_THR,
     MEDIAPIPE_VALIDITY_POLICY,
     derive_valid_mask,
+    landmark_names,
+    landmarks_missing_for_capabilities,
     pose_view_score,
 )
 from core.paths import models_dir
 from core.vision_pipeline import MediaPipePipeline, PipelineConfig
 
 Status = Literal["合格", "不合格", "无法判定"]
+
+# 后端标识（YOLO 迁移 S4 / Issue #11）。本期 #10 结论为「仅预览」，tech_eval 主链路
+# 仍是 MediaPipe；backend 字段让结果诚实声明数据来源，为后续 YOLO 路径预留。
+BACKEND_MEDIAPIPE = "mediapipe"
 
 
 # BlazePose 33 landmark indices
@@ -53,6 +59,15 @@ class IndicatorResult:
     status: Status
     reason: str
     detail: dict[str, Any] | None = None
+    # YOLO 迁移 S4 / Issue #11：结构化契约字段。
+    # - required_landmarks：该指标依赖的 BlazePose33 关键点名（声明）。
+    # - missing_landmarks：运行时缺失/后端不支持的关键点名。
+    # - backend：数据来源后端（本期主链路恒为 mediapipe）。
+    # 这些字段在指标计算内默认空，由 _evaluate_from_arrays 装配层统一补齐，
+    # 既不改动各 eval_* 内部判定逻辑（golden 不漂移），又让结果可被下游稳定解析。
+    required_landmarks: tuple[str, ...] = ()
+    missing_landmarks: tuple[str, ...] = ()
+    backend: str = BACKEND_MEDIAPIPE
 
 
 @dataclass(frozen=True)
@@ -121,6 +136,80 @@ def _resolve_mask(landmarks: np.ndarray, valid_mask: np.ndarray | None, vis_thr:
     if valid_mask is None:
         return derive_valid_mask(landmarks, vis_thr)
     return np.asarray(valid_mask, dtype=bool)
+
+
+# ---------------------------------------------------------------------------
+# 指标关键点契约声明（YOLO 迁移 S4 / Issue #11）
+# ---------------------------------------------------------------------------
+# 每个技术指标声明其依赖的 BlazePose33 关键点索引。装配层据此补齐
+# required_landmarks（声明）与 missing_landmarks（运行时/后端缺失），让结果诚实表达
+# “依赖什么、缺了什么”，下游无需解析中文 reason。
+COG_REQUIRED_INDICES: tuple[int, ...] = (
+    NOSE, L_SHOULDER, R_SHOULDER, L_HIP, R_HIP,
+    L_KNEE, R_KNEE, L_ANKLE, R_ANKLE,
+    L_HEEL, R_HEEL, L_FOOT_INDEX, R_FOOT_INDEX,
+)
+COG_COM_REQUIRED_INDICES: tuple[int, ...] = (
+    NOSE, L_EAR, R_EAR,
+    L_SHOULDER, R_SHOULDER, L_ELBOW, R_ELBOW, L_WRIST, R_WRIST,
+    L_PINKY, R_PINKY, L_INDEX, R_INDEX,
+    L_HIP, R_HIP, L_KNEE, R_KNEE, L_ANKLE, R_ANKLE,
+    L_HEEL, R_HEEL, L_FOOT_INDEX, R_FOOT_INDEX,
+)
+RETRACT_REQUIRED_INDICES: tuple[int, ...] = (
+    NOSE, L_SHOULDER, R_SHOULDER, L_ELBOW, R_ELBOW, L_WRIST, R_WRIST, L_HIP, R_HIP,
+)
+FORCE_REQUIRED_INDICES: tuple[int, ...] = (
+    L_SHOULDER, R_SHOULDER, L_ELBOW, R_ELBOW, L_WRIST, R_WRIST, L_HIP, R_HIP,
+    L_HEEL, R_HEEL, L_FOOT_INDEX, R_FOOT_INDEX,
+)
+WRIST_REQUIRED_INDICES: tuple[int, ...] = (
+    L_ELBOW, R_ELBOW, L_WRIST, R_WRIST, L_INDEX, R_INDEX, L_PINKY, R_PINKY,
+)
+
+
+def _runtime_missing_landmarks(indices: tuple[int, ...], mask: np.ndarray | None) -> tuple[str, ...]:
+    """返回 ``indices`` 中在整段 ``mask`` 内从未有效的关键点名（运行时缺失）。
+
+    “从未有效”= 该点在所有帧的 valid_mask 都为 False（被遮挡/低置信/段缺失），据此
+    诚实声明该指标本次缺了哪些点。空段（无帧）视为全部缺失。
+    """
+    if mask is None:
+        return landmark_names(indices)
+    arr = np.asarray(mask, dtype=bool)
+    if arr.size == 0 or arr.shape[0] == 0:
+        return landmark_names(indices)
+    ever_valid = np.any(arr, axis=0)  # (33,)
+    missing_idx = [int(i) for i in indices if not bool(ever_valid[int(i)])]
+    return landmark_names(missing_idx)
+
+
+def _attach_contract(
+    result: "IndicatorResult",
+    required_indices: tuple[int, ...],
+    *,
+    mask: np.ndarray | None,
+    supported_capabilities=None,
+    backend: str = BACKEND_MEDIAPIPE,
+) -> "IndicatorResult":
+    """给指标结果补齐 Issue #11 结构化契约字段（不改 status/reason/detail 判定）。
+
+    missing_landmarks = 运行时从未有效的点 ∪ 后端结构性不支持的点（按能力分组）。
+    本期 MediaPipe 路径 ``supported_capabilities=None``（全部支持），故只反映运行时缺失。
+    """
+    runtime_missing = _runtime_missing_landmarks(required_indices, mask)
+    backend_missing = landmarks_missing_for_capabilities(required_indices, supported_capabilities)
+    # 合并去重，保持声明顺序。
+    missing: list[str] = list(runtime_missing)
+    for n in backend_missing:
+        if n not in missing:
+            missing.append(n)
+    return replace(
+        result,
+        required_landmarks=landmark_names(required_indices),
+        missing_landmarks=tuple(missing),
+        backend=str(backend),
+    )
 
 
 def extract_pose_and_view_scores(
@@ -2061,9 +2150,36 @@ def _evaluate_from_arrays(
         side_valid_mask=side_mask,
     )
 
+    # YOLO 迁移 S4 / Issue #11：装配层统一补齐结构化契约字段
+    # （required_landmarks / missing_landmarks / backend），不改各指标内部判定。
+    def _force_union_mask() -> np.ndarray | None:
+        masks = [m for m in (front_mask, side_mask) if m is not None and m.shape[0] > 0]
+        if not masks:
+            return None
+        return np.concatenate(masks, axis=0)
+
+    cog_side = _attach_contract(cog_side, COG_REQUIRED_INDICES, mask=side_mask if side_seg is not None else None)
+    cog_front = _attach_contract(cog_front, COG_REQUIRED_INDICES, mask=front_mask if front_seg is not None else None)
+    # cog_final 跟随被采用的视角口径。
+    cog_final = _attach_contract(
+        cog_final,
+        COG_REQUIRED_INDICES,
+        mask=(side_mask if (side_seg is not None and cog_side.status != "无法判定") else (front_mask if front_seg is not None else None)),
+    )
+    if cog_com is not None:
+        cog_com = _attach_contract(
+            cog_com,
+            COG_COM_REQUIRED_INDICES,
+            mask=(side_mask if side_seg is not None else full_mask),
+        )
+    retract = _attach_contract(retract, RETRACT_REQUIRED_INDICES, mask=side_mask if side_seg is not None else None)
+    wrist = _attach_contract(wrist, WRIST_REQUIRED_INDICES, mask=(wrist_mask if wrist_src.size != 0 else None))
+    force = _attach_contract(force, FORCE_REQUIRED_INDICES, mask=_force_union_mask())
+
     if not keep_detail:
         def strip_detail(r: IndicatorResult) -> IndicatorResult:
-            return IndicatorResult(status=r.status, reason=r.reason, detail=None)
+            # 用 replace 仅清空 detail，保留 Issue #11 结构化契约字段。
+            return replace(r, detail=None)
 
         cog_final = strip_detail(cog_final)
         cog_side = strip_detail(cog_side)
@@ -2140,7 +2256,7 @@ def evaluate_video(
     )
 
     def strip(r: IndicatorResult) -> IndicatorResult:
-        return IndicatorResult(status=r.status, reason=r.reason, detail=None)
+        return replace(r, detail=None)
 
     return TechEvalResult(
         video_path=str(video_path),

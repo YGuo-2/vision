@@ -1,3 +1,82 @@
+## 2026-05-31: YOLO 迁移 S4 — 规则与技术评估分级（结构化状态，Issue #11）
+
+### 问题描述
+
+评估链路要能诚实输出「能评估什么、不能评估什么」。此前 `core/rule_scoring.py` 的
+`RuleViolation` 三态（已评估 / 合格 / 未评估）只靠中文 `detail` 字符串拼
+（`（合格）` / `（有效帧不足，未评估）`），下游无法用稳定字段判断；`analysis/tech_eval.py`
+各指标也没有声明「依赖哪些关键点、运行时缺了哪些点、来自哪个后端」。本期按 #11 任务规范
+**补结构化字段，不推倒重来**。
+
+**范围分流（按 #10 结论，硬约束）**：Issue #10 标定结论为「**仅用于预览**」
+（`docs/yolo_body_core_calibration.md` 第八节：跨视频 J1 corr=0.280、J4 一致率=0.50 未达标）。
+据 #11 前置条件，本期**只做 MediaPipe 侧结构化状态改造**，**不启用 YOLO partial tech_eval
+指标**。MediaPipe 默认 `pose33_v3` 路径与 golden 不得漂移。
+
+### 修改内容
+
+- **`core/pose_features.py` 新增集中式关键点命名 + 能力分组（Issue #11）**：
+  - `BLAZE33_LANDMARK_NAMES`（33 点英文名表）、`landmark_names()` / `landmark_capabilities()`。
+  - 能力分组常量 `CAP_FACE_CENTER/EYES/EARS/MOUTH/ARMS/HANDS/LEGS/FEET` 与
+    `COCO17_SUPPORTED_CAPABILITIES`（COCO17 结构性支持 = face_center/ears/arms/legs，
+    缺 mouth/hands/feet，对应 S0 降级清单）。
+  - `landmarks_missing_for_capabilities(indices, supported)`：按能力分组判定后端结构性缺点；
+    `supported=None`（MediaPipe full）视为全部支持、返回空（行为不变）。
+- **`core/rule_scoring.py` 规则三态结构化（Issue #11）**：
+  - 新增三态常量：`RULE_STATE_EVALUATED/SKIPPED`、`SKIP_MISSING_LANDMARKS/LOW_CONFIDENCE/
+    INSUFFICIENT_VALID_FRAMES`。
+  - `Rule` 新增 `required_indices`（与各 `_rule_*` 内 `_valid_frame(...)` 关键点集合一致）；
+    `RuleViolation` 新增 `state` / `skip_reason` / `required_landmarks` / `required_capabilities`
+    / `missing_landmarks`（均带默认值，向后兼容）。
+  - `score_rules` 新增可选 `supported_capabilities` 形参（默认 `None`=MediaPipe full）：
+    后端缺所需能力时该规则直接 `state=skipped` + `skip_reason=missing_landmarks` 并列出缺失点，
+    不当合格/不合格；有效帧 0 → `low_confidence`，0<cnt<min_valid → `insufficient_valid_frames`，
+    充足 → `evaluated`。**`detail` 中文逐字保留**，故 golden 不漂移。
+- **`analysis/tech_eval.py` 指标契约字段（Issue #11）**：
+  - `IndicatorResult` 新增 `required_landmarks` / `missing_landmarks` / `backend`（默认 mediapipe，
+    带默认值向后兼容）。
+  - 新增每指标 `*_REQUIRED_INDICES` 声明、`_runtime_missing_landmarks()`（整段从未有效的点）、
+    `_attach_contract()`（装配层统一补齐契约字段，**不改各 `eval_*` 内部 status/reason/detail
+    判定**）。在 `_evaluate_from_arrays` 末尾对七个指标按各自所需关键点与所在段 mask 补齐；
+    `keep_detail=False` 与 `evaluate_video` 的 strip 改用 `dataclasses.replace`，保留契约字段。
+- **报告输出补缺失关键点 / backend（Issue #11，仅 MediaPipe 侧）**：
+  - `batch/batch_tech_eval.py`：CSV 新增「重心/回收速度/发力顺序/拳面角度 缺失关键点」列与
+    `backend` 列；JSONL 经 `to_jsonable` 自动带上新字段。
+  - `batch/batch_dual_compare.py`：`error_rules.csv` 新增 `state` / `skip_reason` /
+    `missing_landmarks` 列；JSONL 经 `_jsonable`(asdict) 自动带上新字段。
+- **新增测试**：
+  - `tests/test_rule_availability.py`：覆盖三种 `skip_reason`（low_confidence /
+    insufficient_valid_frames / missing_landmarks）、COCO17 缺点规则（feet/mouth）被 skipped、
+    required_landmarks/capabilities 声明正确、默认不传 `supported_capabilities` 时无 backend 级缺点。
+  - `tests/test_tech_eval_contract.py`：`evaluate_video_full` 每指标含 `status/reason/
+    required_landmarks/missing_landmarks/backend`；`_attach_contract` 不改 status/reason/detail；
+    人为遮挡脚部后 `missing_landmarks` 如实含脚跟/脚尖；契约字段 JSON 可序列化。
+- **`docs/yolo_migration_issues.md`**：Issue #11 顶部勾选「仅预览 → 仅 MediaPipe 结构化改造」分支，
+  任务清单 / 验收标准按本期实现状态更新（YOLO partial eval 标注「不适用」）。
+
+### 范围守住（未做）
+
+- 未启用任何 YOLO partial tech_eval 指标（#10 = 仅预览）；`supported_capabilities` 仅预留接口。
+- 未改各 `eval_*` / 各 `_rule_*` 的判定逻辑与阈值；未重标定。
+- MediaPipe 默认 `pose33_v3` 路径行为不变（golden 全绿）。
+
+### 验证方法
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests\test_rule_availability.py tests\test_tech_eval_contract.py -q  # 16 passed
+.\.venv\Scripts\python.exe -m pytest tests\test_pose33_v3_golden.py tests\test_valid_mask_migration.py -q  # 31 passed（MediaPipe 默认不漂移）
+.\.venv\Scripts\python.exe -m pytest tests -q                                                              # 135 passed（此前 119 + 本期 16 新增）
+.\.venv\Scripts\python.exe -m py_compile core\pose_features.py core\rule_scoring.py analysis\tech_eval.py batch\batch_tech_eval.py batch\batch_dual_compare.py core\action_compare.py apps\main.py apps\app_ui.py  # exit 0
+```
+
+- `tests/test_pose33_v3_golden.py` 全绿 → 规则 `detail` 中文逐字保留、各指标判定未改动，MediaPipe
+  旧路径行为不漂移（行为不变硬门槛）。
+- `tests/test_rule_availability.py` / `tests/test_tech_eval_contract.py` 全绿 → 结构化三态与指标契约
+  字段齐全、缺点判定正确、不可评估不当合格/不合格。
+- 全量 135 passed（此前 119 + 本期 16 新增）→ 无回归。
+
+---
+
 ## 2026-05-31: YOLO 迁移 S3 — 标定与基准报告（Issue #10）
 
 ### 问题描述
