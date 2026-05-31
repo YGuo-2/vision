@@ -472,20 +472,21 @@ COCO17 到 Pose33-like 的真实映射：
 
 目标：决定是否、在哪里默认使用 YOLO。
 
-可能结论：
+当前 S6 决策见 `docs/yolo_default_switch_decision.md`（Issue #28）：**全部不切默认，仅保留离线 / 实验入口**。
 
-- 实时预览默认 YOLO body，手部仍用 MediaPipe Hands。
-- 模板匹配默认仍 MediaPipe，YOLO 作为可选加速。
-- 规则和技术评估默认仍 MediaPipe full。
-- 不切默认，只保留 YOLO 实验或离线加速入口。
+决策摘要：
 
-默认切换前必须满足：
+- 实时预览（CLI / UI）：#23 GPU 复测 no-go，#25 / #26 已关闭，默认继续 MediaPipe。
+- 模板匹配：#10 结论仅预览，J1 corr=0.280、J4 一致率=0.50，默认继续 `pose33_v3` / MediaPipe。
+- 规则 / 技术评估：COCO17 缺嘴角、脚跟脚尖、手指，默认继续 MediaPipe full。
+- Hybrid：#27 已决议不实现 `yolo_body_mp_pose_supplement`。
 
-- 许可结论通过。
-- 端到端回归报告通过。
-- 有一键回滚配置。
-- UI、CLI、batch 都能显示结果来源。
-- 未评估比例和误判样例可接受。
+未来重新评估默认切换前必须满足：
+
+- 许可结论适配目标部署形态，闭源 / 商业部署需 Enterprise 或替代模型方案。
+- #23 GPU 复测在 CUDA-enabled 环境下 6/6 样本有效，Hands 关 / Hands 开 FPS 比达到 1.30 / 1.20。
+- 标定 / 回归报告通过，误判样例与未评估比例可接受。
+- CLI / UI / batch 的已授权入口都能显示结果来源与 `score_authorized`，并具备一键回滚配置。
 
 ## 替代方案决策
 
