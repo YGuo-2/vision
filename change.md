@@ -1,3 +1,40 @@
+## 2026-05-31: YOLO 迁移 S5a — batch backend/layout 参数与 metadata 透传（Issue #24）
+
+### 问题描述
+
+S5a 需要让三个 batch 入口显式支持 `--backend` / `--feature-layout`，使 YOLO
+`body_core_v1` 能用于离线调试 / 标定对照，同时严格保持默认 MediaPipe `pose33_v3`
+旧行为不变。YOLO body_core 分数未授权对外评分，输出必须带 `calibration_status=unvalidated`
+与 `score_authorized=False`，多人视频必须标「需人工复核 / 拒绝」，不能混入正常评分列。
+
+### 修改内容
+
+- 新增 `batch/backend_options.py`：统一 backend/layout 参数、非法组合校验（YOLO 只允许
+  `body_core_v1`）、Issue #24 要求的 meta 字段与 CSV 透传字段。
+- `batch/batch_dual_compare.py`：默认 `mediapipe + pose33_v3` 路径保持旧逻辑；显式
+  `body_core_v1` 时走 `core.body_core_compare` 闭环，输出 `front_debug_score` /
+  `side_debug_score` 与 meta，不写 `front_score` / `combined_percent` 等对外评分列；多人结果标
+  `review_status=需人工复核`。
+- `batch/batch_export_skeleton.py`：默认导出 Pose33 `.npz` 与骨架视频逻辑不变；显式
+  `body_core_v1` 时导出 `features[T,12,2]` 与 backend/layout/calibration/review meta，并在
+  manifest 透传。
+- `batch/batch_tech_eval.py`：默认 MediaPipe full tech_eval 不变；显式 `body_core_v1` 时不做对外
+  技术评分，结构化写出 `无法判定` / `unvalidated_backend` / `score_authorized=False`，YOLO 多人标
+  需人工复核。
+- 新增 `tests/test_batch_backend_args.py`：覆盖默认参数、非法 YOLO+pose33、YOLO meta、调试分数
+  与对外评分列分离、多人复核、NPZ/CSV/JSONL meta 透传。
+
+### 验证方法
+
+```powershell
+E:\CodeProject\vision\.venv\Scripts\python.exe -m pytest tests\test_batch_backend_args.py -q
+E:\CodeProject\vision\.venv\Scripts\python.exe -m pytest tests\test_pose33_v3_golden.py tests\test_body_core_layout.py tests\test_yolo_backend_contract.py -q
+E:\CodeProject\vision\.venv\Scripts\python.exe -m py_compile batch\backend_options.py batch\batch_dual_compare.py batch\batch_export_skeleton.py batch\batch_tech_eval.py
+git diff --check
+```
+
+---
+
 ## 2026-05-31: PR #29 审查补强 — S5 GPU 复测 harness 指标字段
 
 ### 问题描述
