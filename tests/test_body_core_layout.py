@@ -5,8 +5,8 @@ body_core_v1 布局 + 离线模板闭环回归（YOLO 迁移 Issue #8 / S2）。
 验收目标（对应 Issue #8）
 -------------------------
 1. ``body_core_v1`` 的 shape / mirror pairs / joint names / layout mismatch 行为正确。
-2. 能生成 YOLO ``body_core_v1`` 模板并匹配同一视频，产出分数，且该分数 metadata 标
-   ``calibration_status=unvalidated``、未进入对外报告（baseline 未标定）。
+2. 能生成 YOLO ``body_core_v1`` 模板并匹配同一视频，产出预览分数，且该分数 metadata 标
+   ``calibration_status=unvalidated``、未进入对外报告（S3 仅落参数，不授权评分）。
 3. MediaPipe 旧 ``pose33_v3`` 模板仍能正常比对（不在本文件，由 golden 套件保证；
    此处补一条 smoke：MediaPipe 也能生成 body_core_v1 模板，证明布局共享）。
 4. 不同 layout 比对报清晰错误。
@@ -35,7 +35,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from core.action_compare import _assert_feature_layout_match  # noqa: E402
 from core.body_core_compare import (  # noqa: E402
-    BODY_CORE_V1_PLACEHOLDER_BASELINE,
+    BODY_CORE_V1_CALIBRATED_BASELINE,
     CALIBRATION_STATUS_UNVALIDATED,
     MultiPersonReviewRequiredError,
     create_body_core_template,
@@ -79,10 +79,12 @@ def test_body_core_v1_registered_with_shape_and_names():
     )
 
 
-def test_body_core_v1_baseline_is_uncalibrated_placeholder():
-    # 正式标定在 #10：layout 默认 baseline 未定（None），闭环占位 baseline 显式分开。
-    assert BODY_CORE_V1.default_baseline is None
-    assert BODY_CORE_V1_PLACEHOLDER_BASELINE == 2.0
+def test_body_core_v1_baseline_is_calibrated_s3():
+    # S3（#10）已标定：layout 默认 baseline = 1.2826（尺度对齐 pose33_v3 反推），
+    # 闭环 baseline 取自 layout，二者一致；占位 2.0 已移除。
+    assert BODY_CORE_V1.default_baseline == 1.2826
+    assert BODY_CORE_V1_CALIBRATED_BASELINE == 1.2826
+    assert CALIBRATION_STATUS_UNVALIDATED == "unvalidated"
 
 
 def test_body_core_v1_mirror_pairs_are_adjacent():
@@ -256,9 +258,10 @@ def test_yolo_body_core_template_and_match_closed_loop(tmp_path):
     assert feats.ndim == 3 and feats.shape[1:] == (12, 2)
     assert meta["feature_layout"] == "body_core_v1"
     assert meta["backend"] == "yolo"
-    # 未标定标记必须存在（不得对外评分）。
+    # S3（#10）只落参数，不授权评分；分数仍不得进入对外报告。
     assert meta["calibration_status"] == CALIBRATION_STATUS_UNVALIDATED
-    assert meta["baseline_calibrated"] is False
+    assert meta["baseline_calibrated"] is True
+    assert meta["score_authorized"] is False
     assert "calibration_note" in meta
 
     # 2) 用该模板匹配同一视频，产出分数。

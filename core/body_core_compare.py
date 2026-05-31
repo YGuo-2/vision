@@ -14,10 +14,10 @@ MediaPipe 也能生成同一布局模板（供 #10 三方对比）。它是 ``bo
 - **不动 MediaPipe 默认 ``pose33_v3`` 路径**：``apps/make_template.py`` /
   ``compare_video_to_template`` 等旧默认行为完全不变；本模块是显式 opt-in 的独立入口。
 - **YOLO 只允许 ``body_core_v1``**：本模块的 YOLO 路径只产出 / 匹配该布局。
-- **未标定不得对外评分**：``body_core_v1`` baseline 本期为占位值
-  （``BODY_CORE_V1_PLACEHOLDER_BASELINE``，正式标定在 #10），YOLO 侧 ``valid_conf_thr``
-  同样是占位值。因此本模块产出的所有分数 meta 一律标
-  ``calibration_status="unvalidated"``，仅供调试 / S3 标定，**不得进入用户报告 / 正式评分**。
+- **S3（#10）只落参数，不授权出分**：``body_core_v1`` baseline=1.2826（取自
+  ``feature_layout.BODY_CORE_V1.default_baseline``），YOLO 侧 ``valid_conf_thr``=0.6。
+  但跨视频预注册判据未通过，结论为「仅预览 / 内部标定参考」，因此本模块分数 meta
+  仍标 ``calibration_status="unvalidated"``，不得进入用户报告 / 正式评分。
 - **不同 layout 比对报清晰错误**：复用 ``action_compare._assert_feature_layout_match``，
   绝不静默把 ``body_core_v1`` 模板与 ``pose33_v3`` 序列比对。
 """
@@ -39,15 +39,18 @@ from .pose_features import (
     subsequence_dtw,
 )
 
-# body_core_v1 的 DTW baseline 本期为**待标定占位值**（正式标定在 #10）。
-# 刻意不沿用 pose33_v3 的 2.0「已标定」语义——它只是让闭环能产出一个可比较的调试分数。
-BODY_CORE_V1_PLACEHOLDER_BASELINE: float = 2.0
+# body_core_v1 的 DTW baseline 已在 **S3（#10）标定**：取自
+# ``feature_layout.BODY_CORE_V1.default_baseline``（1.2826，按尺度对齐 pose33_v3 反推）。
+# 标定依据见 docs/yolo_body_core_calibration.md。占位 2.0 已移除；但 S3 结论未授权评分。
+BODY_CORE_V1_CALIBRATED_BASELINE: float = float(BODY_CORE_V1.default_baseline or 2.0)
 
-# 未标定状态标记：写入所有闭环输出 meta，下游据此拒绝把分数当对外评分。
+# 标定状态标记（S3 #10）：baseline / YOLO conf 阈值已落库，但跨视频 go/no-go 未通过；
+# 分数只可预览 / 内部标定参考，不得对外评分。
 CALIBRATION_STATUS_UNVALIDATED: str = "unvalidated"
 BODY_CORE_CALIBRATION_NOTE: str = (
-    "body_core_v1 baseline 与（YOLO 路径下的）valid_conf_thr 本期均为待标定占位值"
-    "（calibrated in #10）。本分数仅供调试 / S3 标定使用，不得进入用户报告或正式评分。"
+    "body_core_v1 baseline=1.2826、YOLO valid_conf_thr=0.6 已在 S3（#10）落库，"
+    "但跨视频预注册判据未通过，结论为「仅预览 / 内部标定参考」。"
+    "本分数不得进入用户报告或正式评分；YOLO-only 也不进 full tech_eval。"
 )
 
 # 支持的后端。YOLO 只允许 body_core_v1（在本模块内强制）。
@@ -80,7 +83,7 @@ class MultiPersonReviewRequiredError(RuntimeError):
 
 @dataclass(frozen=True)
 class BodyCoreMatchResult:
-    """body_core_v1 单模板匹配结果（未标定，仅供调试 / 标定）。
+    """body_core_v1 单模板匹配结果（仅供预览 / 内部标定参考）。
 
     多人场景下（``review_required=True``）``score`` 为 ``None``——降级模式不产出分数，
     避免多人视频混入正常评分结果。默认拒绝模式则根本不返回结果（抛
@@ -284,7 +287,8 @@ def create_body_core_template(
     """从视频生成 ``body_core_v1`` 模板（YOLO 或 MediaPipe）。
 
     模板 metadata 写 ``feature_layout=body_core_v1`` 与
-    ``calibration_status=unvalidated``——明确该模板分数未标定、不得对外评分。
+    ``calibration_status=unvalidated``——S3 #10 已落 baseline / conf 阈值，但跨视频
+    go/no-go 未通过，该模板分数仍不得对外评分。
     """
     backend = str(backend).lower()
     video_path = Path(video_path)
@@ -329,11 +333,12 @@ def create_body_core_template(
         "feature_layout": BODY_CORE_V1.name,
         "normalizer_version": "body_core_v1",
         "running_mode": "video",
-        # 未标定标记：本模板分数不得对外评分（正式标定在 #10）。
+        # S3（#10）已落参数，但结论为仅预览 / 内部标定参考，不授权评分。
         "calibration_status": CALIBRATION_STATUS_UNVALIDATED,
         "calibration_note": BODY_CORE_CALIBRATION_NOTE,
-        "baseline": float(BODY_CORE_V1_PLACEHOLDER_BASELINE),
-        "baseline_calibrated": False,
+        "baseline": float(BODY_CORE_V1_CALIBRATED_BASELINE),
+        "baseline_calibrated": True,
+        "score_authorized": False,
     }
     if backend == BACKEND_MEDIAPIPE:
         meta["pose_variant"] = pose_variant
@@ -379,13 +384,13 @@ def match_body_core_template(
     valid_conf_thr: float | None = None,
     reject_multi_person: bool = True,
 ) -> BodyCoreMatchResult:
-    """用 ``body_core_v1`` 模板匹配视频，产出**未标定**调试分数。
+    """用 ``body_core_v1`` 模板匹配视频，产出仅供预览 / 内部标定参考的分数。
 
     - 校验模板 ``feature_layout`` 必须是 ``body_core_v1``；非该布局直接报清晰错误
       （不静默套用 pose33_v3 路径）。
     - 用模板自身 ``feature_layout`` 与视频提取序列做 ``_assert_feature_layout_match``，
       确保 shape / layout 一致。
-    - 返回结果与 meta 都标 ``calibration_status=unvalidated``。
+    - 返回结果标 ``calibration_status=unvalidated``，不得进入用户报告 / 正式评分。
 
     多人场景闸门（Issue #9 / S2）
     -----------------------------
@@ -483,7 +488,7 @@ def match_body_core_template(
     if seq.shape[0] == 0:
         raise RuntimeError(f"视频未产出任何 body_core_v1 帧：{video_path}")
 
-    baseline = float(meta.get("baseline", BODY_CORE_V1_PLACEHOLDER_BASELINE))
+    baseline = float(meta.get("baseline", BODY_CORE_V1_CALIBRATED_BASELINE))
     cost, start, end = subsequence_dtw(query, seq)
     avg_cost = float(cost) / max(1, int(query.shape[0]))
 
@@ -507,7 +512,7 @@ def match_body_core_template(
         avg_cost=float(avg_cost),
         score=score,
         baseline=float(baseline),
-        # 未标定：分数仅供调试 / 标定，不得对外评分。
+        # S3（#10）已落参数，但结论为仅预览 / 内部标定参考，不授权评分。
         calibration_status=CALIBRATION_STATUS_UNVALIDATED,
         valid_frame_ratio=(
             float(backend_meta["body_core_valid_frame_ratio"])

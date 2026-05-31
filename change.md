@@ -1,3 +1,77 @@
+## 2026-05-31: YOLO 迁移 S3 — 标定与基准报告（Issue #10）
+
+### 问题描述
+
+S3 需要在同一批样本上跑三路对照（MediaPipe `pose33_v3` / MediaPipe `body_core_v1` /
+YOLO `body_core_v1`），据**预注册数字判据**确定：① `body_core_v1` 是否可用于评分；
+② 重标定 `body_core_v1` DTW baseline（替换全局占位 `2.0`）；③ 标定 YOLO 侧
+`valid_conf_thr`（替换 #7 占位 `0.5`；是否允许出分由 S3 go/no-go 判据决定）。结论必须对照
+预注册数字、不能是「可用/不建议」这类感觉。硬约束：先预注册阈值与 pass/fail 口径再跑数据；
+多人样本（闸门 `review_required=True`）不得进入标定；MediaPipe 默认 `pose33_v3` 路径与
+golden 不漂移。
+
+### 修改内容
+
+- **新增 `analysis/calibrate_body_core.py`（独立标定脚本，组合既有生产函数，不改主链路默认行为）**：
+  - 每段样本每后端**只推理一次**并缓存到 `outputs/calib_body_core/raw_cache/*.npz`；
+    `valid_conf_thr` 扫描只对缓存 conf 重新阈值化派生 `valid_mask`，不重复推理。
+  - 由 MediaPipe `(T,33,4)` 缓存同时派生 `pose33_v3`（`normalize_pose_xy_v3`）与
+    `body_core_v1`（`normalize_pose_body_core_v1`）；YOLO `(T,33,4)` 缓存派生 YOLO `body_core_v1`。
+  - **成对匹配矩阵**（视角组内，跨视频）：self-match 恒为满分、无方差，故只取跨样本对统计
+    相关性 / baseline / pass-fail，避免 self-match 把相关性虚高成 1.0。
+  - 多人样本由 YOLO 多人闸门（`evaluate_multi_person_gate`，沿用 #9 逻辑不改）排除出标定集。
+- **`core/feature_layout.py`**：`BODY_CORE_V1.default_baseline` 由占位 `None` 标定为 **1.2826**
+  （尺度对齐：`2.0 × median(bodycore_avg_cost)/median(pose33_avg_cost) = 2.0 × 0.6413`），
+  使 body_core 分数与 pose33 同尺度、可共享 pass/fail 阈值。
+- **`core/yolo_adapter.py`**：`DEFAULT_YOLO_VALID_CONF_THR` 由占位 `0.5` 定为 **0.6**；
+  `YOLO_CALIBRATION_STATUS` 保持 `unvalidated`；`CALIBRATION_NOTE` 改写为「参数已落库，
+  但跨视频 go/no-go 未通过，仅预览 / 内部标定参考，不得对外评分」。
+- **`core/body_core_compare.py`**：baseline 取自 layout（`BODY_CORE_V1_CALIBRATED_BASELINE`），
+  移除占位 `BODY_CORE_V1_PLACEHOLDER_BASELINE`；模板/匹配结果 `calibration_status` 仍标
+  `unvalidated`，模板 meta 额外写 `score_authorized=False`，明确不得进入用户报告 / 正式评分。
+- **`apps/make_template.py` / `apps/match_template.py`**：更新 body_core 路径打印文案为「仅预览 /
+  内部标定参考，不得对外评分」。
+- **新增 `docs/yolo_body_core_calibration.md`（标定报告）**：头部预注册 pass/fail 判定口径
+  （模板分数阈值口径、pose33 分数 ≥ 0.55、样本范围=4 段单人）与 7 条数字判据（J1–J7）；
+  正文逐条引用实测数字；**结论四选一 = 「仅预览」**（跨视频 J1 corr 0.280 未达标、
+  J4 一致率 0.50 未达标；J2 corr 0.980、J3 MAE 0.0468、J5 有效率 0.875、J7 失败率 0 达标），
+  并说明含 self-match 的 0.838/0.990/0.0234 只作健全性检查、不可作为验收判据。
+- **新增 `tests/test_s3_calibration.py`**：守卫标定值入库（baseline=1.2826、thr=0.6、状态字符串）、
+  报告存在且头部含预注册数字与四选一结论。
+- **更新既有测试**：`test_body_core_layout.py`（baseline 已标定、`baseline_calibrated=True`）、
+  `test_yolo_backend_contract.py` / `test_yolo_landmark_mapping.py`（`calibration_status` /
+  `valid_conf_thr`=0.6）随标定语义同步。
+
+### 关键结论（详见 docs/yolo_body_core_calibration.md）
+
+- **body_core_v1 仅预览 / 内部标定参考，不授权模板匹配对外出分**：baseline=1.2826、YOLO
+  `valid_conf_thr`=0.6 已落库，但 `calibration_status=unvalidated`、`score_authorized=False`。
+- **不进 full tech_eval**：跨视频 body_core 与 pose33 参照分歧（J1=0.280、J4=0.50）+
+  COCO17 结构性缺点。
+- **阈值标定核心证据**：thr 0.5→0.6 时跨视频 corr(YOLO,MP body_core) 0.105→0.980、
+  MAE 0.1466→0.0468；thr=0.7 无收益反丢帧（有效率最小 0.784）。故取满足 J2/J3 的最小阈值 0.6。
+- **侧面发现**：MediaPipe `visibility>=0.5` 在侧面把远侧关节判为不可见（punch_side body_core
+  有效率仅 0.147），YOLO `conf>=0.6` 在侧面保留更多帧（~0.92–1.0）。
+- **对 #11 分流**：结论 =「仅预览」→ #11 只做 MediaPipe 侧结构化状态改造，
+  不启用 YOLO partial tech_eval。
+
+### 验证方法
+
+```powershell
+.\.venv\Scripts\python.exe -m analysis.calibrate_body_core --calib-conf-thr 0.6 --out outputs/calib_body_core
+.\.venv\Scripts\python.exe -m pytest tests\test_s3_calibration.py -q                              # 5 passed
+.\.venv\Scripts\python.exe -m pytest tests\test_body_core_layout.py tests\test_yolo_backend_contract.py tests\test_yolo_landmark_mapping.py -q  # 含本期标定语义更新
+.\.venv\Scripts\python.exe -m pytest tests\test_pose33_v3_golden.py -q                            # 16 passed（MediaPipe 默认不漂移）
+.\.venv\Scripts\python.exe -m pytest tests -q                                                     # 119 passed（此前 114 + 本期 5 新增）
+.\.venv\Scripts\python.exe -m py_compile core\feature_layout.py core\yolo_adapter.py core\body_core_compare.py analysis\calibrate_body_core.py apps\make_template.py apps\match_template.py  # exit 0
+```
+
+- `tests/test_pose33_v3_golden.py` 全绿 → MediaPipe 旧 `pose33_v3` 路径行为不漂移（行为不变硬门槛）。
+- `tests/test_s3_calibration.py` 全绿 → baseline/阈值/状态已入库、报告头部预注册数字齐全。
+- 全量 119 passed（此前 114 + 本期 5 新增）→ 无回归。
+
+---
+
 ## 2026-05-31: YOLO 迁移 S2 — 多人场景闸门（Issue #9）
 
 ### 问题描述

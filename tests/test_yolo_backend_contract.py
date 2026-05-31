@@ -272,7 +272,8 @@ def test_sequence_layer_returns_numpy_only_with_meta():
     assert meta["confidence_kind"] == "yolo_conf"
     assert meta["validity_policy"] == "confidence_thr"
     assert meta["calibration_status"] == "unvalidated"
-    assert "preview" in meta["calibration_note"].lower() or "debug" in meta["calibration_note"].lower()
+    note = meta["calibration_note"].lower()
+    assert "preview" in note or "must not enter outward-facing scoring" in note
     assert meta["fps"] == pytest.approx(24.0)
     # 段边界 track 重置说明写入 meta
     assert "reset" in meta["track_reset_note"].lower()
@@ -341,7 +342,7 @@ def test_sequence_layer_reuse_adapter_resets_tracker():
 def test_adapter_default_model_path_and_no_eager_load():
     adapter = YoloPoseAdapter()  # 不调用 _load，不触发 ultralytics import
     assert adapter.model_name == "yolo11n-pose.pt"
-    assert adapter.valid_conf_thr == 0.5
+    assert adapter.valid_conf_thr == 0.6  # S3（#10）落库阈值；仍不授权对外评分
     assert adapter.confidence_kind == "yolo_conf"
     # 构造后仍未导入 ultralytics
     assert "ultralytics" not in sys.modules

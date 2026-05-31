@@ -158,7 +158,7 @@ def _match_body_core(args, tpl_meta: dict) -> None:
             f"Cost:     total={res.cost:.2f}  avg/frame={res.avg_cost:.3f}  "
             f"score={res.score:.3f}  baseline={res.baseline:.3f}"
         )
-    print(f"Calibration: {res.calibration_status}（分数未标定，仅供调试/标定，不得对外评分）")
+    print(f"Calibration: {res.calibration_status}（仅预览 / 内部标定参考，不得对外评分）")
     if res.valid_frame_ratio is not None:
         print(f"Valid body_core frames: {res.valid_frame_ratio * 100:.1f}%")
 

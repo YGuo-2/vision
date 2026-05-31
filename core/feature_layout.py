@@ -142,8 +142,11 @@ POSE33_V3 = FeatureLayoutSpec(
 #
 # baseline
 # --------
-# **本期为待标定占位（default_baseline=None，正式标定在 #10）**。在标定前，
-# body_core_v1 的任何 DTW 分数都必须标 calibration_status=unvalidated，不得对外评分。
+# **已在 S3（#10）标定**：default_baseline=1.2826。
+# 标定方法（见 docs/yolo_body_core_calibration.md）：在单人样本的跨视频成对匹配上，
+# 按 avg_cost 尺度比 baseline = pose33_baseline(2.0) * median(bodycore_avg_cost) /
+# median(pose33_avg_cost) = 2.0 * 0.6413 ≈ 1.2826，使 body_core_v1 分数与 pose33_v3
+# 分数同尺度、可共享 pass/fail 阈值。标定前的占位 2.0 已移除。
 # --------------------------------------------------------------------------- #
 _BODY_CORE_V1_JOINT_NAMES: tuple[str, ...] = (
     "L_SHOULDER",
@@ -169,8 +172,8 @@ BODY_CORE_V1 = FeatureLayoutSpec(
     shape=(12, 2),
     mirror_pairs=tuple((i, i + 1) for i in range(0, 12, 2)),  # (0,1),(2,3),...,(10,11)
     joint_names=_BODY_CORE_V1_JOINT_NAMES,
-    # 待标定占位：正式 baseline 在 #10 标定，标定前分数一律 calibration_status=unvalidated。
-    default_baseline=None,
+    # 已在 S3（#10）标定：按尺度对齐反推（见上方说明与 docs/yolo_body_core_calibration.md）。
+    default_baseline=1.2826,
 )
 
 
