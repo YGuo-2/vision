@@ -114,6 +114,13 @@ BLAZE33_MISSING_IN_COCO17: tuple[int, ...] = (
 NUM_BLAZE33: int = 33
 NUM_COCO17: int = 17
 
+# body_core_v1（12,2）布局在 BlazePose33 中的源索引（肩/肘/腕 11..16 + 髋/膝/踝 23..28）。
+# 这 12 个点**全部落在 COCO17 可映射点**（见 COCO17_TO_BLAZE33），因此 YOLO 路径下
+# body_core_v1 是真实点（非合成缺失点）。供 body_core 闭环按 valid_mask 统计有效帧。
+# 与 core.feature_layout.BODY_CORE_V1.source_indices 保持一致（此处冗余定义仅为避免
+# yolo_adapter 反向依赖 feature_layout / 触发循环 import；定义不一致由测试守卫）。
+BODY_CORE_V1_VALID_INDICES: tuple[int, ...] = (11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28)
+
 
 # --------------------------------------------------------------------------- #
 # 边界层结果容器（frozen dataclasses）

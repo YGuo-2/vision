@@ -8,11 +8,11 @@
 让缺帧补零、mirror、关节误差统计、周期裁切等步骤都按 layout 取值，而不是
 写死 22 点 / BlazePose 11..32。
 
-范围（本期严格收敛，见 docs/yolo_migration_issues.md Issue #4）
+范围（见 docs/yolo_migration_issues.md Issue #4 / #8）
 ----------------------------------------------------------------
-- **本期只注册生产用的 ``pose33_v3``**，默认行为完全不变。
-- ``body_core_v1`` 留到 Issue #8（真正接 YOLO 离线闭环、有消费者时）再注册，
-  避免提前建模。
+- ``pose33_v3``：生产默认布局，默认行为完全不变（Issue #4 注册）。
+- ``body_core_v1``：YOLO / MediaPipe 共享的躯干四肢核心 12 点布局，
+  随 YOLO 离线闭环在 **Issue #8（S2）** 引入——此时才真正有消费者，避免提前建模。
 - **不引入** S4 才消费的 ``required_landmarks`` 字段（同样避免提前建模）。
 
 设计要点
@@ -123,6 +123,58 @@ POSE33_V3 = FeatureLayoutSpec(
 
 
 # --------------------------------------------------------------------------- #
+# body_core_v1：YOLO / MediaPipe 共享的躯干四肢核心布局（12 点，YOLO 迁移 Issue #8 / S2）。
+#
+# 为什么在此引入（而非 S1）
+# ------------------------
+# 该布局**只在真接 YOLO 离线闭环时才有消费者**（见 docs/yolo_migration_plan_optimized.md
+# 三审拆层说明）。放进 S1 属提前建模，故下移到 S2（#8）随离线闭环一起引入。
+#
+# 索引（BlazePose33）
+# ------------------
+# 11/12 肩、13/14 肘、15/16 腕、23/24 髋、25/26 膝、27/28 踝——全部落在 COCO17 可映射点，
+# 因此 YOLO 与 MediaPipe 都能诚实产出该布局（不含嘴角/手指/脚跟脚尖等 COCO17 缺失点）。
+#
+# mirror_pairs
+# ------------
+# joint_names 按 L/R 交替排列，故 mirror_pairs 即相邻对 (0,1),(2,3),...,(10,11)，
+# 与 pose33_v3 同构，可被同一套 mirror 逻辑驱动。
+#
+# baseline
+# --------
+# **本期为待标定占位（default_baseline=None，正式标定在 #10）**。在标定前，
+# body_core_v1 的任何 DTW 分数都必须标 calibration_status=unvalidated，不得对外评分。
+# --------------------------------------------------------------------------- #
+_BODY_CORE_V1_JOINT_NAMES: tuple[str, ...] = (
+    "L_SHOULDER",
+    "R_SHOULDER",
+    "L_ELBOW",
+    "R_ELBOW",
+    "L_WRIST",
+    "R_WRIST",
+    "L_HIP",
+    "R_HIP",
+    "L_KNEE",
+    "R_KNEE",
+    "L_ANKLE",
+    "R_ANKLE",
+)
+
+# BlazePose33 源下标（肩/肘/腕 11..16 + 髋/膝/踝 23..28），顺序即布局 J 维顺序。
+_BODY_CORE_V1_SOURCE_INDICES: tuple[int, ...] = (11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28)
+
+BODY_CORE_V1 = FeatureLayoutSpec(
+    name="body_core_v1",
+    source_indices=_BODY_CORE_V1_SOURCE_INDICES,
+    shape=(12, 2),
+    mirror_pairs=tuple((i, i + 1) for i in range(0, 12, 2)),  # (0,1),(2,3),...,(10,11)
+    joint_names=_BODY_CORE_V1_JOINT_NAMES,
+    # 待标定占位：正式 baseline 在 #10 标定，标定前分数一律 calibration_status=unvalidated。
+    default_baseline=None,
+)
+
+
+# --------------------------------------------------------------------------- #
 # 注册表
 # --------------------------------------------------------------------------- #
 _REGISTRY: dict[str, FeatureLayoutSpec] = {}
@@ -180,3 +232,4 @@ def is_valid_feature_shape(shape: tuple[int, ...], *, min_joints: int = MIN_LAYO
 
 
 register_layout(POSE33_V3)
+register_layout(BODY_CORE_V1)

@@ -34,8 +34,50 @@ def main() -> None:
     ap.add_argument("--start", type=int, default=None, help="Override start frame (inclusive)")
     ap.add_argument("--end", type=int, default=None, help="Override end frame (inclusive)")
     ap.add_argument("--preview", action="store_true", help="Export a preview video of the extracted segment")
+    # YOLO 迁移 Issue #8 / S2：body_core_v1 离线闭环（显式 opt-in，默认不变）。
+    ap.add_argument(
+        "--backend",
+        default="mediapipe",
+        choices=["mediapipe", "yolo"],
+        help="Pose backend. 'yolo' 仅支持 --feature-layout body_core_v1（未标定，仅供调试/标定）。",
+    )
+    ap.add_argument(
+        "--feature-layout",
+        dest="feature_layout",
+        default="pose33_v3",
+        choices=["pose33_v3", "body_core_v1"],
+        help="Feature layout. 默认 pose33_v3（MediaPipe 旧默认，行为不变）；body_core_v1 为 S2 共享布局。",
+    )
     args = ap.parse_args()
 
+    # body_core_v1 闭环（YOLO 或 MediaPipe）走独立模块，绝不改动 pose33_v3 默认路径。
+    if args.feature_layout == "body_core_v1" or args.backend == "yolo":
+        _make_body_core_template(args)
+        return
+    _make_pose33_v3_template(args)
+
+
+def _make_body_core_template(args) -> None:
+    """body_core_v1 模板生成（YOLO / MediaPipe 共享布局，未标定，仅供调试/标定）。"""
+    from core.body_core_compare import create_body_core_template
+
+    if args.backend == "yolo" and args.feature_layout != "body_core_v1":
+        raise SystemExit("YOLO 后端仅支持 --feature-layout body_core_v1")
+
+    out_path = create_body_core_template(
+        Path(args.video),
+        backend=args.backend,
+        pose_variant=args.pose,
+        start=args.start,
+        end=args.end,
+        out_path=args.out,
+    )
+    print(f"Saved template: {out_path}")
+    print(f"Backend={args.backend} feature_layout=body_core_v1 (calibration_status=unvalidated)")
+    print("注意：body_core_v1 分数未标定（#10 前），仅供调试/标定，不得对外评分。")
+
+
+def _make_pose33_v3_template(args) -> None:
     video_path = Path(args.video)
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():

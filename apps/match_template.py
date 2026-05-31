@@ -60,8 +60,64 @@ def main() -> None:
     ap.add_argument("--video", required=True, help="Target video to search")
     ap.add_argument("--pose", default=None, choices=["lite", "full", "heavy"], help="Override pose variant")
     ap.add_argument("--preview", action="store_true", help="Export best-match preview video")
+    # YOLO 迁移 Issue #8 / S2：body_core_v1 离线闭环匹配（显式 opt-in）。
+    ap.add_argument(
+        "--backend",
+        default=None,
+        choices=["mediapipe", "yolo"],
+        help="Pose backend override（默认按模板 meta.backend）。body_core_v1 模板才支持 yolo。",
+    )
+    ap.add_argument(
+        "--feature-layout",
+        dest="feature_layout",
+        default=None,
+        choices=["pose33_v3", "body_core_v1"],
+        help="Feature layout override（默认按模板 meta.feature_layout 推断）。",
+    )
     args = ap.parse_args()
 
+    # 按模板 meta 或显式参数判定是否走 body_core_v1 闭环，绝不改动 pose33_v3 默认路径。
+    tpl = np.load(args.template, allow_pickle=True)
+    tpl_meta = dict(tpl["meta"].item() or {})
+    tpl_layout = str(tpl_meta.get("feature_layout", ""))
+    want_body_core = (
+        args.feature_layout == "body_core_v1"
+        or args.backend == "yolo"
+        or tpl_layout == "body_core_v1"
+    )
+    if want_body_core:
+        _match_body_core(args, tpl_meta)
+        return
+    _match_pose33_v3(args)
+
+
+def _match_body_core(args, tpl_meta: dict) -> None:
+    """body_core_v1 模板匹配（未标定调试分数，不得对外评分）。"""
+    from core.body_core_compare import match_body_core_template
+
+    res = match_body_core_template(
+        args.template,
+        Path(args.video),
+        backend=args.backend,
+        pose_variant=args.pose,
+    )
+    print(f"Template: {args.template}")
+    print(f"Video:    {res.video_path}")
+    print(f"Backend:  {res.backend}  feature_layout={res.feature_layout}")
+    print(
+        f"Match:    frames {res.start_frame}..{res.end_frame}  "
+        f"(t={res.start_frame / res.fps:.2f}s..{res.end_frame / res.fps:.2f}s)"
+    )
+    print(
+        f"Cost:     total={res.cost:.2f}  avg/frame={res.avg_cost:.3f}  "
+        f"score={res.score:.3f}  baseline={res.baseline:.3f}"
+    )
+    print(f"Calibration: {res.calibration_status}（分数未标定，仅供调试/标定，不得对外评分）")
+    if res.valid_frame_ratio is not None:
+        print(f"Valid body_core frames: {res.valid_frame_ratio * 100:.1f}%")
+
+
+def _match_pose33_v3(args) -> None:
     tpl = np.load(args.template, allow_pickle=True)
     query = tpl["features"]
     meta = tpl["meta"].item()
