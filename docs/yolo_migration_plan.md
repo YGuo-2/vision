@@ -28,7 +28,7 @@ YOLO-pose 作为主要人体姿态后端是可行的，但不建议把 YOLO COCO
 | `core/action_compare.py` | 模板生成、DTW、双模板比对 | 需要透传 backend/layout，并在 metadata 记录后端、模型、布局、补点策略 |
 | `core/rule_scoring.py` | Pose33 原始数组和规则扣分 | 每条规则声明 required landmarks；缺失时未评估或启用补充后端 |
 | `analysis/tech_eval.py` | 直拳技术指标，依赖脸部/脚部/可见度 | 必须纳入迁移范围，不能只改 `core` |
-| `apps/main.py`、`apps/app_ui.py` | CLI/UI 实时和离线入口 | 增加 backend/layout/rules 完整度配置和提示 |
+| `apps/main.py`、`apps/app_ui.py` | CLI/UI 实时和离线入口 | `apps/main.py` 按 Issue #25 no-go 当前保持 MediaPipe CLI；UI / 后续入口另按 #26 / #28 决策 |
 | `apps/make_template.py`、`apps/match_template.py` | 独立模板脚本 | 增加 backend/layout 参数，拒绝不兼容模板静默混用 |
 | `batch/*.py` | 批量比对、骨架导出、技术评估 | 增加 backend/layout 参数，导出 metadata |
 

@@ -30,6 +30,33 @@ git diff --check
 
 ---
 
+## 2026-05-31: PR #32 审查补强 — 顶层影响面表同步 #25 no-go
+
+### 问题描述
+
+子 agent 审查 PR #32 时指出：`docs/yolo_migration_plan.md` 顶部“当前代码影响面”表仍把
+`apps/main.py` / `apps/app_ui.py` 概括为“增加 backend/layout/rules 完整度配置和提示”。虽然后文
+已经写明 Issue #25 no-go、不实现 `apps/main.py --backend yolo`，但顶部摘要位置显眼，后续只扫表格
+时仍可能误导。
+
+### 修改内容
+
+- `docs/yolo_migration_plan.md`：将顶部影响面表同步为 `apps/main.py` 按 Issue #25 no-go
+  当前保持 MediaPipe CLI，UI / 后续入口另按 #26 / #28 决策。
+- `tests/test_s5_cli_no_go.py`：将该旧表格行加入禁止回流断言，防止摘要层再次承诺 CLI YOLO
+  实时入口。
+
+### 验证方法
+
+```powershell
+E:\CodeProject\vision\.venv\Scripts\python.exe -m pytest tests\test_s5_cli_no_go.py -q
+E:\CodeProject\vision\.venv\Scripts\python.exe -m pytest tests -q
+E:\CodeProject\vision\.venv\Scripts\python.exe -m py_compile apps\main.py tests\test_s5_cli_no_go.py
+git diff --check
+```
+
+---
+
 ## 2026-05-31: YOLO 迁移 S5d — Hybrid 默认不实现决议（Issue #27）
 
 ### 问题描述

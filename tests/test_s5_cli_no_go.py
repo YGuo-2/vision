@@ -45,6 +45,7 @@ def test_plan_docs_do_not_recommend_cli_yolo_runtime():
 
     combined = "\n".join(path.read_text(encoding="utf-8") for path in (PLAN, OPTIMIZED_PLAN))
     legacy_promises = (
+        "| `apps/main.py`、`apps/app_ui.py` | CLI/UI 实时和离线入口 | 增加 backend/layout/rules 完整度配置和提示 |",
         "`apps/main.py` 增加 `--backend`、`--feature-layout`，只作为显式参数。",
         "`apps/main.py` 增加 `--backend`、`--feature-layout`、`--rules-backend` 或等价参数。",
         "`apps/main.py --backend yolo --source input.mp4 --no-show --out out.mp4`",
