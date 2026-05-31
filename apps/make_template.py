@@ -58,7 +58,7 @@ def main() -> None:
 
 
 def _make_body_core_template(args) -> None:
-    """body_core_v1 模板生成（YOLO / MediaPipe 共享布局，未标定，仅供调试/标定）。"""
+    """body_core_v1 模板生成（YOLO / MediaPipe 共享布局，S3 #10 已标定，可用于模板匹配）。"""
     from core.body_core_compare import create_body_core_template
 
     if args.backend == "yolo" and args.feature_layout != "body_core_v1":
@@ -73,8 +73,8 @@ def _make_body_core_template(args) -> None:
         out_path=args.out,
     )
     print(f"Saved template: {out_path}")
-    print(f"Backend={args.backend} feature_layout=body_core_v1 (calibration_status=unvalidated)")
-    print("注意：body_core_v1 分数未标定（#10 前），仅供调试/标定，不得对外评分。")
+    print(f"Backend={args.backend} feature_layout=body_core_v1 (calibration_status=calibrated_body_core_v1)")
+    print("说明：body_core_v1 已在 S3（#10）标定，可用于 body_core_v1 模板匹配出分；不进 full tech_eval。")
 
 
 def _make_pose33_v3_template(args) -> None:

@@ -171,7 +171,7 @@ def test_map_coco17_person_returns_arrays_and_frameresult():
     assert frame.meta is not None
     assert frame.meta["confidence_kind"] == "yolo_conf"
     assert frame.meta["validity_policy"] == "confidence_thr"
-    assert frame.meta["calibration_status"] == "unvalidated"
+    assert frame.meta["calibration_status"] == "calibrated_body_core_v1"
 
 
 # --------------------------------------------------------------------------- #
@@ -193,6 +193,6 @@ def test_yolo_result_to_arrays_numpy_only():
         assert valid[miss] == False  # noqa: E712
 
 
-def test_default_thr_is_placeholder_constant():
-    # 占位阈值刻意与 MediaPipe 分开（待 #10 标定）。
-    assert DEFAULT_YOLO_VALID_CONF_THR == 0.5
+def test_default_thr_is_calibrated_constant():
+    # S3（#10）已标定阈值 0.6，刻意与 MediaPipe（0.5）分开。
+    assert DEFAULT_YOLO_VALID_CONF_THR == 0.6

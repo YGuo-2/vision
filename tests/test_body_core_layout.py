@@ -35,7 +35,8 @@ if str(_REPO_ROOT) not in sys.path:
 
 from core.action_compare import _assert_feature_layout_match  # noqa: E402
 from core.body_core_compare import (  # noqa: E402
-    BODY_CORE_V1_PLACEHOLDER_BASELINE,
+    BODY_CORE_V1_CALIBRATED_BASELINE,
+    CALIBRATION_STATUS_CALIBRATED,
     CALIBRATION_STATUS_UNVALIDATED,
     MultiPersonReviewRequiredError,
     create_body_core_template,
@@ -79,10 +80,13 @@ def test_body_core_v1_registered_with_shape_and_names():
     )
 
 
-def test_body_core_v1_baseline_is_uncalibrated_placeholder():
-    # 正式标定在 #10：layout 默认 baseline 未定（None），闭环占位 baseline 显式分开。
-    assert BODY_CORE_V1.default_baseline is None
-    assert BODY_CORE_V1_PLACEHOLDER_BASELINE == 2.0
+def test_body_core_v1_baseline_is_calibrated_s3():
+    # S3（#10）已标定：layout 默认 baseline = 1.2826（尺度对齐 pose33_v3 反推），
+    # 闭环 baseline 取自 layout，二者一致；占位 2.0 已移除。
+    assert BODY_CORE_V1.default_baseline == 1.2826
+    assert BODY_CORE_V1_CALIBRATED_BASELINE == 1.2826
+    # 兼容旧别名现在指向已标定状态。
+    assert CALIBRATION_STATUS_UNVALIDATED == CALIBRATION_STATUS_CALIBRATED
 
 
 def test_body_core_v1_mirror_pairs_are_adjacent():
@@ -256,9 +260,9 @@ def test_yolo_body_core_template_and_match_closed_loop(tmp_path):
     assert feats.ndim == 3 and feats.shape[1:] == (12, 2)
     assert meta["feature_layout"] == "body_core_v1"
     assert meta["backend"] == "yolo"
-    # 未标定标记必须存在（不得对外评分）。
-    assert meta["calibration_status"] == CALIBRATION_STATUS_UNVALIDATED
-    assert meta["baseline_calibrated"] is False
+    # S3（#10）已标定：可用于 body_core_v1 模板匹配出分。
+    assert meta["calibration_status"] == CALIBRATION_STATUS_CALIBRATED
+    assert meta["baseline_calibrated"] is True
     assert "calibration_note" in meta
 
     # 2) 用该模板匹配同一视频，产出分数。
