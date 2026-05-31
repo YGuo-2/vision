@@ -292,7 +292,9 @@ Hybrid，也不在代码库保留半成品 runtime 路径。
 负责人：应用工程。
 
 任务：
-- `apps/main.py` 增加 `--backend`、`--feature-layout`、`--rules-backend` 或等价参数。
+- `apps/main.py` 的 YOLO 实时预览入口已由 Issue #25 / `docs/yolo_gpu_recheck_report.md`
+  supersede：#23 GPU 复测 no-go 时当前不实现 `--backend yolo` / `--feature-layout body_core_v1`，
+  保持既有 MediaPipe CLI 默认路径；未来若要恢复，必须先重新跑满 GPU 复测并另开实现子任务。
 - `apps/app_ui.py` 增加后端选择、特征布局选择、规则完整度提示。
 - `apps/make_template.py`、`apps/match_template.py`、`batch/batch_dual_compare.py`、`batch/batch_export_skeleton.py`、`batch/batch_tech_eval.py` 透传 backend/layout/supplement。
 - 更新 README 或使用说明。
@@ -302,11 +304,12 @@ Hybrid，也不在代码库保留半成品 runtime 路径。
 - UI 文案要避免承诺 YOLO-only 可完整评估所有规则。
 
 验收标准：
-- CLI 可运行：
-  - `apps/main.py --backend mediapipe --source 0`
-  - `apps/main.py --backend yolo --source input.mp4 --no-show --out out.mp4`
+- CLI 当前可运行 / 可保留：
+  - `apps/main.py --source 0`
+  - `apps/main.py --source input.mp4 --no-show --out out.mp4`
   - `apps/make_template.py --backend yolo --feature-layout body_core_v1 ...`
   - `apps/match_template.py --backend yolo --feature-layout body_core_v1 ...`
+- `apps/main.py` 的 YOLO 实时预览命令不属于当前验收范围；除非未来另开 #25 后续实现子任务，否则不加入当前 CLI 可运行清单。
 - UI 主预览、动作比对、直拳检测都能选择后端。
 - batch 输出包含 backend/layout/supplement metadata。
 
