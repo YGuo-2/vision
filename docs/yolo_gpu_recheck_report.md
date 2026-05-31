@@ -138,7 +138,32 @@ E:\CodeProject\vision\.venv\Scripts\python.exe -m analysis.bench_annotate_fps `
 
 ---
 
-## 六、Hybrid 决议（Issue #27）
+## 六、CLI 实时预览决议（Issue #25）
+
+**结论：不实现 `apps/main.py --backend yolo` / `--feature-layout body_core_v1` 实时预览入口。**
+
+Issue #25 的启动条件是 #23 GPU 复测 = go；当前 #23 已按预注册阈值判定 no-go，因此本期不把
+YOLO 接入 `apps/main.py` 的实时预览主链路，也不新增会被用户误认为可用的 `--backend yolo`
+参数。`apps/main.py` 继续保持 MediaPipe 旧默认行为：`--source` / `--pose` / `--workers` 等既有
+参数不变，实时预览仍由 `MediaPipePipeline.annotate()` 负责。
+
+本决议按 Issue #25 的验收标准逐条对照：
+
+| 判据 | Issue #25 要求 | 当前数字 / 事实 | 结论 |
+|---|---|---|---|
+| 前置条件 | #23 GPU 复测 = go 才启动 | #23 判定 no-go | 不启动 |
+| GPU runtime | CUDA runtime 可用 | `torch.cuda.is_available() = False`，device_count=0 | 不满足 |
+| 样本覆盖 | 6/6 个样本有有效 GPU benchmark 行 | 0/6 | 不满足 |
+| Hands 关实时提速 | YOLO body 预览 / MP pose-only FPS 比 >= 1.30 | 无有效 GPU 行 | 不满足 |
+| Hands 开实时提速 | YOLO body + MP Hands / MP Pose+Hands FPS 比 >= 1.20 | 无有效 GPU 行 | 不满足 |
+| 评分边界 | YOLO-only 不产出规则 / tech_eval 对外评分 | #24 仅保留离线 batch 调试 / 标定入口，`score_authorized=False` | 满足边界 |
+
+因此 #25 当前只能关闭，不做实现。若未来要重新打开 CLI 实时预览入口，必须先满足第八节 GPU
+复测前置条件，并另开新的实现子任务；在此之前，不得预先写入 YOLO realtime runtime 或参数入口。
+
+---
+
+## 七、Hybrid 决议（Issue #27）
 
 **结论：不实现 `yolo_body_mp_pose_supplement`，代码库不保留半成品 Hybrid 路径。**
 
@@ -168,7 +193,7 @@ E:\CodeProject\vision\.venv\Scripts\python.exe -m analysis.bench_annotate_fps `
 
 ---
 
-## 七、后续若要复测 GPU 的前置条件
+## 八、后续若要复测 GPU 的前置条件
 
 若之后要重新打开 #25 / #26，先不要改主链路，先满足以下条件并复跑本报告命令：
 
