@@ -58,15 +58,24 @@ BACKEND_YOLO = "yolo"
 class MultiPersonReviewRequiredError(RuntimeError):
     """多人场景闸门拒绝出分（YOLO 迁移 Issue #9 / S2）。
 
-    YOLO 检出 ``num_persons>1`` 时「最大框取单人」可能稳定选错实例——这是正确性风险。
-    默认（``reject_multi_person=True``）下，``match_body_core_template`` 直接抛本异常，
-    确保多人视频**不混入正常评分结果**，必须人工复核。
+    YOLO 模板或目标视频检出 ``num_persons>1`` 时「最大框取单人」可能稳定选错实例——
+    这是正确性风险。默认（``reject_multi_person=True``）下，
+    ``match_body_core_template`` 直接抛本异常，确保多人来源**不混入正常评分结果**，
+    必须人工复核。
     """
 
-    def __init__(self, message: str, *, max_persons: int = 0, multi_person_frames: int = 0) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        max_persons: int = 0,
+        multi_person_frames: int = 0,
+        gate_source: str = "video",
+    ) -> None:
         super().__init__(message)
         self.max_persons = int(max_persons)
         self.multi_person_frames = int(multi_person_frames)
+        self.gate_source = str(gate_source)
 
 
 @dataclass(frozen=True)
@@ -96,6 +105,7 @@ class BodyCoreMatchResult:
     multi_person_detected: bool = False
     max_persons: int = 0
     multi_person_frames: int = 0
+    multi_person_gate_source: str = ""
 
 
 # --------------------------------------------------------------------------- #
@@ -379,9 +389,10 @@ def match_body_core_template(
 
     多人场景闸门（Issue #9 / S2）
     -----------------------------
-    YOLO 路径下检出 ``num_persons>1`` 时「最大框取单人」可能稳定选错实例（正确性风险）：
+    YOLO 模板或目标视频检出 ``num_persons>1`` 时「最大框取单人」可能稳定选错实例
+    （正确性风险）：
       - ``reject_multi_person=True``（默认）：抛 ``MultiPersonReviewRequiredError``，
-        多人视频**不混入正常评分结果**，必须人工复核。
+        多人来源**不混入正常评分结果**，必须人工复核。
       - ``reject_multi_person=False``：降级——返回 ``score=None`` 且
         ``review_required=True`` 的结果，仍不产出分数，供 batch 标「需人工复核」。
     单人 / MediaPipe 路径不受影响。
@@ -406,6 +417,23 @@ def match_body_core_template(
     eff_backend = str(backend or meta.get("backend") or BACKEND_MEDIAPIPE).lower()
     pv = pose_variant or meta.get("pose_variant", "full")
 
+    # 模板来源本身也受多人闸门约束：如果 YOLO 模板由多人视频生成，后续匹配同样
+    # 不能产出正常分数。默认拒绝时可在跑目标视频推理前快速失败。
+    template_review_required = bool(meta.get("review_required", False))
+    template_multi_person_detected = bool(meta.get("multi_person_detected", False))
+    template_max_persons = int(meta.get("max_persons", 0))
+    template_multi_person_frames = int(meta.get("multi_person_frames", 0))
+    if template_review_required and reject_multi_person:
+        raise MultiPersonReviewRequiredError(
+            f"多人场景闸门拒绝出分：模板 {template_path} 来源视频检出多人"
+            f"（max_persons={template_max_persons}，"
+            f"multi_person_frames={template_multi_person_frames}）。"
+            "YOLO「最大框取单人」可能稳定选错实例，该模板需人工复核，不得进入正常评分。",
+            max_persons=template_max_persons,
+            multi_person_frames=template_multi_person_frames,
+            gate_source="template",
+        )
+
     seq, fps, backend_meta = extract_body_core_features(
         video_path,
         backend=eff_backend,
@@ -414,20 +442,32 @@ def match_body_core_template(
         valid_conf_thr=valid_conf_thr,
     )
 
-    # 多人闸门（Issue #9）：YOLO 路径透传 review_required / multi_person_detected。
+    # 多人闸门（Issue #9）：YOLO 模板 meta 与目标视频 meta 都参与判定。
     # MediaPipe 路径无该字段，默认单人，不受影响。
-    review_required = bool(backend_meta.get("review_required", False))
-    multi_person_detected = bool(backend_meta.get("multi_person_detected", False))
-    max_persons = int(backend_meta.get("max_persons", 0))
-    multi_person_frames = int(backend_meta.get("multi_person_frames", 0))
+    video_review_required = bool(backend_meta.get("review_required", False))
+    video_multi_person_detected = bool(backend_meta.get("multi_person_detected", False))
+    video_max_persons = int(backend_meta.get("max_persons", 0))
+    video_multi_person_frames = int(backend_meta.get("multi_person_frames", 0))
+
+    review_required = bool(template_review_required or video_review_required)
+    multi_person_detected = bool(template_multi_person_detected or video_multi_person_detected)
+    max_persons = max(template_max_persons, video_max_persons)
+    multi_person_frames = int(template_multi_person_frames + video_multi_person_frames)
+    gate_sources: list[str] = []
+    if template_review_required:
+        gate_sources.append("template")
+    if video_review_required:
+        gate_sources.append("video")
+    multi_person_gate_source = "+".join(gate_sources)
 
     if review_required and reject_multi_person:
         raise MultiPersonReviewRequiredError(
             f"多人场景闸门拒绝出分：{video_path} 检出多人"
-            f"（max_persons={max_persons}，multi_person_frames={multi_person_frames}）。"
+            f"（max_persons={video_max_persons}，multi_person_frames={video_multi_person_frames}）。"
             "YOLO「最大框取单人」可能稳定选错实例，该视频需人工复核，不得进入正常评分。",
             max_persons=max_persons,
             multi_person_frames=multi_person_frames,
+            gate_source=multi_person_gate_source or "video",
         )
 
     # 不同 layout / shape 不允许静默比对。
@@ -478,4 +518,5 @@ def match_body_core_template(
         multi_person_detected=multi_person_detected,
         max_persons=max_persons,
         multi_person_frames=multi_person_frames,
+        multi_person_gate_source=multi_person_gate_source,
     )

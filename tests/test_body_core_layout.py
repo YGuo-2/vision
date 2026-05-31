@@ -483,3 +483,23 @@ def test_multi_person_template_meta_flags_review_required(tmp_path):
     assert meta["multi_person_detected"] is True
     assert meta["review_required"] is True
     assert meta["max_persons"] == 2
+
+
+def test_match_rejects_multi_person_template_by_default(tmp_path):
+    # 多人来源模板本身也不得进入正常评分；默认拒绝时无需等目标视频推理完成。
+    out_tpl = tmp_path / "multi_tpl.npz"
+    n = 30
+    frames = _periodic_yolo_frames(n)
+    frames[7] = _multi_person_body_core_frame()
+    adapter_make = FakeYoloAdapter(frames=frames, valid_conf_thr=0.5)
+    with patch_cv2_capture(n_frames=n, fps=30.0):
+        tpl_path = create_body_core_template(
+            "fake://multi_std.mp4", backend="yolo", out_path=out_tpl, yolo_model=adapter_make
+        )
+
+    with pytest.raises(MultiPersonReviewRequiredError) as ei:
+        match_body_core_template(tpl_path, "fake://single.mp4", backend="yolo")
+
+    assert ei.value.gate_source == "template"
+    assert ei.value.max_persons == 2
+    assert ei.value.multi_person_frames == 1

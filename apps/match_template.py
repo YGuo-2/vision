@@ -116,10 +116,15 @@ def _match_body_core(args, tpl_meta: dict) -> None:
             reject_multi_person=not args.allow_multi_person,
         )
     except MultiPersonReviewRequiredError as e:
+        source_label = {
+            "template": "模板来源视频",
+            "video": "待匹配视频",
+            "template+video": "模板来源视频与待匹配视频",
+        }.get(getattr(e, "gate_source", "video"), "多人来源")
         print(f"Template: {args.template}")
         print(f"Video:    {args.video}")
         print(
-            "多人场景闸门：检出多人（max_persons="
+            f"多人场景闸门：{source_label}检出多人（max_persons="
             f"{e.max_persons}，multi_person_frames={e.multi_person_frames}），"
             "拒绝出分 → 需人工复核（不混入正常评分结果）。"
         )
@@ -134,12 +139,17 @@ def _match_body_core(args, tpl_meta: dict) -> None:
         f"(t={res.start_frame / res.fps:.2f}s..{res.end_frame / res.fps:.2f}s)"
     )
     if res.review_required or res.score is None:
+        source_label = {
+            "template": "模板来源视频",
+            "video": "待匹配视频",
+            "template+video": "模板来源视频与待匹配视频",
+        }.get(res.multi_person_gate_source or "video", "多人来源")
         print(
             f"Cost:     total={res.cost:.2f}  avg/frame={res.avg_cost:.3f}  "
             f"score=N/A  baseline={res.baseline:.3f}"
         )
         print(
-            "多人场景闸门：检出多人（max_persons="
+            f"多人场景闸门：{source_label}检出多人（max_persons="
             f"{res.max_persons}，multi_person_frames={res.multi_person_frames}），"
             "降级为『需人工复核』，不产出对外分数。"
         )

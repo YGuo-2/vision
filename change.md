@@ -31,6 +31,8 @@ meta，在 YOLO 评分入口（#8 的 `body_core_compare` 闭环）强制拒绝/
     默认多人抛 `MultiPersonReviewRequiredError`（不混入正常评分）；
     `reject_multi_person=False` 时降级——返回 `score=None` + `review_required=True`。
     单人 / MediaPipe 路径不受影响。
+  - 审查补强：`match_body_core_template` 同时检查模板 meta 与目标视频 meta；YOLO 模板若由
+    多人视频生成，默认也会拒绝出分，降级时 `score=None`，避免多人来源模板继续参与正常评分。
   - `_extract_body_core_yolo` 随 `backend_meta` 透传闸门字段；`create_body_core_template`
     把多人闸门字段（`multi_person_detected`/`review_required`/`gate_status` 等）一并写入模板 meta。
 - **`apps/match_template.py` CLI 接线**：新增 `--allow-multi-person`（降级而非拒绝）；
@@ -41,15 +43,15 @@ meta，在 YOLO 评分入口（#8 的 `body_core_compare` 闭环）强制拒绝/
     判定；序列层多人帧触发 `multi_person_detected`/`review_required`/`gate_status`，单人样本不触发。
   - `tests/test_body_core_layout.py` 增补：默认多人视频抛 `MultiPersonReviewRequiredError`、
     `--allow-multi-person` 降级返回 `score=None`+`review_required=True`、单人不受影响、
-    多人来源模板 meta 透传 `review_required`。全程用 fake adapter + `patch_cv2_capture`，
-    无网络、不下载模型、不读真实视频。
+    多人来源模板 meta 透传 `review_required`，并补充多人来源模板默认拒绝出分回归。
+    全程用 fake adapter + `patch_cv2_capture`，无网络、不下载模型、不读真实视频。
 
 ### 验证方法
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest tests\test_yolo_backend_contract.py tests\test_body_core_layout.py -q   # 38 passed（含本期多人闸门用例）
+.\.venv\Scripts\python.exe -m pytest tests\test_yolo_backend_contract.py tests\test_body_core_layout.py -q   # 39 passed（含本期多人闸门用例）
 .\.venv\Scripts\python.exe -m pytest tests\test_pose33_v3_golden.py -q                                        # 16 passed（MediaPipe 默认不漂移）
-.\.venv\Scripts\python.exe -m pytest tests -q                                                                 # 113 passed（此前 104 + 本期 9 新增）
+.\.venv\Scripts\python.exe -m pytest tests -q                                                                 # 114 passed（此前 104 + 本期 10 新增）
 .\.venv\Scripts\python.exe -m py_compile core\yolo_adapter.py core\body_core_compare.py apps\match_template.py apps\make_template.py apps\app_ui.py apps\main.py   # exit 0
 ```
 
@@ -57,7 +59,7 @@ meta，在 YOLO 评分入口（#8 的 `body_core_compare` 闭环）强制拒绝/
 - 多人帧触发 `multi_person_detected`/`review_required` 并被拒绝/降级，不静默选最大框（验收①）。
 - 多人视频明确标「需人工复核/拒绝」，不混入正常评分结果（验收②）。
 - 单人样本照常出分、不受闸门影响（验收③）。
-- 全量 113 passed（此前 104 + 本期 9 新增）→ 无回归。
+- 全量 114 passed（此前 104 + 本期 10 新增）→ 无回归。
 
 ---
 
