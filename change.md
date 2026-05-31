@@ -1,4 +1,4 @@
-## 2026-06-01: YOLO 迁移 S1 — artifact root 统一 + 模板 metadata 扩展（Issue #6）
+## 2026-05-31: YOLO 迁移 S1 — artifact root 统一 + 模板 metadata 扩展（Issue #6）
 
 ### 问题描述
 
@@ -27,14 +27,17 @@ golden 不漂移、旧模板仍可加载比对。
     `batch/batch_dual_compare.py`（均保留 `--out_dir` 覆盖分支）。
 - **模板 metadata 扩展（增量字段）**：在两处写模板入口
   （`core/action_compare.py::create_template_from_video`、`apps/make_template.py`）的 `meta`
-  新增 `backend="mediapipe"`、`model_name="pose_landmarker_<variant>"`、`feature_layout_name="pose33_v3"`、
+  新增 `backend="mediapipe"`、`model_name="pose_landmarker_<variant>"`、`feature_layout="pose33_v3"`、
   `normalizer_version="v3"`、`confidence_kind="visibility"`、`validity_policy=MEDIAPIPE_VALIDITY_POLICY`、
   `valid_conf_thr=DEFAULT_VALID_CONF_THR`（后两者复用 `core.pose_features` 集中式常量）。
-  既有 `feature_layout` 字符串保持不变（loader 仍按其 `_v3` 后缀分支），评分逻辑不变。
+  旧模板里的历史 `feature_layout="pose_indices_11_32_xy_rot_scale_norm_v3"` 作为 legacy alias 兼容读取，
+  新模板统一写 #4 注册表布局名，便于 #7/#8 后续直接读取同一字段。
 - **旧模板兼容加载**：`core/action_compare.py` 新增 `template_meta_defaults()` 与
   `normalize_template_meta()`（`setdefault` 补默认、不覆盖已有键），在
   `compare_video_to_template` / `compare_video_to_dual_templates` 的 `meta = tpl["meta"].item()`
   之后统一补齐，缺字段的旧模板照常加载比对。
+- **审查修复**：规范 metadata 字段名，移除新模板写入 `feature_layout_name` 的分叉；双模板比较时
+  canonical 化旧/新 `pose33_v3` alias，避免一个旧模板搭配一个新模板时被误判为 layout mismatch。
 - **.gitignore**：补充 Issue #6 统一根目录注释块，保留 `templates/`、`outputs/`、
   `models/*.task|*.pt|*.onnx`，并保留 `core/models/*.task`、`analysis/models/*.task`（旧拷贝仍在磁盘）。
 - **测试**：新增 `tests/test_artifact_roots.py`（各入口解析到同一 models/templates/outputs root，
@@ -45,9 +48,9 @@ golden 不漂移、旧模板仍可加载比对。
 
 ```powershell
 .\.venv\Scripts\python.exe -m py_compile apps\main.py apps\app_ui.py apps\make_template.py apps\match_template.py core\vision_pipeline.py core\action_compare.py core\rule_scoring.py core\pose_features.py core\paths.py analysis\tech_eval.py batch\batch_tech_eval.py batch\batch_export_skeleton.py batch\batch_dual_compare.py
-.\.venv\Scripts\python.exe -m pytest tests\test_artifact_roots.py tests\test_template_metadata.py -q   # 10 passed
+.\.venv\Scripts\python.exe -m pytest tests\test_artifact_roots.py tests\test_template_metadata.py -q   # 13 passed
 .\.venv\Scripts\python.exe -m pytest tests\test_pose33_v3_golden.py -q                                  # 16 passed（行为不漂移）
-.\.venv\Scripts\python.exe -m pytest tests -q                                                           # 61 passed
+.\.venv\Scripts\python.exe -m pytest tests -q                                                           # 64 passed
 ```
 
 - `tests/test_pose33_v3_golden.py` 全绿 → metadata 扩展未改动 features / 分数 / golden（行为不变硬门槛）。

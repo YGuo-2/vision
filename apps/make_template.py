@@ -15,6 +15,7 @@ from core.pose_features import (
     motion_energy,
     normalize_pose_xy_v3,
 )
+from core.feature_layout import POSE33_V3
 from core.paths import models_dir, templates_dir
 from core.video_writer import open_video_writer
 
@@ -91,13 +92,12 @@ def main() -> None:
         "start_frame": int(start),
         "end_frame": int(end),
         "pose_variant": args.pose,
-        "feature_layout": "pose_indices_11_32_xy_rot_scale_norm_v3",
+        "feature_layout": POSE33_V3.name,
         "running_mode": "video",
         "cfg": asdict(PipelineConfig(pose_variant=args.pose, running_mode="video", enable_hands=False)),
         # 模板 metadata 扩展（YOLO 迁移 S1 / Issue #6）：增量字段，向后兼容。
         "backend": "mediapipe",
         "model_name": f"pose_landmarker_{args.pose}",
-        "feature_layout_name": "pose33_v3",
         "normalizer_version": "v3",
         "confidence_kind": "visibility",
         "validity_policy": MEDIAPIPE_VALIDITY_POLICY,

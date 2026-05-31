@@ -8,6 +8,7 @@ import numpy as np
 
 from core.vision_pipeline import MediaPipePipeline, PipelineConfig
 from core.pose_features import normalize_pose_xy, normalize_pose_xy_v1, normalize_pose_xy_v3, subsequence_dtw
+from core.feature_layout import POSE33_V3
 from core.paths import models_dir, templates_dir
 from core.video_writer import open_video_writer
 
@@ -66,7 +67,7 @@ def main() -> None:
     meta = tpl["meta"].item()
     pose_variant = args.pose or meta.get("pose_variant", "full")
     layout = str(meta.get("feature_layout", "pose_indices_11_32_xy_rot_scale_norm"))
-    if layout.endswith("_v3"):
+    if layout == POSE33_V3.name or layout.endswith("_v3"):
         normalizer = normalize_pose_xy_v3
     elif layout.endswith("_v2"):
         normalizer = normalize_pose_xy
