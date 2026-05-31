@@ -76,6 +76,9 @@ GPU 数字；当前有效 GPU benchmark 行为 0，所以按预注册阈值判 n
 - MediaPipe 路径调用 `MediaPipePipeline.annotate()`，分 Hands 开 / 关两档。
 - YOLO 路径调用 `YoloPoseAdapter.infer_frame()`，只绘制 `body_core_v1` 有效点；Hands 开时只额外调用
   MediaPipe HandLandmarker，不调用 MediaPipe Pose 补点。
+- CUDA 可用时，YOLO 记录 `yolo_raw_infer_fps`、`yolo_miss_rate`、
+  `yolo_body_core_missing_rate`、`yolo_body_core_jitter_median`，用于对照第二节裸推理 FPS、
+  失败 / 漏检帧率与抖动阈值。
 - 写出 `outputs/gpu_recheck/gpu_recheck_env.json`、
   `outputs/gpu_recheck/annotate_fps_gpu_recheck.json`、CSV；`outputs/` 受 `.gitignore` 排除。
 - 不修改 `apps/main.py`、不改 `MediaPipePipeline` 默认行为、不接入主链路。

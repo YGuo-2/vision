@@ -1,3 +1,34 @@
+## 2026-05-31: PR #29 审查补强 — S5 GPU 复测 harness 指标字段
+
+### 问题描述
+
+子 agent 审查 PR #29 时指出：当前 CUDA 不可用时报告可以产出 no-go 证据，但若后续换成
+CUDA-enabled torch 复跑，`analysis/bench_annotate_fps.py` 的 CUDA 可用分支只写
+`annotate_fps`，尚不能产出 #23 预注册表要求对照的 YOLO 裸推理 FPS、漏检 / 缺失帧率与
+body_core 抖动指标。
+
+### 修改内容
+
+- `analysis/bench_annotate_fps.py`：YOLO 预览分支在每帧 `infer_frame()` 周围单独计时，输出
+  `yolo_raw_infer_fps` / `yolo_raw_infer_sec`；统计 `yolo_miss_rate`、
+  `yolo_body_core_full_valid_rate`、`yolo_body_core_missing_rate`；基于连续 full-valid
+  body_core 帧计算 `yolo_body_core_jitter_median`。
+- `docs/yolo_gpu_recheck_report.md`：补充说明 CUDA 可用时 harness 会写出上述字段，用于对照裸推理
+  FPS、失败 / 漏检帧率与抖动阈值。
+- `tests/test_s5_gpu_recheck.py`：新增 body_core 抖动 helper 与 CSV schema 回归，锁住 #23
+  预注册指标字段不会被后续删掉。
+
+### 验证方法
+
+```powershell
+E:\CodeProject\vision\.venv\Scripts\python.exe -m pytest tests\test_s5_gpu_recheck.py tests\test_yolo_backend_contract.py -q
+E:\CodeProject\vision\.venv\Scripts\python.exe -m pytest tests -q
+E:\CodeProject\vision\.venv\Scripts\python.exe -m py_compile analysis\bench_annotate_fps.py
+git diff --check
+```
+
+---
+
 ## 2026-05-31: YOLO 迁移 S5 — GPU 复测决策门（Issue #23）
 
 ### 问题描述

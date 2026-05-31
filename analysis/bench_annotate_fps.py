@@ -186,6 +186,11 @@ class YoloPreviewAnnotator:
         )
         self.enable_hands = bool(enable_hands)
         self.hand_landmarker: Any = None
+        self.frames = 0
+        self.yolo_raw_infer_sec = 0.0
+        self.detected_frames = 0
+        self.body_core_full_valid_frames = 0
+        self._body_core_rows: list[np.ndarray | None] = []
         if self.enable_hands:
             import mediapipe as mp
 
@@ -203,7 +208,18 @@ class YoloPreviewAnnotator:
 
     def annotate(self, frame_bgr: np.ndarray, *, timestamp_ms: int) -> np.ndarray:
         out = frame_bgr.copy()
+        t_infer = time.perf_counter()
         frame_result = self.adapter.infer_frame(frame_bgr)
+        self.yolo_raw_infer_sec += time.perf_counter() - t_infer
+        self.frames += 1
+        meta = frame_result.meta or {}
+        if frame_result.pose33 is not None and int(meta.get("num_persons") or 0) > 0:
+            self.detected_frames += 1
+        body_core = _body_core_xy_from_frame(frame_result, self.adapter.valid_conf_thr)
+        if body_core is not None:
+            self.body_core_full_valid_frames += 1
+        self._body_core_rows.append(body_core)
+
         _draw_yolo_body(out, frame_result, self.adapter.valid_conf_thr)
         if self.hand_landmarker is not None:
             rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
@@ -216,6 +232,72 @@ class YoloPreviewAnnotator:
     def close(self) -> None:
         if self.hand_landmarker is not None:
             self.hand_landmarker.close()
+
+    def metrics(self) -> dict[str, Any]:
+        miss_rate = 1.0 - (self.detected_frames / self.frames) if self.frames > 0 else None
+        full_valid_rate = (
+            self.body_core_full_valid_frames / self.frames if self.frames > 0 else None
+        )
+        return {
+            "yolo_raw_infer_sec": round(self.yolo_raw_infer_sec, 4),
+            "yolo_raw_infer_fps": (
+                round(self.frames / self.yolo_raw_infer_sec, 3)
+                if self.yolo_raw_infer_sec > 0 else 0.0
+            ),
+            "yolo_miss_rate": _round_or_none(miss_rate),
+            "yolo_body_core_full_valid_rate": _round_or_none(full_valid_rate),
+            "yolo_body_core_missing_rate": _round_or_none(
+                1.0 - full_valid_rate if full_valid_rate is not None else None
+            ),
+            "yolo_body_core_jitter_median": _round_or_none(
+                _body_core_jitter_median(self._body_core_rows)
+            ),
+        }
+
+
+def _round_or_none(value: float | None, digits: int = 4) -> float | None:
+    return None if value is None else round(float(value), digits)
+
+
+def _body_core_xy_from_frame(frame_result: FrameResult, valid_conf_thr: float) -> np.ndarray | None:
+    pose = frame_result.pose33
+    if not pose:
+        return None
+
+    points: list[tuple[float, float]] = []
+    for idx in BODY_CORE_V1_VALID_INDICES:
+        lm = pose[idx]
+        conf = lm.confidence if lm.confidence is not None else lm.visibility
+        if lm.synthetic or conf < valid_conf_thr:
+            return None
+        points.append((float(lm.x), float(lm.y)))
+    return np.asarray(points, dtype=np.float32)
+
+
+def _body_core_jitter_median(rows: list[np.ndarray | None]) -> float | None:
+    diffs: list[np.ndarray] = []
+    prev: np.ndarray | None = None
+    for row in rows:
+        if row is None:
+            prev = None
+            continue
+        if prev is not None and prev.shape == row.shape:
+            diffs.append(np.linalg.norm(row - prev, axis=1))
+        prev = row
+    if not diffs:
+        return None
+    return float(np.median(np.concatenate(diffs)))
+
+
+def _empty_yolo_metrics() -> dict[str, Any]:
+    return {
+        "yolo_raw_infer_sec": None,
+        "yolo_raw_infer_fps": None,
+        "yolo_miss_rate": None,
+        "yolo_body_core_full_valid_rate": None,
+        "yolo_body_core_missing_rate": None,
+        "yolo_body_core_jitter_median": None,
+    }
 
 
 def _draw_yolo_body(out_bgr: np.ndarray, frame_result: FrameResult, valid_conf_thr: float) -> None:
@@ -316,6 +398,8 @@ def bench_sample(
         if hasattr(runner, "close"):
             runner.close()
 
+    yolo_metrics = runner.metrics() if case.backend == "yolo" else _empty_yolo_metrics()
+
     return {
         "sample_id": sample.sample_id,
         "video": str(sample.path),
@@ -329,6 +413,7 @@ def bench_sample(
         "init_sec": round(init_sec, 4),
         "annotate_wall_sec": round(loop_sec, 4),
         "annotate_fps": round(frames / loop_sec, 3) if loop_sec > 0 else 0.0,
+        **yolo_metrics,
     }
 
 
@@ -345,6 +430,12 @@ def _write_csv(path: Path, records: list[dict[str, Any]]) -> None:
         "init_sec",
         "annotate_wall_sec",
         "annotate_fps",
+        "yolo_raw_infer_sec",
+        "yolo_raw_infer_fps",
+        "yolo_miss_rate",
+        "yolo_body_core_full_valid_rate",
+        "yolo_body_core_missing_rate",
+        "yolo_body_core_jitter_median",
         "error",
         "video",
     ]
