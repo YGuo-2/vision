@@ -1,3 +1,58 @@
+## 2026-05-31: YOLO 迁移 S5c — UI 后端选择入口关闭决议（Issue #26）
+
+### 问题描述
+
+Issue #26 仅在 #25 落地后启动，目标是在 `apps/app_ui.py` 增加 YOLO 后端选择和规则完整度提示。
+当前 #23 GPU 复测已判定 no-go，#25 也已关闭 / 不实现 `apps/main.py --backend yolo` 实时预览入口；
+因此 UI 没有可用的实时 YOLO 后端可选择，不能预先暴露 YOLO-only 入口、完整度提示或未标定评分展示。
+
+### 修改内容
+
+- `docs/yolo_gpu_recheck_report.md`：新增 “UI 后端选择决议（Issue #26）” 小节，明确
+  `apps/app_ui.py` 当前不实现 YOLO 后端选择控件 / 规则完整度提示，并逐条引用 #23 / #25 的
+  no-go 事实。
+- `docs/yolo_migration_plan.md` 与 `docs/yolo_migration_plan_optimized.md`：同步 #26 决议，
+  移除会误导后续实现 UI YOLO 后端选择的旧计划承诺；保留既有 MediaPipe UI。
+- 新增 `tests/test_s5_ui_no_go.py`：锁住 #26 报告必须包含 no-go 数字和边界，两个计划文档
+  必须同步 Issue #26 / GPU 复测报告，且 `apps/app_ui.py` 不出现 YOLO 后端选择、`body_core_v1`
+  布局选择、未标定评分或 YOLO runtime import。
+
+### 验证方法
+
+```powershell
+E:\CodeProject\vision\.venv\Scripts\python.exe -m pytest tests\test_s5_ui_no_go.py tests\test_s5_cli_no_go.py tests\test_s5_gpu_recheck.py -q
+E:\CodeProject\vision\.venv\Scripts\python.exe -m pytest tests\test_pose33_v3_golden.py -q
+E:\CodeProject\vision\.venv\Scripts\python.exe -m py_compile apps\app_ui.py tests\test_s5_ui_no_go.py
+git diff --check
+```
+
+---
+
+## 2026-05-31: PR #33 审查补强 — 最小完成定义同步 #26 no-go
+
+### 问题描述
+
+子 agent 审查 PR #33 时指出：`docs/yolo_migration_plan.md` 末尾“最小完成定义”仍写着
+“CLI、UI、batch 都能选择后端并记录结果来源”。虽然前文已明确 Issue #26 no-go、不实现 UI
+YOLO 后端选择，但该完成定义可能误导后续 agent 把 UI 后端选择当成当前迁移完成硬条件。
+
+### 修改内容
+
+- `docs/yolo_migration_plan.md`：将最小完成定义改为“已授权入口能记录结果来源；CLI / UI
+  后端选择按 #25 / #26 / #28 决策，no-go 分支不作为完成硬条件”。
+- `tests/test_s5_ui_no_go.py`：将旧完成定义语句加入禁止回流断言。
+
+### 验证方法
+
+```powershell
+E:\CodeProject\vision\.venv\Scripts\python.exe -m pytest tests\test_s5_ui_no_go.py -q
+E:\CodeProject\vision\.venv\Scripts\python.exe -m pytest tests -q
+E:\CodeProject\vision\.venv\Scripts\python.exe -m py_compile apps\app_ui.py tests\test_s5_ui_no_go.py
+git diff --check
+```
+
+---
+
 ## 2026-05-31: YOLO 迁移 S5b — CLI 实时预览入口关闭决议（Issue #25）
 
 ### 问题描述

@@ -158,12 +158,37 @@ YOLO 接入 `apps/main.py` 的实时预览主链路，也不新增会被用户�
 | Hands 开实时提速 | YOLO body + MP Hands / MP Pose+Hands FPS 比 >= 1.20 | 无有效 GPU 行 | 不满足 |
 | 评分边界 | YOLO-only 不产出规则 / tech_eval 对外评分 | #24 仅保留离线 batch 调试 / 标定入口，`score_authorized=False` | 满足边界 |
 
-因此 #25 当前只能关闭，不做实现。若未来要重新打开 CLI 实时预览入口，必须先满足第八节 GPU
+因此 #25 当前只能关闭，不做实现。若未来要重新打开 CLI 实时预览入口，必须先满足第九节 GPU
 复测前置条件，并另开新的实现子任务；在此之前，不得预先写入 YOLO realtime runtime 或参数入口。
 
 ---
 
-## 七、Hybrid 决议（Issue #27）
+## 七、UI 后端选择决议（Issue #26）
+
+**结论：不实现 `apps/app_ui.py` 的 YOLO 后端选择控件 / 规则完整度提示。**
+
+Issue #26 的启动条件是 #25 已落地；当前 #25 已按 #23 no-go 关闭，不存在可供 UI 选择的
+`apps/main.py --backend yolo` 实时预览入口。因此本期不在 Tkinter UI 中增加 YOLO 后端选择、
+`body_core_v1` 布局选择、YOLO-only 规则完整度提示或未标定评分展示。`apps/app_ui.py` 继续保持
+MediaPipe 旧默认界面与行为。
+
+本决议按 Issue #26 的验收标准逐条对照：
+
+| 判据 | Issue #26 要求 | 当前数字 / 事实 | 结论 |
+|---|---|---|---|
+| 前置条件 | #25 落地后启动 | #25 已关闭 / 不实现 | 不启动 |
+| GPU runtime | 实时 UI 扩展需 #23 go | `torch.cuda.is_available() = False`，device_count=0 | 不满足 |
+| 样本覆盖 | 6/6 个样本有有效 GPU benchmark 行 | 0/6 | 不满足 |
+| CLI 依赖 | UI 后端选择依赖 `apps/main.py --backend yolo` | #25 不实现该入口 | 不满足 |
+| 评分边界 | YOLO-only 不显示对外评分 / 合格判定 | #24 仅保留离线 batch 调试 / 标定入口，`score_authorized=False` | 满足边界 |
+
+因此 #26 当前只能关闭，不做实现。若未来要重新打开 UI 后端选择，必须先满足第九节 GPU
+复测前置条件，并在 #25 后续实现子任务真正落地后另开 UI 实现子任务；在此之前，不得预先写入
+YOLO UI control、YOLO-only 完整度展示或未标定评分入口。
+
+---
+
+## 八、Hybrid 决议（Issue #27）
 
 **结论：不实现 `yolo_body_mp_pose_supplement`，代码库不保留半成品 Hybrid 路径。**
 
@@ -193,7 +218,7 @@ YOLO 接入 `apps/main.py` 的实时预览主链路，也不新增会被用户�
 
 ---
 
-## 八、后续若要复测 GPU 的前置条件
+## 九、后续若要复测 GPU 的前置条件
 
 若之后要重新打开 #25 / #26，先不要改主链路，先满足以下条件并复跑本报告命令：
 

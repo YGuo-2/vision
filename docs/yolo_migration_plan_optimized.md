@@ -440,7 +440,9 @@ COCO17 到 Pose33-like 的真实映射：
 2. `apps/main.py` 的 YOLO 实时预览入口已由 Issue #25 / `docs/yolo_gpu_recheck_report.md`
    supersede：#23 GPU 复测 no-go 时当前不实现 `--backend yolo` / `--feature-layout body_core_v1`，
    保持既有 MediaPipe CLI 默认路径；未来若重新打开，必须先满足 GPU 复测前置条件并另开实现子任务。
-3. `apps/app_ui.py` 增加后端选择和规则完整度提示。
+3. `apps/app_ui.py` 的 YOLO 后端选择与规则完整度提示已由 Issue #26 /
+   `docs/yolo_gpu_recheck_report.md` supersede：#23 / #25 no-go 时当前不实现，保持既有 MediaPipe UI；
+   未来若重新打开，必须先满足 GPU 复测前置条件并等待 #25 后续实现子任务落地。
 4. Hybrid 已由 Issue #27 / `docs/yolo_gpu_recheck_report.md` supersede：当前不实现
    `yolo_body_mp_pose_supplement`，不保留半成品 runtime 路径；若未来要恢复，必须另开实现子任务并先满足
    #27 的 CUDA 有效复测、Hybrid 专用 benchmark、补点指标恢复证据等触发条件。
@@ -463,7 +465,8 @@ COCO17 到 Pose33-like 的真实映射：
 - CSV/JSONL/NPZ meta 必须包含 `backend`、`model_name`、`feature_layout`、`confidence_kind`。
 - 规则和技术评估输出必须包含未评估原因和完整度统计。
 - CLI `apps/main.py` 在 #25 no-go 分支下不得出现 `--backend yolo` 实时入口或 YOLO realtime runtime。
-- UI 不承诺 YOLO-only 能完整评分。
+- UI `apps/app_ui.py` 在 #26 no-go 分支下不得出现 YOLO 后端选择、`body_core_v1` 布局选择、
+  YOLO-only 完整度提示或未标定评分入口。
 
 ### S6. 默认切换决策
 
