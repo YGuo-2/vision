@@ -1,3 +1,75 @@
+## 2026-06-01: YOLO 迁移 S2 — YOLO adapter + COCO17→Pose33-like 映射（Issue #7）
+
+### 问题描述
+
+S2 需要让 YOLO 进入主链路，但 COCO17 缺嘴角/手指/脚跟脚尖/眼细分点，绝不能伪造成完整
+Pose33。本期新增轻量 YOLO adapter，把 COCO17 诚实映射到 BlazePose33-like 容器：缺失点在
+序列层一律 `valid_mask=False`、在边界层一律 `synthetic=True`/`visibility=0.0`。硬约束：
+不得改变 MediaPipe 旧默认路径（`pose33_v3` 模板、`infer()`/`annotate()`、`extract_pose_raw`），
+`tests/test_pose33_v3_golden.py` 必须保持全绿；ultralytics 必须懒加载，未安装时不影响
+MediaPipe 路径与既有测试；YOLO 侧 `valid_conf_thr` 本期为待标定占位值（#10 标定），仅供
+预览/调试 + S3 标定，不得对外评分。
+
+### 修改内容
+
+- **新增 `core/yolo_adapter.py`（懒加载 ultralytics）**：
+  - **边界容器**：`@dataclass(frozen=True)` 的 `Landmark`（含 `confidence`/`synthetic`）与
+    `FrameResult`（`pose33`/`hands`/`track_id`/`meta`）。`synthetic=True` 只活在该边界层，
+    绝不进入 `(T,33,4)` 序列数组。
+  - **映射表**：`COCO17_TO_BLAZE33`（17 项）与 `BLAZE33_MISSING_IN_COCO17`（16 项），
+    数值与已验证的 `analysis/spike_yolo_baseline.py` 完全一致（键=BlazePose33 idx、值=COCO17 idx）。
+  - **纯映射函数**：`map_coco17_to_blaze33` 产出 `(33,4)` 行 `(x,y,z=0,conf)` + `(33,)` bool 行
+    （映射点 `conf>=valid_conf_thr` 才有效，缺失点强制 `False`）；`coco17_to_landmarks` 产出
+    边界层 33 元组（缺失点 `synthetic=True`/`visibility=0.0`，映射点带 `confidence`）；
+    `map_coco17_person` 一次性返回「序列行 + 有效行 + FrameResult」三件套。
+  - **结果解析**：`extract_persons`/`select_main_person`（单人 MVP=最大框，退化时取最高分）/
+    `yolo_result_to_arrays`/`yolo_result_to_frame`，容忍 torch tensor 或 numpy，便于测试注入
+    fake result。
+  - **单目标 tracker**：`SingleTargetTracker`，段内连续分配 track_id，未检出超 `max_missed` 帧丢弃；
+    `reset()` 归零（段边界语义）。
+  - **adapter 类 `YoloPoseAdapter`**：`from ultralytics import YOLO` 仅在 `_load()` 内执行；
+    默认模型路径走 `core.paths.models_dir()/yolo11n-pose.pt`；`valid_conf_thr` 占位默认 + 文档化
+    为待标定；`confidence_kind="yolo_conf"`；`infer_arrays`（序列热路径，只回 numpy）与
+    `infer_frame`（边界层 FrameResult）；暴露 `last_num_persons`/`num_persons`（供 #9 多人闸门），
+    本期不实现闸门；`reset_tracker()` 控制段边界。
+  - **序列层 `extract_yolo_landmark_series`**：返回 `landmarks[T,33,4]` + `valid_mask[T,33]`
+    （**仅 numpy，不逐帧返回冻结对象**）+ `meta`。每次调用开头 `reset_tracker()`，故 track_id
+    段边界必然重置。无人帧/空结果优雅降级为零行 + 全 False mask（不抛异常）。`meta` 含
+    `backend="yolo"`、`model_name`、`running_mode`、`confidence_kind="yolo_conf"`、
+    `validity_policy="confidence_thr"`、`valid_conf_thr`（占位）、`calibration_status="unvalidated"`、
+    `calibration_note`（标注 preview/debug-only）、`frame_count`、`fps`、`num_persons_per_frame`、
+    `max_persons`、`multi_person_frames`、`track_ids`、`track_reset_note`。
+- **测试（无网络、不下载模型、不读真实视频）**：
+  - 新增 `tests/yolo_fakes.py`：`make_coco17` 合成关键点、`FakeYoloResult`（single/multi/empty）
+    模拟 ultralytics 结果、`FakeYoloAdapter` 替身 adapter（复用真实解析/ tracker 逻辑，鸭子类型注入）、
+    `FakeCapture`+`patch_cv2_capture` 回放固定帧数。
+  - `tests/test_yolo_landmark_mapping.py`：边界层缺失点 `synthetic=True`/`visibility=0.0`
+    （含嘴角 9/10、手指 17-22、脚跟脚尖 29-32、眼细分 1/3/4/6）；序列层同索引 `valid_mask=False`、
+    长度恰 33、COCO 对应点 confidence 正确传入 channel-3；序列层输出是 numpy 数组。
+  - `tests/test_yolo_backend_contract.py`：无人帧/空结果零行+全 False mask 不崩；tracker 段边界
+    重置语义；序列层只回 numpy + meta 字段齐全；`num_persons` 被如实暴露（多人不静默吞，
+    闸门留 #9）；adapter 默认路径解析且构造/导入不触发 ultralytics。
+- **依赖声明**：ultralytics/torch 仍只在 `requirements-spike.txt` 声明，**未**加入核心 `requirements.txt`。
+- **范围守住**：未引入 `body_core_v1`（#8）、未实现多人闸门（#9）、未标定（#10）、未做规则分级（#11），
+  无 UI/CLI/batch 接线，无默认后端切换。
+
+### 验证方法
+
+```powershell
+.\.venv\Scripts\python.exe -m py_compile core\yolo_adapter.py                          # exit 0
+.\.venv\Scripts\python.exe -c "import core.yolo_adapter"                               # import_ok，ultralytics/torch 均未加载
+.\.venv\Scripts\python.exe -m pytest tests\test_yolo_landmark_mapping.py tests\test_yolo_backend_contract.py -q   # 24 passed
+.\.venv\Scripts\python.exe -m pytest tests\test_pose33_v3_golden.py -q                 # 16 passed（MediaPipe 默认不变）
+.\.venv\Scripts\python.exe -m pytest tests -q                                          # 88 passed
+```
+
+- `import core.yolo_adapter` 后 `sys.modules` 不含 `ultralytics`/`torch` → 懒加载成立，未安装 ultralytics
+  也不影响 MediaPipe 路径与既有测试。
+- `tests/test_pose33_v3_golden.py` 全绿 → MediaPipe 旧默认路径行为不漂移（行为不变硬门槛）。
+- 全量 88 passed（此前 64 + 本期 24 新增）→ 无回归。
+
+---
+
 ## 2026-05-31: YOLO 迁移 S1 — artifact root 统一 + 模板 metadata 扩展（Issue #6）
 
 ### 问题描述
