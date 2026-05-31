@@ -47,6 +47,7 @@ def test_plan_docs_do_not_recommend_ui_yolo_controls():
         "`apps/app_ui.py` 增加后端选择和规则完整度提示。",
         "`apps/app_ui.py` 增加后端选择、特征布局选择、规则完整度提示。",
         "UI 主预览、动作比对、直拳检测都能选择后端。",
+        "CLI、UI、batch 都能选择后端并记录结果来源。",
     )
     for legacy in legacy_promises:
         assert legacy not in combined, f"计划文档仍保留会误导实现 UI YOLO 的旧表述：{legacy}"

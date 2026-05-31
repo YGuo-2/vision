@@ -28,6 +28,31 @@ git diff --check
 
 ---
 
+## 2026-05-31: PR #33 审查补强 — 最小完成定义同步 #26 no-go
+
+### 问题描述
+
+子 agent 审查 PR #33 时指出：`docs/yolo_migration_plan.md` 末尾“最小完成定义”仍写着
+“CLI、UI、batch 都能选择后端并记录结果来源”。虽然前文已明确 Issue #26 no-go、不实现 UI
+YOLO 后端选择，但该完成定义可能误导后续 agent 把 UI 后端选择当成当前迁移完成硬条件。
+
+### 修改内容
+
+- `docs/yolo_migration_plan.md`：将最小完成定义改为“已授权入口能记录结果来源；CLI / UI
+  后端选择按 #25 / #26 / #28 决策，no-go 分支不作为完成硬条件”。
+- `tests/test_s5_ui_no_go.py`：将旧完成定义语句加入禁止回流断言。
+
+### 验证方法
+
+```powershell
+E:\CodeProject\vision\.venv\Scripts\python.exe -m pytest tests\test_s5_ui_no_go.py -q
+E:\CodeProject\vision\.venv\Scripts\python.exe -m pytest tests -q
+E:\CodeProject\vision\.venv\Scripts\python.exe -m py_compile apps\app_ui.py tests\test_s5_ui_no_go.py
+git diff --check
+```
+
+---
+
 ## 2026-05-31: YOLO 迁移 S5b — CLI 实时预览入口关闭决议（Issue #25）
 
 ### 问题描述
