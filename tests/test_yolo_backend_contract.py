@@ -9,7 +9,8 @@ YOLO 后端契约回归（YOLO 迁移 Issue #7 / S2）。
 - 序列层输出仅为 numpy 数组（landmarks/valid_mask），meta 携带规定字段
   （backend/model_name/running_mode/confidence_kind/validity_policy/valid_conf_thr
    /frame_count/fps + calibration/track_reset note）。
-- 暴露 ``num_persons``（供 Issue #9 多人闸门构建）；本期不实现拒绝/降级闸门。
+- 暴露 ``num_persons``，并据此判定多人闸门（Issue #9）：``num_persons>1`` 触发
+  ``multi_person_detected`` / ``review_required`` / ``gate_status``；单人不受影响。
 - 懒加载：导入本模块/adapter 不触发 ultralytics import。
 
 确定性 / 无网络
@@ -35,10 +36,13 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from core.yolo_adapter import (  # noqa: E402
+    GATE_STATUS_MULTI_PERSON,
+    GATE_STATUS_OK,
     SingleTargetTracker,
     YoloPoseAdapter,
     empty_frame_result,
     empty_sequence_row,
+    evaluate_multi_person_gate,
     extract_yolo_landmark_series,
     select_main_person,
     extract_persons,
@@ -115,7 +119,85 @@ def test_num_persons_exposed_for_multi_person():
     _row, _valid, num_persons, sel = yolo_result_to_arrays(res, valid_conf_thr=0.5)
     assert num_persons == 2   # 暴露人数
     assert sel == 1
-    # 本期不实现拒绝/降级闸门（Issue #9）——这里只断言 num_persons 被如实暴露。
+    # num_persons 被如实暴露；多人闸门的拒绝/降级在序列层 meta + 下游评分入口实现
+    # （见下方 test_multi_person_gate_* 与 test_body_core_layout 的拒绝/降级用例）。
+
+
+# --------------------------------------------------------------------------- #
+# 多人场景闸门（Issue #9 / S2）
+# --------------------------------------------------------------------------- #
+def test_evaluate_multi_person_gate_single_person_ok():
+    gate = evaluate_multi_person_gate([1, 1, 0, 1])
+    assert gate["multi_person_detected"] is False
+    assert gate["review_required"] is False
+    assert gate["gate_status"] == GATE_STATUS_OK
+    assert gate["max_persons"] == 1
+    assert gate["multi_person_frames"] == 0
+    assert gate["gate_note"] == ""
+
+
+def test_evaluate_multi_person_gate_flags_and_counts():
+    # 帧人数：1,3,2,1,0 → 两帧多人，max=3。
+    gate = evaluate_multi_person_gate([1, 3, 2, 1, 0])
+    assert gate["multi_person_detected"] is True
+    assert gate["review_required"] is True
+    assert gate["gate_status"] == GATE_STATUS_MULTI_PERSON
+    assert gate["max_persons"] == 3
+    assert gate["multi_person_frames"] == 2
+    assert "review_required" in gate["gate_note"].lower()
+
+
+def test_evaluate_multi_person_gate_empty_sequence():
+    gate = evaluate_multi_person_gate([])
+    assert gate["multi_person_detected"] is False
+    assert gate["max_persons"] == 0
+    assert gate["gate_status"] == GATE_STATUS_OK
+
+
+def _multi_person_frame():
+    """构造一帧两人（两个不同大小框）的 YOLO 结果。"""
+    xy, conf = make_coco17(conf_value=0.9)
+    return FakeYoloResult.multi(
+        [
+            (xy, conf, (0.3, 0.5, 0.2, 0.4)),
+            (xy, conf, (0.6, 0.5, 0.5, 0.9)),
+        ]
+    )
+
+
+def test_sequence_layer_multi_person_meta_flags_review_required():
+    # 第 2 帧多人 → 整段必须标 multi_person_detected / review_required，不静默选最大框。
+    xy, conf = make_coco17(conf_value=0.9)
+    frames = [
+        FakeYoloResult.single(xy, conf),
+        _multi_person_frame(),
+        FakeYoloResult.single(xy, conf),
+    ]
+    adapter = FakeYoloAdapter(frames=frames, valid_conf_thr=0.5)
+    with patch_cv2_capture(n_frames=len(frames), fps=30.0):
+        _lm, _vm, meta = extract_yolo_landmark_series("fake://multi.mp4", yolo_model=adapter)
+
+    assert meta["max_persons"] == 2
+    assert meta["multi_person_frames"] == 1
+    assert meta["multi_person_detected"] is True
+    assert meta["review_required"] is True
+    assert meta["gate_status"] == GATE_STATUS_MULTI_PERSON
+    assert meta["num_persons_per_frame"] == [1, 2, 1]
+    assert "review_required" in meta["gate_note"].lower()
+
+
+def test_sequence_layer_single_person_not_flagged():
+    # 单人样本不受影响：不触发闸门。
+    xy, conf = make_coco17(conf_value=0.9)
+    frames = [FakeYoloResult.single(xy, conf) for _ in range(4)]
+    adapter = FakeYoloAdapter(frames=frames, valid_conf_thr=0.5)
+    with patch_cv2_capture(n_frames=len(frames), fps=30.0):
+        _lm, _vm, meta = extract_yolo_landmark_series("fake://single.mp4", yolo_model=adapter)
+
+    assert meta["max_persons"] == 1
+    assert meta["multi_person_detected"] is False
+    assert meta["review_required"] is False
+    assert meta["gate_status"] == GATE_STATUS_OK
 
 
 # --------------------------------------------------------------------------- #

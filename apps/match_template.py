@@ -74,6 +74,15 @@ def main() -> None:
         choices=["pose33_v3", "body_core_v1"],
         help="Feature layout override（默认按模板 meta.feature_layout 推断）。",
     )
+    ap.add_argument(
+        "--allow-multi-person",
+        dest="allow_multi_person",
+        action="store_true",
+        help=(
+            "多人场景降级而非拒绝（Issue #9）：检出多人时不报错，但仍不产出分数"
+            "（标记『需人工复核』）。默认拒绝多人视频出分。"
+        ),
+    )
     args = ap.parse_args()
 
     # 按模板 meta 或显式参数判定是否走 body_core_v1 闭环，绝不改动 pose33_v3 默认路径。
@@ -93,14 +102,35 @@ def main() -> None:
 
 def _match_body_core(args, tpl_meta: dict) -> None:
     """body_core_v1 模板匹配（未标定调试分数，不得对外评分）。"""
-    from core.body_core_compare import match_body_core_template
-
-    res = match_body_core_template(
-        args.template,
-        Path(args.video),
-        backend=args.backend,
-        pose_variant=args.pose,
+    from core.body_core_compare import (
+        MultiPersonReviewRequiredError,
+        match_body_core_template,
     )
+
+    try:
+        res = match_body_core_template(
+            args.template,
+            Path(args.video),
+            backend=args.backend,
+            pose_variant=args.pose,
+            reject_multi_person=not args.allow_multi_person,
+        )
+    except MultiPersonReviewRequiredError as e:
+        source_label = {
+            "template": "模板来源视频",
+            "video": "待匹配视频",
+            "template+video": "模板来源视频与待匹配视频",
+        }.get(getattr(e, "gate_source", "video"), "多人来源")
+        print(f"Template: {args.template}")
+        print(f"Video:    {args.video}")
+        print(
+            f"多人场景闸门：{source_label}检出多人（max_persons="
+            f"{e.max_persons}，multi_person_frames={e.multi_person_frames}），"
+            "拒绝出分 → 需人工复核（不混入正常评分结果）。"
+        )
+        print("  （如需查看降级结果，可加 --allow-multi-person，但分数仍不产出。）")
+        return
+
     print(f"Template: {args.template}")
     print(f"Video:    {res.video_path}")
     print(f"Backend:  {res.backend}  feature_layout={res.feature_layout}")
@@ -108,10 +138,26 @@ def _match_body_core(args, tpl_meta: dict) -> None:
         f"Match:    frames {res.start_frame}..{res.end_frame}  "
         f"(t={res.start_frame / res.fps:.2f}s..{res.end_frame / res.fps:.2f}s)"
     )
-    print(
-        f"Cost:     total={res.cost:.2f}  avg/frame={res.avg_cost:.3f}  "
-        f"score={res.score:.3f}  baseline={res.baseline:.3f}"
-    )
+    if res.review_required or res.score is None:
+        source_label = {
+            "template": "模板来源视频",
+            "video": "待匹配视频",
+            "template+video": "模板来源视频与待匹配视频",
+        }.get(res.multi_person_gate_source or "video", "多人来源")
+        print(
+            f"Cost:     total={res.cost:.2f}  avg/frame={res.avg_cost:.3f}  "
+            f"score=N/A  baseline={res.baseline:.3f}"
+        )
+        print(
+            f"多人场景闸门：{source_label}检出多人（max_persons="
+            f"{res.max_persons}，multi_person_frames={res.multi_person_frames}），"
+            "降级为『需人工复核』，不产出对外分数。"
+        )
+    else:
+        print(
+            f"Cost:     total={res.cost:.2f}  avg/frame={res.avg_cost:.3f}  "
+            f"score={res.score:.3f}  baseline={res.baseline:.3f}"
+        )
     print(f"Calibration: {res.calibration_status}（分数未标定，仅供调试/标定，不得对外评分）")
     if res.valid_frame_ratio is not None:
         print(f"Valid body_core frames: {res.valid_frame_ratio * 100:.1f}%")
