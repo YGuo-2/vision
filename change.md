@@ -43,27 +43,35 @@ YOLO 时才有消费者。硬约束：不动 MediaPipe 默认 `pose33_v3` 路径
   - `apps/match_template.py`：新增同名参数；按模板 `meta.feature_layout` 或显式参数判定是否走
     `_match_body_core`，否则走原 `_match_pose33_v3`。打印明确标注分数未标定、不得对外评分。
 - **测试**：
-  - 新增 `tests/test_body_core_layout.py`（14 用例）：layout shape/mirror pairs/joint names、
+  - 新增 `tests/test_body_core_layout.py`（16 用例）：layout shape/mirror pairs/joint names、
     共享 normalizer 接受 MediaPipe landmark 与 YOLO `(33,4)` 行、layout mismatch 报错、
     **YOLO body_core_v1 离线闭环生成→匹配同一视频产出分数且标 unvalidated**、YOLO 拒绝
-    pose33_v3 模板、MediaPipe 也能生成 body_core_v1 模板。全程用 fake adapter + golden harness，
-    无网络、不下载模型、不读真实视频。
+    pose33_v3 模板、MediaPipe 也能生成 body_core_v1 模板。PR #19 审查补充两条回归：YOLO
+    低置信 body_core 核心点帧必须按 `valid_mask` 视为无效并沿用上一帧特征；`start/end`
+    显式裁剪必须在完整序列上切片，避免先裁后再用原始帧号二次裁剪导致模板退化为单帧。
+    全程用 fake adapter + golden harness，无网络、不下载模型、不读真实视频。
   - 更新 `tests/test_layout_shape_param.py`：`body_core_v1` 现已注册（断言改为 `has_layout` 为真）；
     无法解析 shape 的用例从 `(12,2)` 改为仍未注册的 `(15,2)`，保留原意。
+- **PR #19 审查修复**：
+  - `core/body_core_compare.py` 新增统一 `_normalize_body_core_sequence()`：YOLO / MediaPipe
+    body_core 序列在 normalizer 前先读 `valid_mask`，只有 12 个核心点全 valid 的帧才参与归一化；
+    无效帧按缺帧处理（沿用上一帧或前导零帧），防止低置信坐标绕过 `valid_mask` 进入 DTW。
+  - `create_body_core_template()` 不再把 `start/end` 传入提取器提前截断视频，而是先抽取完整序列、
+    再按原始帧号切模板片段，与旧 `pose33_v3` CLI 语义保持一致。
 
 ### 验证方法
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest tests\test_body_core_layout.py -q          # 14 passed
+.\.venv\Scripts\python.exe -m pytest tests\test_body_core_layout.py -q          # 16 passed
 .\.venv\Scripts\python.exe -m pytest tests\test_pose33_v3_golden.py -q          # 16 passed（MediaPipe 默认不漂移）
 .\.venv\Scripts\python.exe -m pytest tests\test_yolo_landmark_mapping.py tests\test_yolo_backend_contract.py -q  # YOLO 契约不变
-.\.venv\Scripts\python.exe -m pytest tests -q                                   # 102 passed
+.\.venv\Scripts\python.exe -m pytest tests -q                                   # 104 passed
 .\.venv\Scripts\python.exe -m py_compile core\feature_layout.py core\pose_features.py core\yolo_adapter.py core\body_core_compare.py apps\make_template.py apps\match_template.py  # exit 0
 ```
 
 - `tests/test_pose33_v3_golden.py` 全绿 → MediaPipe 旧 `pose33_v3` 路径行为不漂移（行为不变硬门槛）。
-- `tests/test_body_core_layout.py` 全绿 → 布局正确、闭环可生成可匹配、分数标 unvalidated、layout mismatch 报错。
-- 全量 102 passed（此前 88 + 本期 14 新增，含 1 处 S1 测试随注册状态变化的适配）→ 无回归。
+- `tests/test_body_core_layout.py` 全绿 → 布局正确、闭环可生成可匹配、分数标 unvalidated、layout mismatch 报错，且 PR #19 审查发现的 `valid_mask` 与 `start/end` 裁剪问题均有回归覆盖。
+- 全量 104 passed（此前 88 + 本期 16 新增，含 1 处 S1 测试随注册状态变化的适配）→ 无回归。
 
 ---
 

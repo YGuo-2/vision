@@ -87,8 +87,9 @@ def _extract_body_core_mediapipe(
     """MediaPipe 路径：抽取 ``body_core_v1`` ``(T,12,2)`` 特征。
 
     复用既有 ``rule_scoring.extract_pose_raw``（与旧链路同款 VIDEO-mode 管线）拿到
-    ``(T,33,4)`` 原始关键点，再逐帧套用共享 ``normalize_pose_body_core_v1``。
-    缺帧（normalizer 返回 None）按 layout shape 补零或沿用上一帧，与旧路径风格一致。
+    ``(T,33,4)`` 原始关键点与 ``valid_mask``，再逐帧套用共享
+    ``normalize_pose_body_core_v1``。缺帧/核心点无效帧按 layout shape 补零或沿用上一帧，
+    与旧路径风格一致。
 
     复用 ``extract_pose_raw`` 而非自建 cv2 循环，既减少重复，也让 golden harness
     （patch ``rule_scoring.MediaPipePipeline``）能确定性回放本路径。
@@ -103,17 +104,52 @@ def _extract_body_core_mediapipe(
     )
     fps = float(meta.get("fps") or 30.0)
 
+    feats, _valid_core_frames = _normalize_body_core_sequence(
+        landmarks,
+        valid_mask=meta.get("valid_mask"),
+    )
+
+    if feats.shape[0] == 0:
+        raise RuntimeError(f"未能从视频提取 body_core_v1 特征：{video_path}")
+    return feats, float(fps)
+
+
+def _normalize_body_core_sequence(
+    landmarks: np.ndarray,
+    *,
+    valid_mask: np.ndarray | None = None,
+) -> tuple[np.ndarray, int]:
+    """Normalize BlazePose33-like rows into ``body_core_v1`` features.
+
+    When ``valid_mask`` is present, a frame is usable only if all 12 body-core source
+    points are valid. Invalid frames are gap-filled with the previous usable feature
+    (or zeros for a leading gap), so low-confidence coordinates never enter DTW.
+    """
+    arr = np.asarray(landmarks)
+    if arr.ndim != 3 or arr.shape[1] < 33 or arr.shape[2] < 2:
+        raise ValueError(f"body_core_v1 期望 landmarks shape (T,33,>=2)，实际 {arr.shape}")
+
+    mask = None if valid_mask is None else np.asarray(valid_mask, dtype=bool)
+    if mask is not None and (mask.ndim != 2 or mask.shape[0] != arr.shape[0] or mask.shape[1] < 33):
+        raise ValueError(f"body_core_v1 期望 valid_mask shape (T,33)，实际 {mask.shape}")
+
     zero = np.zeros(tuple(int(x) for x in BODY_CORE_V1.shape), dtype=np.float32)
+    core_idx = np.asarray(BODY_CORE_V1.source_indices, dtype=int)
     feats: list[np.ndarray] = []
-    for t in range(int(landmarks.shape[0])):
-        f = normalize_pose_body_core_v1(landmarks[t])
+    valid_core_frames = 0
+
+    for t in range(int(arr.shape[0])):
+        core_valid = True if mask is None else bool(np.all(mask[t, core_idx]))
+        f = normalize_pose_body_core_v1(arr[t]) if core_valid else None
         if f is None:
             f = feats[-1].copy() if feats else zero.copy()
+        else:
+            valid_core_frames += 1
         feats.append(f)
 
     if not feats:
-        raise RuntimeError(f"未能从视频提取 body_core_v1 特征：{video_path}")
-    return np.stack(feats, axis=0).astype(np.float32), float(fps)
+        return np.zeros((0, *BODY_CORE_V1.shape), dtype=np.float32), 0
+    return np.stack(feats, axis=0).astype(np.float32), int(valid_core_frames)
 
 
 def _extract_body_core_yolo(
@@ -127,16 +163,16 @@ def _extract_body_core_yolo(
     """YOLO 路径：抽取 ``body_core_v1`` ``(T,12,2)`` 特征。
 
     先用 ``extract_yolo_landmark_series`` 拿到序列层 ``(T,33,4)`` + ``valid_mask[T,33]``
-    （只返回 numpy，遵守序列层契约），再逐帧套用共享 ``normalize_pose_body_core_v1``。
+    （只返回 numpy，遵守序列层契约），先按 ``valid_mask`` 判定核心 12 点是否可用，
+    再逐帧套用共享 ``normalize_pose_body_core_v1``。
 
     返回 ``(features[T,12,2], fps, yolo_meta)``；``yolo_meta`` 含
     ``valid_conf_thr`` / ``calibration_status`` / 多人信息，供闭环 meta 透传。
 
-    缺帧（无人帧零行 / normalizer 返回 None）按 layout shape 补零或沿用上一帧。
+    缺帧（无人帧零行 / 核心点无效 / normalizer 返回 None）按 layout shape 补零或沿用上一帧。
     body_core_v1 的 12 点全部落在 COCO17 可映射点，因此该布局在 YOLO 路径下是真实点。
     """
     from .yolo_adapter import (
-        BODY_CORE_V1_VALID_INDICES,
         DEFAULT_YOLO_VALID_CONF_THR,
         extract_yolo_landmark_series,
     )
@@ -151,25 +187,7 @@ def _extract_body_core_yolo(
     )
     fps = float(yolo_meta.get("fps") or 30.0)
 
-    zero = np.zeros(tuple(int(x) for x in BODY_CORE_V1.shape), dtype=np.float32)
-    feats: list[np.ndarray] = []
-    core_idx = np.asarray(BODY_CORE_V1_VALID_INDICES, dtype=int)
-    valid_core_frames = 0
-    for t in range(int(landmarks.shape[0])):
-        row = landmarks[t]  # (33,4)
-        f = normalize_pose_body_core_v1(row)
-        if f is None:
-            f = feats[-1].copy() if feats else zero.copy()
-        feats.append(f)
-        # 调试统计：该帧 body_core 12 点是否全部 valid（conf >= 占位阈值）。
-        if valid_mask.shape[0] > t and bool(np.all(valid_mask[t, core_idx])):
-            valid_core_frames += 1
-
-    if not feats:
-        # 空视频：保持优雅降级（与序列层一致），返回空特征。
-        return np.zeros((0, *BODY_CORE_V1.shape), dtype=np.float32), fps, yolo_meta
-
-    features = np.stack(feats, axis=0).astype(np.float32)
+    features, valid_core_frames = _normalize_body_core_sequence(landmarks, valid_mask=valid_mask)
     yolo_meta = dict(yolo_meta)
     yolo_meta["body_core_valid_frame_ratio"] = (
         float(valid_core_frames) / float(features.shape[0]) if features.shape[0] else 0.0
@@ -239,8 +257,6 @@ def create_body_core_template(
         pose_variant=pose_variant,
         yolo_model=yolo_model,
         valid_conf_thr=valid_conf_thr,
-        start_frame=start,
-        end_frame=end,
     )
     if features.shape[0] == 0:
         raise RuntimeError(f"视频未产出任何 body_core_v1 帧：{video_path}")

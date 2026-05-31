@@ -38,6 +38,7 @@ from core.body_core_compare import (  # noqa: E402
     BODY_CORE_V1_PLACEHOLDER_BASELINE,
     CALIBRATION_STATUS_UNVALIDATED,
     create_body_core_template,
+    extract_body_core_features,
     match_body_core_template,
 )
 from core.feature_layout import BODY_CORE_V1, POSE33_V3, get_layout, has_layout  # noqa: E402
@@ -278,6 +279,58 @@ def test_yolo_body_core_template_and_match_closed_loop(tmp_path):
     assert res.score > 0.5
     # 关键：结果标未标定，分数不得作为对外评分。
     assert res.calibration_status == CALIBRATION_STATUS_UNVALIDATED
+
+
+def test_yolo_body_core_ignores_invalid_core_frame():
+    xy0, conf0 = _make_body_core_coco17(seed=0)
+    xy_bad, conf_bad = _make_body_core_coco17(seed=0)
+    xy_bad[9] = (0.95, 0.95)
+    conf_bad[9] = 0.1
+    xy2, conf2 = _make_body_core_coco17(seed=0)
+    xy2[9] = (0.20, 0.60)
+    frames = [
+        FakeYoloResult.single(xy0, conf0),
+        FakeYoloResult.single(xy_bad, conf_bad),
+        FakeYoloResult.single(xy2, conf2),
+    ]
+
+    adapter = FakeYoloAdapter(frames=frames, valid_conf_thr=0.5)
+    with patch_cv2_capture(n_frames=len(frames), fps=30.0):
+        features, _fps, meta = extract_body_core_features(
+            "fake://low_conf.mp4",
+            backend="yolo",
+            yolo_model=adapter,
+        )
+
+    assert features.shape == (3, 12, 2)
+    # 第 2 帧有 body_core 低置信点，必须按 valid_mask 当作缺帧，沿用上一帧特征。
+    assert np.allclose(features[1], features[0], atol=ABS_TOL)
+    assert not np.allclose(features[2], features[1], atol=ABS_TOL)
+    assert meta["body_core_valid_frame_ratio"] == pytest.approx(2.0 / 3.0, abs=ABS_TOL)
+
+
+def test_create_body_core_template_start_end_slices_full_sequence(tmp_path):
+    n = 60
+    out_tpl = tmp_path / "sliced_body_core_v1.npz"
+    adapter = FakeYoloAdapter(frames=_periodic_yolo_frames(n), valid_conf_thr=0.5)
+
+    with patch_cv2_capture(n_frames=n, fps=30.0):
+        tpl_path = create_body_core_template(
+            "fake://std.mp4",
+            backend="yolo",
+            start=10,
+            end=20,
+            out_path=out_tpl,
+            yolo_model=adapter,
+        )
+
+    d = np.load(tpl_path, allow_pickle=True)
+    meta = dict(d["meta"].item())
+    feats = d["features"]
+    assert feats.shape[0] == 11
+    assert meta["frame_count"] == n
+    assert meta["start_frame"] == 10
+    assert meta["end_frame"] == 20
 
 
 def test_yolo_backend_rejects_pose33_layout_template(tmp_path):
