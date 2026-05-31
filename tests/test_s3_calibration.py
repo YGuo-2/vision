@@ -7,7 +7,7 @@ S3 标定落配置回归（YOLO 迁移 Issue #10）。
 - ``body_core_v1`` baseline 已落配置（``FeatureLayoutSpec.default_baseline``），
   不再写死占位 2.0。
 - YOLO ``valid_conf_thr`` 已标定入库（``DEFAULT_YOLO_VALID_CONF_THR``），占位 0.5 移除。
-- body_core 闭环 baseline 取自 layout（与占位脱钩），calibration_status 标已标定。
+- body_core 闭环 baseline 取自 layout（与占位脱钩），但 calibration_status 仍不授权评分。
 - 标定报告 ``docs/yolo_body_core_calibration.md`` 存在且头部含预注册数字与结论四选一。
 
 这些断言把「标定值入库」固化为回归——若有人误改回占位值或改坏报告头部，测试会失败。
@@ -29,7 +29,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from core.body_core_compare import (  # noqa: E402
     BODY_CORE_V1_CALIBRATED_BASELINE,
-    CALIBRATION_STATUS_CALIBRATED,
+    CALIBRATION_STATUS_UNVALIDATED,
 )
 from core.feature_layout import BODY_CORE_V1, POSE33_V3  # noqa: E402
 from core.yolo_adapter import (  # noqa: E402
@@ -65,11 +65,11 @@ def test_yolo_valid_conf_thr_calibrated():
 
 
 # --------------------------------------------------------------------------- #
-# 3) calibration_status 标已标定（仅限 body_core_v1 模板匹配）
+# 3) calibration_status 仍不授权评分（S3 只落参数）
 # --------------------------------------------------------------------------- #
-def test_calibration_status_marks_calibrated():
-    assert YOLO_CALIBRATION_STATUS == "calibrated_body_core_v1"
-    assert CALIBRATION_STATUS_CALIBRATED == "calibrated_body_core_v1"
+def test_calibration_status_remains_unvalidated():
+    assert YOLO_CALIBRATION_STATUS == "unvalidated"
+    assert CALIBRATION_STATUS_UNVALIDATED == "unvalidated"
 
 
 # --------------------------------------------------------------------------- #
@@ -91,6 +91,7 @@ def test_calibration_report_exists_and_has_preregistered_header():
     # 标定后的数字必须写入报告。
     assert "1.2826" in text, "报告未写入 body_core_v1 标定 baseline"
     assert "0.6" in text, "报告未写入 YOLO valid_conf_thr 标定值"
+    assert "self-match" in text, "报告未说明 self-match 不计入主判据"
     # 结论四选一之一必须明确出现。
     conclusions = ["仅预览", "可模板匹配", "skip-aware partial eval", "不建议"]
     assert any(c in text for c in conclusions), "报告未给出四选一结论"

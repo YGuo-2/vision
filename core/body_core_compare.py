@@ -14,11 +14,10 @@ MediaPipe 也能生成同一布局模板（供 #10 三方对比）。它是 ``bo
 - **不动 MediaPipe 默认 ``pose33_v3`` 路径**：``apps/make_template.py`` /
   ``compare_video_to_template`` 等旧默认行为完全不变；本模块是显式 opt-in 的独立入口。
 - **YOLO 只允许 ``body_core_v1``**：本模块的 YOLO 路径只产出 / 匹配该布局。
-- **已在 S3（#10）标定**：``body_core_v1`` baseline=1.2826（取自
+- **S3（#10）只落参数，不授权出分**：``body_core_v1`` baseline=1.2826（取自
   ``feature_layout.BODY_CORE_V1.default_baseline``），YOLO 侧 ``valid_conf_thr``=0.6。
-  本模块产出的分数 meta 标 ``calibration_status="calibrated_body_core_v1"``，结论为
-  「可用于 body_core_v1 **模板匹配**出分」（见 docs/yolo_body_core_calibration.md）。
-  **该标定不覆盖 full tech_eval** —— COCO17 缺嘴角/脚跟脚尖/手指，YOLO-only 不进 full 评估。
+  但跨视频预注册判据未通过，结论为「仅预览 / 内部标定参考」，因此本模块分数 meta
+  仍标 ``calibration_status="unvalidated"``，不得进入用户报告 / 正式评分。
 - **不同 layout 比对报清晰错误**：复用 ``action_compare._assert_feature_layout_match``，
   绝不静默把 ``body_core_v1`` 模板与 ``pose33_v3`` 序列比对。
 """
@@ -42,18 +41,16 @@ from .pose_features import (
 
 # body_core_v1 的 DTW baseline 已在 **S3（#10）标定**：取自
 # ``feature_layout.BODY_CORE_V1.default_baseline``（1.2826，按尺度对齐 pose33_v3 反推）。
-# 标定依据见 docs/yolo_body_core_calibration.md。占位 2.0 已移除。
+# 标定依据见 docs/yolo_body_core_calibration.md。占位 2.0 已移除；但 S3 结论未授权评分。
 BODY_CORE_V1_CALIBRATED_BASELINE: float = float(BODY_CORE_V1.default_baseline or 2.0)
 
-# 标定状态标记（S3 #10）：body_core_v1 已标定，但**仅用于模板匹配出分**，
-# 不进 full tech_eval（COCO17 结构性缺点，见 S0 降级清单与 S3 报告结论）。
-CALIBRATION_STATUS_CALIBRATED: str = "calibrated_body_core_v1"
-# 兼容旧引用名（曾用于未标定阶段；现指向已标定状态，语义见上）。
-CALIBRATION_STATUS_UNVALIDATED: str = CALIBRATION_STATUS_CALIBRATED
+# 标定状态标记（S3 #10）：baseline / YOLO conf 阈值已落库，但跨视频 go/no-go 未通过；
+# 分数只可预览 / 内部标定参考，不得对外评分。
+CALIBRATION_STATUS_UNVALIDATED: str = "unvalidated"
 BODY_CORE_CALIBRATION_NOTE: str = (
-    "body_core_v1 baseline=1.2826、YOLO valid_conf_thr=0.6 已在 S3（#10）标定，"
-    "结论为「可用于 body_core_v1 模板匹配出分」（见 docs/yolo_body_core_calibration.md）。"
-    "该标定不覆盖 full tech_eval —— COCO17 缺嘴角/脚跟脚尖/手指，YOLO-only 不进 full 评估。"
+    "body_core_v1 baseline=1.2826、YOLO valid_conf_thr=0.6 已在 S3（#10）落库，"
+    "但跨视频预注册判据未通过，结论为「仅预览 / 内部标定参考」。"
+    "本分数不得进入用户报告或正式评分；YOLO-only 也不进 full tech_eval。"
 )
 
 # 支持的后端。YOLO 只允许 body_core_v1（在本模块内强制）。
@@ -86,7 +83,7 @@ class MultiPersonReviewRequiredError(RuntimeError):
 
 @dataclass(frozen=True)
 class BodyCoreMatchResult:
-    """body_core_v1 单模板匹配结果（S3 #10 已标定，可用于模板匹配出分）。
+    """body_core_v1 单模板匹配结果（仅供预览 / 内部标定参考）。
 
     多人场景下（``review_required=True``）``score`` 为 ``None``——降级模式不产出分数，
     避免多人视频混入正常评分结果。默认拒绝模式则根本不返回结果（抛
@@ -290,8 +287,8 @@ def create_body_core_template(
     """从视频生成 ``body_core_v1`` 模板（YOLO 或 MediaPipe）。
 
     模板 metadata 写 ``feature_layout=body_core_v1`` 与
-    ``calibration_status=calibrated_body_core_v1``——该模板分数已标定（S3 #10），
-    可用于 body_core_v1 模板匹配出分（非 full tech_eval）。
+    ``calibration_status=unvalidated``——S3 #10 已落 baseline / conf 阈值，但跨视频
+    go/no-go 未通过，该模板分数仍不得对外评分。
     """
     backend = str(backend).lower()
     video_path = Path(video_path)
@@ -336,11 +333,12 @@ def create_body_core_template(
         "feature_layout": BODY_CORE_V1.name,
         "normalizer_version": "body_core_v1",
         "running_mode": "video",
-        # S3（#10）已标定：可用于 body_core_v1 模板匹配出分（非 full tech_eval）。
-        "calibration_status": CALIBRATION_STATUS_CALIBRATED,
+        # S3（#10）已落参数，但结论为仅预览 / 内部标定参考，不授权评分。
+        "calibration_status": CALIBRATION_STATUS_UNVALIDATED,
         "calibration_note": BODY_CORE_CALIBRATION_NOTE,
         "baseline": float(BODY_CORE_V1_CALIBRATED_BASELINE),
         "baseline_calibrated": True,
+        "score_authorized": False,
     }
     if backend == BACKEND_MEDIAPIPE:
         meta["pose_variant"] = pose_variant
@@ -386,13 +384,13 @@ def match_body_core_template(
     valid_conf_thr: float | None = None,
     reject_multi_person: bool = True,
 ) -> BodyCoreMatchResult:
-    """用 ``body_core_v1`` 模板匹配视频，产出**已标定**（S3 #10）的模板匹配分数。
+    """用 ``body_core_v1`` 模板匹配视频，产出仅供预览 / 内部标定参考的分数。
 
     - 校验模板 ``feature_layout`` 必须是 ``body_core_v1``；非该布局直接报清晰错误
       （不静默套用 pose33_v3 路径）。
     - 用模板自身 ``feature_layout`` 与视频提取序列做 ``_assert_feature_layout_match``，
       确保 shape / layout 一致。
-    - 返回结果与 meta 都标 ``calibration_status=unvalidated``。
+    - 返回结果标 ``calibration_status=unvalidated``，不得进入用户报告 / 正式评分。
 
     多人场景闸门（Issue #9 / S2）
     -----------------------------
@@ -514,8 +512,8 @@ def match_body_core_template(
         avg_cost=float(avg_cost),
         score=score,
         baseline=float(baseline),
-        # S3（#10）已标定：可用于 body_core_v1 模板匹配出分（非 full tech_eval）。
-        calibration_status=CALIBRATION_STATUS_CALIBRATED,
+        # S3（#10）已落参数，但结论为仅预览 / 内部标定参考，不授权评分。
+        calibration_status=CALIBRATION_STATUS_UNVALIDATED,
         valid_frame_ratio=(
             float(backend_meta["body_core_valid_frame_ratio"])
             if "body_core_valid_frame_ratio" in backend_meta

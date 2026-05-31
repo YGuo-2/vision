@@ -15,7 +15,7 @@
 ## 一、任务目标（Issue #10）
 
 确定 `body_core_v1` 是否可用于评分、baseline 取值，以及标定 YOLO 侧 `valid_conf_thr`
-（把 #7 的占位值 0.5 替换为标定值，此后 YOLO 才允许在标定范围内出分）。三路对照：
+（把 #7 的占位值 0.5 替换为标定值；是否允许出分由本报告 go/no-go 判据决定）。三路对照：
 
 1. MediaPipe `pose33_v3`（旧默认布局，22 点，已标定 baseline=2.0，作参照基准）；
 2. MediaPipe `body_core_v1`（12 点共享布局，同后端换布局）；
@@ -120,36 +120,47 @@ YOLO `valid_conf_thr` 标定方法（预注册）：
 → `body_core_v1` baseline 标定为 **1.2826**，已写入 `core/feature_layout.py`
 （`BODY_CORE_V1.default_baseline`），替换全局占位 `2.0`。
 
-### 5.2 分数相关性 / MAE / 一致率（标定阈值 thr=0.6、baseline=1.2826）
+### 5.2 分数相关性 / MAE / 一致率（跨视频主指标，thr=0.6、baseline=1.2826）
+
+> 主指标严格使用**跨视频 pair**（4 对），不含 self-match。self-match 只作健全性检查，
+> 因为同视频子段匹配会产生 4 个平凡满分 1.0，混入相关性 / MAE / pass-fail 会虚高。
 
 | 判据 | 预注册阈值 | 实测值 | 是否达标 |
 |---|---|---|---|
-| J1 corr(MP body_core, pose33) | ≥ 0.70 | **0.838** | ✅ 达标 |
-| J2 corr(YOLO body_core, MP body_core) | ≥ 0.80 | **0.990** | ✅ 达标 |
-| J3 MAE(YOLO body_core, MP body_core) | ≤ 0.05 | **0.0234** | ✅ 达标 |
-| J4 pass/fail 一致率（YOLO body_core vs pose33） | ≥ 0.75 | **0.75** | ✅ 达标（临界） |
+| J1 corr(MP body_core, pose33) | ≥ 0.70 | **0.280** | ❌ 未达标 |
+| J2 corr(YOLO body_core, MP body_core) | ≥ 0.80 | **0.980** | ✅ 达标 |
+| J3 MAE(YOLO body_core, MP body_core) | ≤ 0.05 | **0.0468** | ✅ 达标（临界） |
+| J4 pass/fail 一致率（YOLO body_core vs pose33） | ≥ 0.75 | **0.50** | ❌ 未达标 |
+| J5 body_core 有效帧率最小值 | ≥ 0.70 | **0.875** | ✅ 达标 |
+| J6 skip 比例最大值 | ≤ 0.30 | **0.125** | ✅ 达标 |
 | J7 失败帧率（单人样本，漏检/无人帧） | ≤ 0.02 | MP 0.0 / YOLO 0.0 | ✅ 达标 |
 
-补充：pass/fail 一致率（MP body_core vs pose33）= 0.875；（YOLO body_core vs MP body_core）= 0.875。
+补充：跨视频 pass/fail 一致率（MP body_core vs pose33）= 0.75；
+（YOLO body_core vs MP body_core）= 0.75。
+
+健全性检查（含 self-match 的 8 对，不作为验收判据）：corr(MP body_core, pose33)=0.838、
+corr(YOLO body_core, MP body_core)=0.990、MAE(YOLO, MP body_core)=0.0234、
+pass/fail 一致率（YOLO vs pose33）=0.75。该数字解释了为什么 self-match 不可混入主判据。
 
 ### 5.3 YOLO `valid_conf_thr` 扫描（标定核心证据）
 
-| thr | corr(YOLO, MP body_core) | MAE | 有效帧率均值 | 有效帧率最小 | skip 比例最大 |
-|---:|---:|---:|---:|---:|---:|
-| 0.2 | 0.814 | 0.0733 | 1.000 | 1.000 | 0.000 |
-| 0.3 | 0.814 | 0.0733 | 1.000 | 1.000 | 0.000 |
-| 0.4 | 0.814 | 0.0733 | 1.000 | 1.000 | 0.000 |
-| 0.5 | 0.814 | 0.0733 | 0.992 | 0.970 | 0.030 |
-| **0.6** | **0.990** | **0.0234** | **0.961** | **0.875** | **0.125** |
-| 0.7 | 0.989 | 0.0251 | 0.905 | 0.784 | 0.216 |
+| thr | corr(YOLO, MP body_core) | MAE | YOLO vs pose33 一致率 | YOLO vs MP 一致率 | 有效帧率均值 | 有效帧率最小 | skip 比例最大 |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 0.2 | 0.105 | 0.1466 | 0.75 | 0.50 | 1.000 | 1.000 | 0.000 |
+| 0.3 | 0.105 | 0.1466 | 0.75 | 0.50 | 1.000 | 1.000 | 0.000 |
+| 0.4 | 0.105 | 0.1466 | 0.75 | 0.50 | 1.000 | 1.000 | 0.000 |
+| 0.5 | 0.105 | 0.1466 | 0.75 | 0.50 | 0.992 | 0.970 | 0.030 |
+| **0.6** | **0.980** | **0.0468** | **0.50** | **0.75** | **0.961** | **0.875** | **0.125** |
+| 0.7 | 0.977 | 0.0501 | 0.50 | 0.75 | 0.905 | 0.784 | 0.216 |
 
-**标定结论：YOLO `valid_conf_thr = 0.6`。** 依据预注册标定方法：
-- thr 从 0.5→0.6 时 corr 由 0.814 跃升到 **0.990**、MAE 由 0.0733 降到 **0.0234**（J2/J3 在此处才达标）；
+**参数结论：YOLO `valid_conf_thr = 0.6`。** 依据预注册阈值扫描方法：
+- thr 从 0.5→0.6 时 corr(YOLO, MP body_core) 由 0.105 跃升到 **0.980**、MAE 由 0.1466 降到 **0.0468**，
+  J2/J3 在 0.6 才达标；
 - thr=0.6 有效帧率最小值 **0.875 ≥ 0.70（J5）**、skip 最大 0.125 ≤ 0.30（J6）；
-- thr=0.7 相关性/MAE 不再改善（0.989 / 0.0251）但有效帧率最小值掉到 0.784、skip 升到 0.216，
-  无收益反而丢帧。故取**满足 J2/J3 的最小阈值 0.6**。
+- thr=0.7 相关性略降（0.977）、MAE 略超阈值（0.0501），且有效帧率最小值掉到 0.784、skip 升到 0.216。
 
 `valid_conf_thr=0.6` 已写入 `core/yolo_adapter.py`（`DEFAULT_YOLO_VALID_CONF_THR`），替换 #7 占位 0.5。
+但该参数只允许用于预览 / 内部标定参考，**不等于评分授权**。
 
 ### 5.4 逐样本有效帧率 / 失败帧率 / 提取 FPS
 
@@ -171,9 +182,9 @@ YOLO `valid_conf_thr` 标定方法（预注册）：
 
 - **侧面 pass/fail 分歧（误判样例）**：side 视角跨样本对 `std_side_long ↔ punch_side`：
   pose33 分数 0.665 / 0.608（pass），而 MP body_core 0.243 / 0.659、YOLO body_core 0.249 / 0.547，
-  在 0.55 线附近来回。MP 与 YOLO body_core **彼此高度一致（corr 0.99）**，但都与 pose33 在侧面分歧——
+  在 0.55 线附近来回。MP 与 YOLO body_core **彼此较一致（跨视频 corr 0.980）**，但都与 pose33 在侧面分歧——
   这是 **body_core_v1 布局本身在侧面信息少（12 点、无脚跟脚尖、远侧遮挡）** 导致，非 YOLO 后端缺陷。
-  这正是 J4 一致率（YOLO vs pose33）只到临界 0.75 的来源。
+  这正是 J1 未达标、J4 一致率（YOLO vs pose33）只有 0.50 的来源。
 - **MediaPipe skip 比例高片段**：`punch_side` 的 MP body_core 有效率仅 0.147（skip 0.853），
   远侧关节大面积 `visibility<0.5`；同片段 YOLO body_core 有效率接近 1.0。侧面动作若用 MediaPipe
   body_core 模板匹配，需注意大量帧被 skip。
@@ -200,32 +211,31 @@ YOLO `valid_conf_thr` 标定方法（预注册）：
 
 ## 八、结论（四选一，附数字依据）
 
-**结论：可模板匹配（body_core_v1 模板匹配出分），但不进 full tech_eval。**
+**结论：仅预览 / 内部标定参考，不得用于 body_core_v1 模板匹配对外出分，也不进 full tech_eval。**
 
 逐条数字依据：
 
-1. **J1 corr(MP body_core, pose33)=0.838 ≥ 0.70** → body_core_v1 布局跟随生产参照基准，布局本身有效。
-2. **J2 corr(YOLO body_core, MP body_core)=0.990 ≥ 0.80**、**J3 MAE=0.0234 ≤ 0.05**（thr=0.6）
-   → YOLO 后端在 body_core_v1 上与 MediaPipe 高度一致，可作同布局后端替代用于**模板匹配**。
-3. **J4 pass/fail 一致率（YOLO vs pose33）=0.75 ≥ 0.75（临界达标）** → 可做粗粒度 pass/fail，
-   但侧面分歧（第六节）说明**精度不足以替代 full 评估**。
+1. **J1 corr(MP body_core, pose33)=0.280 < 0.70** → body_core_v1 布局没有在跨视频模板分数上跟随生产参照基准，布局级 go/no-go 失败。
+2. **J4 pass/fail 一致率（YOLO vs pose33）=0.50 < 0.75** → 不可作 pass/fail 判定，更不可进入用户报告 / 正式评分。
+3. **J2 corr(YOLO body_core, MP body_core)=0.980 ≥ 0.80**、**J3 MAE=0.0468 ≤ 0.05**（thr=0.6）
+   → YOLO 后端在 body_core_v1 上能较好跟随 MediaPipe，可用于预览、调试和后续扩大样本复核。
 4. **J5 有效帧率最小 0.875 ≥ 0.70、J6 skip 最大 0.125 ≤ 0.30、J7 失败率 0.0 ≤ 0.02**（thr=0.6）
-   → 有效帧充足、后端稳定，满足模板匹配的帧覆盖要求。
+   → 检测覆盖不是主要阻塞；主要问题是 body_core_v1 与 pose33 参照分数不一致。
 5. **不进 full tech_eval 的硬依据（S0 降级清单，结构性、与精度无关）**：COCO17 缺嘴角（9/10）、
    脚跟脚尖（29–32）、手指（17–22），重心（支撑面/分段质心）与发力顺序（蹬地/脚旋转）结构性失效。
    body_core_v1 只有 12 点（无脚部细分），无法承担 full tech_eval。
 
 因此：
 
-- ✅ **可用于 `body_core_v1` 模板匹配出分**：baseline=1.2826、YOLO `valid_conf_thr`=0.6 已标定入库，
-  `calibration_status=calibrated_body_core_v1`。
-- ⚠️ **不可作 full tech_eval / 高精度评分**：侧面 pass/fail 分歧 + COCO17 结构性缺点。
-- ➡️ **对 #11 的分流**：按 Issue #11 前置条件，本结论 = 「可模板匹配（但不评分）」分支 →
+- ✅ **可保留参数落库**：baseline=1.2826、YOLO `valid_conf_thr`=0.6 替换旧占位，供预览 / 内部复核使用。
+- ❌ **不得用于 `body_core_v1` 模板匹配对外出分**：`calibration_status=unvalidated`，模板 meta 额外标 `score_authorized=False`。
+- ❌ **不可作 full tech_eval / 高精度评分**：侧面 pass/fail 分歧 + COCO17 结构性缺点。
+- ➡️ **对 #11 的分流**：按 Issue #11 前置条件，本结论 = 「仅用于预览」分支 →
   #11 **只做 MediaPipe 侧结构化状态改造**，不启用 YOLO partial tech_eval 指标。
 
-> 排除项说明：未选「仅预览」（J2/J3 已达标，强于纯预览）；未选「skip-aware partial eval」
-> （J4 仅临界、侧面分歧明显，且 COCO17 结构性缺点使 partial eval 收益有限，不足以支撑评分级一致性）；
-> 未选「不建议」（J1–J7 全部达标，模板匹配可用）。
+> 排除项说明：未选「可模板匹配」（J1/J4 未达标）；未选「skip-aware partial eval」
+> （pass/fail 一致率不足，且 COCO17 结构性缺点使 partial eval 收益有限）；未选「不建议」
+> （YOLO 与 MediaPipe body_core 的 J2/J3、有效帧率和失败率达标，仍有预览 / 调试价值）。
 
 ---
 
@@ -236,10 +246,11 @@ YOLO `valid_conf_thr` 标定方法（预注册）：
 | body_core_v1 baseline | `core/feature_layout.py::BODY_CORE_V1.default_baseline` | 1.2826（替换 None/占位 2.0） |
 | 闭环 baseline 取值 | `core/body_core_compare.py::BODY_CORE_V1_CALIBRATED_BASELINE` | 取自 layout default_baseline |
 | YOLO valid_conf_thr | `core/yolo_adapter.py::DEFAULT_YOLO_VALID_CONF_THR` | 0.6（替换 #7 占位 0.5） |
-| 标定状态 | `core/yolo_adapter.py::YOLO_CALIBRATION_STATUS` / `body_core_compare` | `calibrated_body_core_v1` |
+| 标定状态 | `core/yolo_adapter.py::YOLO_CALIBRATION_STATUS` / `body_core_compare` | `unvalidated`（参数已落库，但不授权评分） |
+| 评分授权 | `core/body_core_compare.py` 模板 meta | `score_authorized=False` |
 | 回归测试 | `tests/test_s3_calibration.py` | baseline/阈值/状态/报告头部断言 |
 
-> 标定范围声明：上述标定**仅对 `body_core_v1` 模板匹配成立**。YOLO-only 仍不进 full tech_eval。
+> 标定范围声明：上述 baseline / 阈值只用于预览与内部复核，**不授权模板匹配对外出分**。
 > 若目标硬件换为 GPU 或更换样本集，需在该硬件 / 样本上复跑本脚本复核数字（结构性降级结论无需复测）。
 
 ---

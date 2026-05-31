@@ -171,7 +171,7 @@ def test_map_coco17_person_returns_arrays_and_frameresult():
     assert frame.meta is not None
     assert frame.meta["confidence_kind"] == "yolo_conf"
     assert frame.meta["validity_policy"] == "confidence_thr"
-    assert frame.meta["calibration_status"] == "calibrated_body_core_v1"
+    assert frame.meta["calibration_status"] == "unvalidated"
 
 
 # --------------------------------------------------------------------------- #
@@ -194,5 +194,5 @@ def test_yolo_result_to_arrays_numpy_only():
 
 
 def test_default_thr_is_calibrated_constant():
-    # S3（#10）已标定阈值 0.6，刻意与 MediaPipe（0.5）分开。
+    # S3（#10）落库阈值 0.6，刻意与 MediaPipe（0.5）分开；仍不授权对外评分。
     assert DEFAULT_YOLO_VALID_CONF_THR == 0.6

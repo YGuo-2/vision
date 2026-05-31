@@ -418,6 +418,39 @@ def _passfail_consistency(ref_scores: list, test_scores: list, thr: float) -> fl
     return float(agree) / float(len(pairs))
 
 
+def summarize_pairwise_metrics(rows: list[dict], *, include_self: bool = False) -> dict:
+    """Summarize pairwise score metrics using the pre-registered pair scope.
+
+    The S3 go/no-go criteria are defined on cross-video pairs. Self matches are
+    useful as a sanity check, but including them in correlation/MAE/pass-fail
+    metrics injects four trivial 1.0 scores and overstates calibration quality.
+    """
+    metric_rows = rows if include_self else [r for r in rows if not r["self"]]
+    pose33_s = [r["pose33_score"] for r in metric_rows]
+    mpbc_s = [r["mp_bodycore_score"] for r in metric_rows]
+    yolobc_s = [r["yolo_bodycore_score"] for r in metric_rows]
+    return {
+        "corr_mp_bodycore_vs_pose33": _pearson(mpbc_s, pose33_s),
+        "corr_yolo_bodycore_vs_mp_bodycore": _pearson(yolobc_s, mpbc_s),
+        "mae_yolo_bodycore_vs_mp_bodycore": _mae(yolobc_s, mpbc_s),
+        "mae_mp_bodycore_vs_pose33": _mae(mpbc_s, pose33_s),
+        "passfail_consistency_mp_bodycore_vs_pose33": _passfail_consistency(
+            pose33_s, mpbc_s, PASS_SCORE_THR
+        ),
+        "passfail_consistency_yolo_bodycore_vs_pose33": _passfail_consistency(
+            pose33_s, yolobc_s, PASS_SCORE_THR
+        ),
+        "passfail_consistency_yolo_bodycore_vs_mp_bodycore": _passfail_consistency(
+            mpbc_s, yolobc_s, PASS_SCORE_THR
+        ),
+        "pass_score_thr": PASS_SCORE_THR,
+        "n_pairs": len(metric_rows),
+        "n_total_pairs": len(rows),
+        "n_cross_pairs": sum(1 for r in rows if not r["self"]),
+        "self_matches_included": bool(include_self),
+    }
+
+
 # --------------------------------------------------------------------------- #
 # baseline 标定（尺度对齐）
 # --------------------------------------------------------------------------- #
@@ -515,35 +548,28 @@ def run(args: argparse.Namespace) -> int:
     rows = pairwise_matrix(feats_calib, baseline_bodycore=baseline_bodycore)
 
     # 4) 相关性 / MAE / pass-fail 一致率。
-    pose33_s = [r["pose33_score"] for r in rows]
-    mpbc_s = [r["mp_bodycore_score"] for r in rows]
-    yolobc_s = [r["yolo_bodycore_score"] for r in rows]
-    metrics = {
-        "corr_mp_bodycore_vs_pose33": _pearson(mpbc_s, pose33_s),
-        "corr_yolo_bodycore_vs_mp_bodycore": _pearson(yolobc_s, mpbc_s),
-        "mae_yolo_bodycore_vs_mp_bodycore": _mae(yolobc_s, mpbc_s),
-        "mae_mp_bodycore_vs_pose33": _mae(mpbc_s, pose33_s),
-        "passfail_consistency_mp_bodycore_vs_pose33": _passfail_consistency(pose33_s, mpbc_s, PASS_SCORE_THR),
-        "passfail_consistency_yolo_bodycore_vs_pose33": _passfail_consistency(pose33_s, yolobc_s, PASS_SCORE_THR),
-        "passfail_consistency_yolo_bodycore_vs_mp_bodycore": _passfail_consistency(mpbc_s, yolobc_s, PASS_SCORE_THR),
-        "pass_score_thr": PASS_SCORE_THR,
-        "n_pairs": len(rows),
-        "n_cross_pairs": sum(1 for r in rows if not r["self"]),
-    }
+    # 主指标严格使用跨视频对；self-match 仅作为 sanity 指标单独保留。
+    metrics = summarize_pairwise_metrics(rows, include_self=False)
+    metrics_with_self = summarize_pairwise_metrics(rows, include_self=True)
 
     # 5) YOLO valid_conf_thr 扫描（用标定 baseline；只重算 YOLO body_core 特征）。
     sweep: list[dict] = []
     for thr in YOLO_CONF_THR_GRID:
         feats_thr = {sid: build_features(caches[sid], yolo_conf_thr=thr) for sid in single_ids}
         rows_thr = pairwise_matrix(feats_thr, baseline_bodycore=baseline_bodycore)
-        yb = [r["yolo_bodycore_score"] for r in rows_thr]
-        mb = [r["mp_bodycore_score"] for r in rows_thr]
+        cross_thr = [r for r in rows_thr if not r["self"]]
+        yb = [r["yolo_bodycore_score"] for r in cross_thr]
+        mb = [r["mp_bodycore_score"] for r in cross_thr]
+        pose33 = [r["pose33_score"] for r in cross_thr]
         valid_ratios = [f.yolo_bodycore_valid_ratio for f in feats_thr.values()]
         sweep.append(
             {
                 "yolo_conf_thr": float(thr),
                 "corr_yolo_vs_mp_bodycore": _pearson(yb, mb),
                 "mae_yolo_vs_mp_bodycore": _mae(yb, mb),
+                "passfail_consistency_yolo_vs_pose33": _passfail_consistency(pose33, yb, PASS_SCORE_THR),
+                "passfail_consistency_yolo_vs_mp_bodycore": _passfail_consistency(mb, yb, PASS_SCORE_THR),
+                "n_cross_pairs": len(cross_thr),
                 "yolo_bodycore_valid_ratio_mean": float(np.mean(valid_ratios)) if valid_ratios else None,
                 "yolo_bodycore_valid_ratio_min": float(np.min(valid_ratios)) if valid_ratios else None,
                 "yolo_bodycore_skip_ratio_max": float(1.0 - np.min(valid_ratios)) if valid_ratios else None,
@@ -600,6 +626,7 @@ def run(args: argparse.Namespace) -> int:
         "student_sample_ids": student_ids,
         "baseline_calibration": calib,
         "metrics": metrics,
+        "metrics_with_self_match_sanity": metrics_with_self,
         "yolo_conf_thr_sweep": sweep,
         "multi_person_gate": gate_rows,
         "per_sample": per_sample,
@@ -617,7 +644,7 @@ def run(args: argparse.Namespace) -> int:
     # 控制台摘要。
     print(f"\n[done] 输出目录：{out_dir}")
     print(f"  baseline 标定: {calib}")
-    print(f"  metrics: corr(mp_bc,pose33)={metrics['corr_mp_bodycore_vs_pose33']}, "
+    print(f"  metrics（跨视频，不含 self-match）: corr(mp_bc,pose33)={metrics['corr_mp_bodycore_vs_pose33']}, "
           f"corr(yolo_bc,mp_bc)={metrics['corr_yolo_bodycore_vs_mp_bodycore']}, "
           f"MAE(yolo_bc,mp_bc)={metrics['mae_yolo_bodycore_vs_mp_bodycore']}")
     print(f"  pass/fail 一致率(yolo_bc vs pose33)={metrics['passfail_consistency_yolo_bodycore_vs_pose33']}")
@@ -652,7 +679,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--yolo-model", default="models/yolo11n-pose.pt")
     p.add_argument("--pose-variant", default="full")
     p.add_argument("--out", default="outputs/calib_body_core")
-    p.add_argument("--calib-conf-thr", type=float, default=0.5, help="逐样本明细/标定使用的 YOLO valid_conf_thr")
+    p.add_argument("--calib-conf-thr", type=float, default=0.6, help="逐样本明细/标定使用的 YOLO valid_conf_thr")
     p.add_argument("--only", default=None, help="只跑指定样本 id（逗号分隔）")
     p.add_argument("--max-frames", type=int, default=None, help="每段最多帧数（调试用）")
     p.add_argument("--force-extract", action="store_true", help="忽略磁盘缓存，强制重新推理")

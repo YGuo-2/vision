@@ -30,11 +30,11 @@ YOLO 的 keypoint confidence 写入第 4 通道，但标 ``confidence_kind="yolo
 
 标定时序（重要）
 ----------------
-YOLO 侧 ``valid_conf_thr`` 已在 **S3（#10）标定为 0.6**（替换 #7 占位值 0.5）。
+YOLO 侧 ``valid_conf_thr`` 已在 **S3（#10）定为 0.6**（替换 #7 占位值 0.5）。
 标定依据见 ``docs/yolo_body_core_calibration.md``：在该阈值下 YOLO body_core_v1
-分数与 MediaPipe body_core_v1 分数相关性 0.99、MAE 0.023，且 body_core 有效帧率
-仍 >= 0.87。**仅在 body_core_v1 模板匹配场景**视为已标定，不进 full tech_eval。
-输出 meta 标 ``calibration_status="calibrated_body_core_v1"``。
+与 MediaPipe body_core_v1 的跨视频一致性最好，且 body_core 有效帧率仍 >= 0.87。
+但跨视频 go/no-go 未通过，结论为「仅预览 / 内部标定参考」，不进 full tech_eval。
+输出 meta 仍标 ``calibration_status="unvalidated"``，不得作为对外评分。
 
 tracker 段边界语义
 ------------------
@@ -65,19 +65,17 @@ from .paths import models_dir
 # --------------------------------------------------------------------------- #
 # 常量：YOLO 侧 confidence / validity 策略
 # --------------------------------------------------------------------------- #
-# YOLO 侧 valid_conf_thr 已在 S3（#10）标定为 0.6（替换 #7 占位值 0.5）。
+# YOLO 侧 valid_conf_thr 已在 S3（#10）定为 0.6（替换 #7 占位值 0.5）。
 # 标定依据：docs/yolo_body_core_calibration.md（thr=0.6 时 YOLO↔MediaPipe body_core
-# 分数相关性 0.99、MAE 0.023、有效帧率 >= 0.87）。刻意与 MediaPipe 的
+# 跨视频相关性 0.98、MAE 0.047、有效帧率 >= 0.87）。刻意与 MediaPipe 的
 # DEFAULT_VALID_CONF_THR 分开定义，避免把 YOLO keypoint confidence 当成 MediaPipe
-# visibility 复用同一阈值。**该标定仅在 body_core_v1 模板匹配场景成立**，YOLO-only
-# 不进 full tech_eval（COCO17 结构性缺点，见 S0 降级清单）。
+# visibility 复用同一阈值。S3 结论仍为仅预览 / 内部标定参考，YOLO-only 不进 full tech_eval。
 DEFAULT_YOLO_VALID_CONF_THR: float = 0.6
 
 YOLO_CONFIDENCE_KIND: str = "yolo_conf"
 YOLO_VALIDITY_POLICY: str = "confidence_thr"
-# S3（#10）已标定：valid_conf_thr=0.6 + body_core_v1 baseline，仅用于 body_core_v1
-# 模板匹配出分（非 full tech_eval）。
-YOLO_CALIBRATION_STATUS: str = "calibrated_body_core_v1"
+# S3（#10）已落 valid_conf_thr=0.6，但跨视频 go/no-go 未通过；仍不得对外评分。
+YOLO_CALIBRATION_STATUS: str = "unvalidated"
 
 DEFAULT_YOLO_MODEL_NAME: str = "yolo11n-pose.pt"
 
@@ -112,10 +110,10 @@ MULTI_PERSON_GATE_NOTE: str = (
 )
 # 标定状态说明（写入 meta）。
 CALIBRATION_NOTE: str = (
-    "YOLO valid_conf_thr is CALIBRATED to 0.6 in S3 (#10), valid for body_core_v1 "
-    "template matching only (corr 0.99 / MAE 0.023 vs MediaPipe body_core, valid "
-    "frame ratio >= 0.87). YOLO-only does NOT enter full tech_eval (COCO17 lacks "
-    "mouth/heel/foot-index/fingers; see S0 degradation list)."
+    "YOLO valid_conf_thr is set to 0.6 in S3 (#10), but cross-video go/no-go "
+    "criteria did not pass. Scores remain preview/internal calibration only and "
+    "MUST NOT enter outward-facing scoring. YOLO-only does NOT enter full tech_eval "
+    "(COCO17 lacks mouth/heel/foot-index/fingers; see S0 degradation list)."
 )
 
 
@@ -208,7 +206,7 @@ def map_coco17_to_blaze33(
     conf:
         ``(17,)`` keypoint confidence（YOLO ``keypoints.conf``）；``None`` 视作全 0。
     valid_conf_thr:
-        有效性占位阈值（待标定，#10）。
+        YOLO 有效性阈值（S3 #10 当前落库值为 0.6；仍不授权对外评分）。
 
     返回
     ----
@@ -584,7 +582,7 @@ class YoloPoseAdapter:
             model_path = models_dir() / DEFAULT_YOLO_MODEL_NAME
         self.model_path = Path(model_path)
         self.model_name = self.model_path.name
-        # S3（#10）已标定 valid_conf_thr=0.6（body_core_v1 模板匹配场景）。
+        # S3（#10）落库 valid_conf_thr=0.6，但仍不授权对外评分。
         self.valid_conf_thr = float(valid_conf_thr)
         self.confidence_kind = str(confidence_kind)
         self.imgsz = int(imgsz)
@@ -678,7 +676,7 @@ def extract_yolo_landmark_series(
         模型路径、或已构造的 ``YoloPoseAdapter``（便于测试注入 fake adapter）。
         ``None`` 时按默认路径 ``models/yolo11n-pose.pt`` 构造 adapter。
     valid_conf_thr:
-        S3（#10）已标定阈值 0.6（body_core_v1 模板匹配场景）。YOLO-only 不进 full tech_eval。
+        S3（#10）落库阈值 0.6；结论仍为仅预览 / 内部标定参考。YOLO-only 不进 full tech_eval。
     """
     import cv2  # 局部 import 与既有 extract_pose_raw 风格保持一致，避免顶层耦合。
 
@@ -756,7 +754,7 @@ def extract_yolo_landmark_series(
         "running_mode": str(running_mode),
         "confidence_kind": adapter.confidence_kind,
         "validity_policy": YOLO_VALIDITY_POLICY,
-        # S3（#10）已标定 valid_conf_thr=0.6（body_core_v1 模板匹配场景）。
+        # S3（#10）落库 valid_conf_thr=0.6，但未授权对外评分。
         "valid_conf_thr": float(adapter.valid_conf_thr),
         "calibration_status": YOLO_CALIBRATION_STATUS,
         "calibration_note": CALIBRATION_NOTE,
