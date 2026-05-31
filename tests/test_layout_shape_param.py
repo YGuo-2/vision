@@ -62,8 +62,8 @@ def test_registry_scope_pose33_v3_only():
     assert len(spec.source_indices) == 22
     assert spec.source_indices == tuple(range(11, 33))
     assert len(spec.joint_names) == 22
-    # body_core_v1 在 #8 才注册，本期不得提前建模
-    assert not has_layout("body_core_v1")
+    # body_core_v1 在 #8（S2）随 YOLO 离线闭环注册；此处确认其已注册且与 pose33_v3 并存。
+    assert has_layout("body_core_v1")
 
 
 def test_layout_spec_has_no_required_landmarks_field():
@@ -131,9 +131,10 @@ def test_mirror_accepts_explicit_layout_name():
 
 
 def test_mirror_unresolvable_shape_raises_not_silent():
-    # 无法解析布局（未注册的 (J,2)）时必须报错，不得静默按 22 点处理
+    # 无法解析布局（未注册的 (J,2)）时必须报错，不得静默按 22 点处理。
+    # 用 (15,2)：既非 pose33_v3 (22,2) 也非 body_core_v1 (12,2)，注册表无法反查。
     rng = np.random.default_rng(9)
-    feats = rng.standard_normal((12, 2)).astype(np.float32)
+    feats = rng.standard_normal((15, 2)).astype(np.float32)
     with pytest.raises(ValueError):
         mirror_pose_features(feats)
 

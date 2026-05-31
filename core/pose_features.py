@@ -348,6 +348,132 @@ def normalize_pose_xy_v3(pose_landmarks) -> np.ndarray | None:
     return out
 
 
+def _blaze33_xy_getter(pose_landmarks):
+    """返回一个 ``getter(i) -> (x, y) float32`` ，统一 MediaPipe landmark 对象与
+    YOLO ``(33,4)`` numpy 行两种输入，供 ``body_core_v1`` 共享 normalizer 使用。
+
+    - MediaPipe：``pose_landmarks`` 是一串带 ``.x/.y`` 属性的 landmark 对象。
+    - YOLO：``pose_landmarks`` 是 ``(33,4)`` 的 ``(x, y, z, conf)`` numpy 行
+      （由 ``core.yolo_adapter.map_coco17_to_blaze33`` 产出）。
+
+    返回 ``None`` 表示输入无法识别。
+    """
+    if pose_landmarks is None:
+        return None
+    arr = None
+    if isinstance(pose_landmarks, np.ndarray):
+        arr = pose_landmarks
+    elif hasattr(pose_landmarks, "shape") and not hasattr(pose_landmarks, "__len__"):
+        arr = np.asarray(pose_landmarks)
+    if arr is not None:
+        a = np.asarray(arr, dtype=np.float32)
+        if a.ndim != 2 or a.shape[0] < 33 or a.shape[1] < 2:
+            return None
+
+        def _get(i: int) -> np.ndarray:
+            return np.array([a[i, 0], a[i, 1]], dtype=np.float32)
+
+        return _get
+
+    # MediaPipe landmark 对象序列。
+    lm = pose_landmarks
+
+    def _get_obj(i: int) -> np.ndarray:
+        return np.array([float(lm[i].x), float(lm[i].y)], dtype=np.float32)
+
+    return _get_obj
+
+
+def normalize_pose_body_core_v1(pose_landmarks) -> np.ndarray | None:
+    """``body_core_v1`` 共享 normalizer（YOLO 迁移 Issue #8 / S2）。
+
+    只使用躯干四肢核心 12 点（肩/肘/腕 + 髋/膝/踝，BlazePose 11..16 / 23..28），
+    输出 ``(12, 2)``。归一化策略与 ``normalize_pose_xy_v3`` 同构（躯干长度为主尺度、
+    front/side 自适应旋转），但**索引、输出 shape 与关节顺序都来自 ``body_core_v1``
+    layout**，因此 YOLO（COCO17 映射）与 MediaPipe 都能产出同一布局，供 #10 三方对比。
+
+    输入兼容
+    --------
+    - MediaPipe：landmark 对象序列（带 ``.x/.y``）。
+    - YOLO：``(33,4)`` numpy 行（``map_coco17_to_blaze33`` 的输出）。
+
+    body_core_v1 的 12 点全部落在 COCO17 可映射点，因此 YOLO 路径下这些点是真实点
+    （非合成缺失点）；缺失点不参与该布局，不会污染归一化。
+    """
+    from .feature_layout import BODY_CORE_V1
+
+    get_xy = _blaze33_xy_getter(pose_landmarks)
+    if get_xy is None:
+        return None
+
+    # BlazePose 索引（与 BODY_CORE_V1.source_indices 对应）。
+    L_SHOULDER, R_SHOULDER = 11, 12
+    L_HIP, R_HIP = 23, 24
+
+    ls, rs = get_xy(L_SHOULDER), get_xy(R_SHOULDER)
+    lh, rh = get_xy(L_HIP), get_xy(R_HIP)
+
+    if (
+        (not np.isfinite(ls).all())
+        or (not np.isfinite(rs).all())
+        or (not np.isfinite(lh).all())
+        or (not np.isfinite(rh).all())
+    ):
+        return None
+
+    sh_c = 0.5 * (ls + rs)
+    hip_c = 0.5 * (lh + rh)
+    center = hip_c if np.isfinite(hip_c).all() else sh_c
+    if not np.isfinite(center).all():
+        return None
+
+    shoulder_w = float(np.linalg.norm(ls - rs))
+    hip_w = float(np.linalg.norm(lh - rh))
+    torso_len = float(np.linalg.norm(sh_c - hip_c))
+
+    # 与 v3 同构：优先用躯干长度作为尺度（对 yaw 更稳），回退到肩宽/髋宽。
+    min_scale = 0.02
+    scale = (
+        torso_len
+        if (np.isfinite(torso_len) and torso_len >= min_scale)
+        else max(shoulder_w, hip_w)
+    )
+    if (not np.isfinite(scale)) or (scale < min_scale):
+        return None
+
+    # 与 v3 同构：按“正面程度”决定旋转对齐轴。
+    width_ratio = float(shoulder_w / (torso_len + 1e-6)) if np.isfinite(torso_len) else 0.0
+    use_shoulders = bool(width_ratio >= 0.35)
+    if use_shoulders:
+        v = rs - ls
+        target = 0.0  # 对齐到 +X 轴
+    else:
+        v = sh_c - hip_c
+        target = -float(np.pi) / 2.0  # 对齐到上方（-Y）
+
+    v_norm = float(np.linalg.norm(v))
+    if (not np.isfinite(v_norm)) or v_norm < 1e-6:
+        ca, sa = 1.0, 0.0
+    else:
+        ang = float(np.arctan2(float(v[1]), float(v[0])))
+        rot = float(target - ang)
+        ca, sa = float(np.cos(rot)), float(np.sin(rot))
+    R = np.array([[ca, -sa], [sa, ca]], dtype=np.float32)
+
+    feats: list[np.ndarray] = []
+    for src in BODY_CORE_V1.source_indices:
+        p = get_xy(int(src))
+        p = (p - center) / float(scale)
+        p = R @ p
+        p = np.clip(p, -5.0, 5.0)
+        feats.append(p)
+
+    out = np.stack(feats, axis=0)
+    if (not np.isfinite(out).all()) or float(np.max(np.abs(out))) > 5.0:
+        return None
+    return out
+
+
 def motion_energy(seq: np.ndarray) -> np.ndarray:
     # seq: (T, D) with finite values
     d = np.diff(seq, axis=0)
