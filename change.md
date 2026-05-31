@@ -1,3 +1,33 @@
+## 2026-05-31: PR #22 审查补强 — S4 结构化状态
+
+### 问题描述
+
+审查 PR #22 时发现两处结构化契约细节需要补强：`core/pose_features.py` 的 COCO17
+能力分组把 `left_eye/right_eye` 也当成结构性缺失，和 `core/yolo_adapter.py` 已有映射契约
+不一致；`batch/batch_tech_eval.py` 的 CSV 只给部分技术指标写出“缺失关键点”列，重心侧面/
+正面/CoM 分项缺少对应列。
+
+### 修改内容
+
+- `core/pose_features.py`：将眼部能力拆成 `eyes`（2/5，COCO17 有近似映射）与
+  `eye_details`（1/3/4/6，COCO17 结构性缺失），`COCO17_SUPPORTED_CAPABILITIES`
+  纳入 `eyes`，避免未来能力判定误报。
+- `batch/batch_tech_eval.py`：CSV 补齐 `重心_侧面缺失关键点`、`重心_正面缺失关键点`、
+  `重心_CoM缺失关键点`，使报告列与每个重心分项的结构化契约一致。
+- `tests/test_rule_availability.py`：新增 COCO17 眼部能力映射回归，锁住左右眼中心可用、
+  眼细分缺失的契约。
+
+### 验证方法
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests\test_rule_availability.py tests\test_tech_eval_contract.py -q  # 17 passed
+.\.venv\Scripts\python.exe -m pytest tests\test_pose33_v3_golden.py tests\test_valid_mask_migration.py tests\test_yolo_landmark_mapping.py -q  # 42 passed
+.\.venv\Scripts\python.exe -m pytest tests -q  # 136 passed
+.\.venv\Scripts\python.exe -m py_compile core\pose_features.py core\rule_scoring.py analysis\tech_eval.py batch\batch_tech_eval.py batch\batch_dual_compare.py  # exit 0
+```
+
+---
+
 ## 2026-05-31: YOLO 迁移 S4 — 规则与技术评估分级（结构化状态，Issue #11）
 
 ### 问题描述
@@ -17,9 +47,9 @@
 
 - **`core/pose_features.py` 新增集中式关键点命名 + 能力分组（Issue #11）**：
   - `BLAZE33_LANDMARK_NAMES`（33 点英文名表）、`landmark_names()` / `landmark_capabilities()`。
-  - 能力分组常量 `CAP_FACE_CENTER/EYES/EARS/MOUTH/ARMS/HANDS/LEGS/FEET` 与
-    `COCO17_SUPPORTED_CAPABILITIES`（COCO17 结构性支持 = face_center/ears/arms/legs，
-    缺 mouth/hands/feet，对应 S0 降级清单）。
+  - 能力分组常量 `CAP_FACE_CENTER/EYES/EYE_DETAILS/EARS/MOUTH/ARMS/HANDS/LEGS/FEET` 与
+    `COCO17_SUPPORTED_CAPABILITIES`（COCO17 结构性支持 = face_center/eyes/ears/arms/legs，
+    缺 eye_details/mouth/hands/feet，对应 adapter 映射与 S0 降级清单）。
   - `landmarks_missing_for_capabilities(indices, supported)`：按能力分组判定后端结构性缺点；
     `supported=None`（MediaPipe full）视为全部支持、返回空（行为不变）。
 - **`core/rule_scoring.py` 规则三态结构化（Issue #11）**：
@@ -40,14 +70,15 @@
     判定**）。在 `_evaluate_from_arrays` 末尾对七个指标按各自所需关键点与所在段 mask 补齐；
     `keep_detail=False` 与 `evaluate_video` 的 strip 改用 `dataclasses.replace`，保留契约字段。
 - **报告输出补缺失关键点 / backend（Issue #11，仅 MediaPipe 侧）**：
-  - `batch/batch_tech_eval.py`：CSV 新增「重心/回收速度/发力顺序/拳面角度 缺失关键点」列与
-    `backend` 列；JSONL 经 `to_jsonable` 自动带上新字段。
+  - `batch/batch_tech_eval.py`：CSV 新增「重心（侧面优先/侧面/正面/CoM）/回收速度/
+    发力顺序/拳面角度 缺失关键点」列与 `backend` 列；JSONL 经 `to_jsonable` 自动带上新字段。
   - `batch/batch_dual_compare.py`：`error_rules.csv` 新增 `state` / `skip_reason` /
     `missing_landmarks` 列；JSONL 经 `_jsonable`(asdict) 自动带上新字段。
 - **新增测试**：
   - `tests/test_rule_availability.py`：覆盖三种 `skip_reason`（low_confidence /
     insufficient_valid_frames / missing_landmarks）、COCO17 缺点规则（feet/mouth）被 skipped、
-    required_landmarks/capabilities 声明正确、默认不传 `supported_capabilities` 时无 backend 级缺点。
+    required_landmarks/capabilities 声明正确、默认不传 `supported_capabilities` 时无 backend 级缺点，
+    并回归 COCO17 左右眼中心可用、眼细分缺失的 adapter 契约。
   - `tests/test_tech_eval_contract.py`：`evaluate_video_full` 每指标含 `status/reason/
     required_landmarks/missing_landmarks/backend`；`_attach_contract` 不改 status/reason/detail；
     人为遮挡脚部后 `missing_landmarks` 如实含脚跟/脚尖；契约字段 JSON 可序列化。
@@ -63,9 +94,9 @@
 ### 验证方法
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest tests\test_rule_availability.py tests\test_tech_eval_contract.py -q  # 16 passed
-.\.venv\Scripts\python.exe -m pytest tests\test_pose33_v3_golden.py tests\test_valid_mask_migration.py -q  # 31 passed（MediaPipe 默认不漂移）
-.\.venv\Scripts\python.exe -m pytest tests -q                                                              # 135 passed（此前 119 + 本期 16 新增）
+.\.venv\Scripts\python.exe -m pytest tests\test_rule_availability.py tests\test_tech_eval_contract.py -q  # 17 passed
+.\.venv\Scripts\python.exe -m pytest tests\test_pose33_v3_golden.py tests\test_valid_mask_migration.py tests\test_yolo_landmark_mapping.py -q  # 42 passed（MediaPipe 默认不漂移 + adapter 契约）
+.\.venv\Scripts\python.exe -m pytest tests -q                                                              # 136 passed（此前 119 + 本期 17 新增）
 .\.venv\Scripts\python.exe -m py_compile core\pose_features.py core\rule_scoring.py analysis\tech_eval.py batch\batch_tech_eval.py batch\batch_dual_compare.py core\action_compare.py apps\main.py apps\app_ui.py  # exit 0
 ```
 
@@ -73,7 +104,7 @@
   旧路径行为不漂移（行为不变硬门槛）。
 - `tests/test_rule_availability.py` / `tests/test_tech_eval_contract.py` 全绿 → 结构化三态与指标契约
   字段齐全、缺点判定正确、不可评估不当合格/不合格。
-- 全量 135 passed（此前 119 + 本期 16 新增）→ 无回归。
+- 全量 136 passed（此前 119 + 本期 17 新增）→ 无回归。
 
 ---
 

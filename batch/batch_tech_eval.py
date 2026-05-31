@@ -85,9 +85,11 @@ def main() -> None:
             "重心_侧面": str(res.cog_side.status),
             "重心_侧面说明": str(res.cog_side.reason),
             "重心_侧面原因类型": _cause(res.cog_side),
+            "重心_侧面缺失关键点": _missing(res.cog_side),
             "重心_正面": str(res.cog_front.status),
             "重心_正面说明": str(res.cog_front.reason),
             "重心_正面原因类型": _cause(res.cog_front),
+            "重心_正面缺失关键点": _missing(res.cog_front),
             "回收速度": str(res.retract_speed.status),
             "回收速度说明": str(res.retract_speed.reason),
             "回收速度原因类型": _cause(res.retract_speed),
@@ -107,10 +109,12 @@ def main() -> None:
             row["重心_CoM(方案3)"] = str(res.cog_com.status)
             row["重心_CoM说明"] = str(res.cog_com.reason)
             row["重心_CoM原因类型"] = _cause(res.cog_com)
+            row["重心_CoM缺失关键点"] = _missing(res.cog_com)
         else:
             row["重心_CoM(方案3)"] = "未评估"
             row["重心_CoM说明"] = ""
             row["重心_CoM原因类型"] = ""
+            row["重心_CoM缺失关键点"] = ""
         return row
 
     def _process_video(idx: int, v: Path) -> tuple[int, dict[str, Any], dict[str, Any] | None]:

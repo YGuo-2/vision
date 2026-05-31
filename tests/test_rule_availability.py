@@ -36,7 +36,10 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from core.pose_features import COCO17_SUPPORTED_CAPABILITIES  # noqa: E402
+from core.pose_features import (  # noqa: E402
+    COCO17_SUPPORTED_CAPABILITIES,
+    landmarks_missing_for_capabilities,
+)
 from core.rule_scoring import (  # noqa: E402
     RULE_STATE_EVALUATED,
     RULE_STATE_SKIPPED,
@@ -240,3 +243,23 @@ def test_backward_compatible_no_backend_gating_by_default():
         # 默认（MediaPipe full）不应出现 missing_landmarks 级跳过。
         assert v.skip_reason != SKIP_MISSING_LANDMARKS
         assert v.missing_landmarks == ()
+
+
+# --------------------------------------------------------------------------- #
+# 7) COCO17 能力分组必须和 adapter 映射契约一致：左右眼中心可用，眼细分缺失
+# --------------------------------------------------------------------------- #
+def test_coco17_eye_capabilities_match_adapter_contract():
+    missing = set(
+        landmarks_missing_for_capabilities(
+            (1, 2, 3, 4, 5, 6),
+            COCO17_SUPPORTED_CAPABILITIES,
+        )
+    )
+    assert "left_eye" not in missing
+    assert "right_eye" not in missing
+    assert {
+        "left_eye_inner",
+        "left_eye_outer",
+        "right_eye_inner",
+        "right_eye_outer",
+    }.issubset(missing)

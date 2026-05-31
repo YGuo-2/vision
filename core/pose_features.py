@@ -57,10 +57,10 @@ def derive_valid_mask(landmarks: np.ndarray, thr: float = DEFAULT_VALID_CONF_THR
 # `tech_eval`（技术指标）统一声明 ``required_landmarks`` / ``required_capabilities``
 # 与运行时 ``missing_landmarks``，下游用稳定字段判断而非靠中文字符串。
 #
-# 能力分组按 COCO17（YOLO）可映射性划分：COCO17 缺嘴角(9,10)/手指(17-22)/
-# 脚跟脚尖(29-32)，故这些分组在 YOLO-only 下结构性不可用（缺点指标）。本期 #10
-# 标定结论为「仅预览」，YOLO partial eval 未启用，这些声明先服务 MediaPipe 侧的
-# 结构化状态，并为后续 YOLO 路径预留判据。
+# 能力分组按 COCO17（YOLO）可映射性划分：COCO17 缺眼细分(1,3,4,6)/
+# 嘴角(9,10)/手指(17-22)/脚跟脚尖(29-32)，故这些分组在 YOLO-only 下
+# 结构性不可用（缺点指标）。本期 #10 标定结论为「仅预览」，YOLO partial eval
+# 未启用，这些声明先服务 MediaPipe 侧的结构化状态，并为后续 YOLO 路径预留判据。
 BLAZE33_LANDMARK_NAMES: tuple[str, ...] = (
     "nose",            # 0
     "left_eye_inner",  # 1
@@ -99,7 +99,8 @@ BLAZE33_LANDMARK_NAMES: tuple[str, ...] = (
 
 # 能力分组标签。
 CAP_FACE_CENTER = "face_center"  # 鼻 0（COCO17 有）
-CAP_EYES = "eyes"                # 眼细分 1-6（COCO17 仅有眼中心，细分缺）
+CAP_EYES = "eyes"                # 左/右眼中心 2,5（COCO17 有近似映射）
+CAP_EYE_DETAILS = "eye_details"  # 眼细分 1,3,4,6（COCO17 无）
 CAP_EARS = "ears"                # 耳 7,8（COCO17 有）
 CAP_MOUTH = "mouth"              # 嘴角 9,10（COCO17 无）
 CAP_ARMS = "arms"                # 肩/肘/腕 11-16（COCO17 有）
@@ -107,15 +108,16 @@ CAP_HANDS = "hands"              # 手指 17-22（COCO17 无）
 CAP_LEGS = "legs"                # 髋/膝/踝 23-28（COCO17 有）
 CAP_FEET = "feet"                # 脚跟/脚尖 29-32（COCO17 无）
 
-# COCO17（YOLO）结构性支持的能力集合；缺 mouth/hands/feet（见 S0 降级清单）。
+# COCO17（YOLO）结构性支持的能力集合；缺 eye_details/mouth/hands/feet。
 # 仅作声明用途，本期不接 YOLO partial eval。
 COCO17_SUPPORTED_CAPABILITIES: frozenset[str] = frozenset(
-    {CAP_FACE_CENTER, CAP_EARS, CAP_ARMS, CAP_LEGS}
+    {CAP_FACE_CENTER, CAP_EYES, CAP_EARS, CAP_ARMS, CAP_LEGS}
 )
 
 _LANDMARK_CAPABILITY: dict[int, str] = {
     0: CAP_FACE_CENTER,
-    1: CAP_EYES, 2: CAP_EYES, 3: CAP_EYES, 4: CAP_EYES, 5: CAP_EYES, 6: CAP_EYES,
+    1: CAP_EYE_DETAILS, 2: CAP_EYES, 3: CAP_EYE_DETAILS,
+    4: CAP_EYE_DETAILS, 5: CAP_EYES, 6: CAP_EYE_DETAILS,
     7: CAP_EARS, 8: CAP_EARS,
     9: CAP_MOUTH, 10: CAP_MOUTH,
     11: CAP_ARMS, 12: CAP_ARMS, 13: CAP_ARMS, 14: CAP_ARMS, 15: CAP_ARMS, 16: CAP_ARMS,
