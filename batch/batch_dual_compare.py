@@ -142,6 +142,11 @@ def main() -> None:
                                 "penalty": int(rv.penalty),
                                 "valid_frames": int(rv.valid_frames),
                                 "total_frames": int(rv.total_frames),
+                                # YOLO 迁移 S4 / Issue #11：结构化三态写入报告，
+                                # 未评估原因清晰，不把不可评估当合格/不合格。
+                                "state": str(getattr(rv, "state", "") or ""),
+                                "skip_reason": str(getattr(rv, "skip_reason", "") or ""),
+                                "missing_landmarks": ",".join(getattr(rv, "missing_landmarks", ()) or ()),
                             }
                         )
             if enable_error_analysis:
@@ -219,7 +224,7 @@ def main() -> None:
     if enable_error_analysis and bool(args.rules):
         error_rules_path = out_dir / "error_rules.csv"
         with error_rules_path.open("w", encoding="utf-8-sig", newline="") as f:
-            fieldnames = ["video", "view", "rule_id", "rule_name", "violation_ratio", "penalty", "valid_frames", "total_frames"]
+            fieldnames = ["video", "view", "rule_id", "rule_name", "violation_ratio", "penalty", "valid_frames", "total_frames", "state", "skip_reason", "missing_landmarks"]
             w = csv.DictWriter(f, fieldnames=fieldnames)
             w.writeheader()
             w.writerows(error_rules_rows)

@@ -63,37 +63,58 @@ def main() -> None:
                 return ""
             return str(ind.detail.get("primary_cause") or "")
 
+        def _missing(ind: Any) -> str:
+            # YOLO 迁移 S4 / Issue #11：把缺失/不可评估关键点如实写入报告，
+            # 不把不可评估当合格/不合格。
+            if ind is None:
+                return ""
+            return ",".join(getattr(ind, "missing_landmarks", ()) or ())
+
+        def _backend(ind: Any) -> str:
+            if ind is None:
+                return ""
+            return str(getattr(ind, "backend", "") or "")
+
         row = {
             "video": str(v.name),
             "view_mode": str(res.view_mode),
             "重心(侧面优先)": str(res.cog_final.status),
             "重心说明": str(res.cog_final.reason),
             "重心原因类型": _cause(res.cog_final),
+            "重心缺失关键点": _missing(res.cog_final),
             "重心_侧面": str(res.cog_side.status),
             "重心_侧面说明": str(res.cog_side.reason),
             "重心_侧面原因类型": _cause(res.cog_side),
+            "重心_侧面缺失关键点": _missing(res.cog_side),
             "重心_正面": str(res.cog_front.status),
             "重心_正面说明": str(res.cog_front.reason),
             "重心_正面原因类型": _cause(res.cog_front),
+            "重心_正面缺失关键点": _missing(res.cog_front),
             "回收速度": str(res.retract_speed.status),
             "回收速度说明": str(res.retract_speed.reason),
             "回收速度原因类型": _cause(res.retract_speed),
+            "回收速度缺失关键点": _missing(res.retract_speed),
             "发力顺序": str(res.force_sequence.status),
             "发力顺序说明": str(res.force_sequence.reason),
             "发力顺序原因类型": _cause(res.force_sequence),
+            "发力顺序缺失关键点": _missing(res.force_sequence),
             "拳面角度": str(res.wrist_angle.status),
             "拳面角度说明": str(res.wrist_angle.reason),
             "拳面角度原因类型": _cause(res.wrist_angle),
+            "拳面角度缺失关键点": _missing(res.wrist_angle),
+            "backend": _backend(res.cog_final),
         }
         # 方案3：分段质心评估结果（CoM）
         if res.cog_com is not None:
             row["重心_CoM(方案3)"] = str(res.cog_com.status)
             row["重心_CoM说明"] = str(res.cog_com.reason)
             row["重心_CoM原因类型"] = _cause(res.cog_com)
+            row["重心_CoM缺失关键点"] = _missing(res.cog_com)
         else:
             row["重心_CoM(方案3)"] = "未评估"
             row["重心_CoM说明"] = ""
             row["重心_CoM原因类型"] = ""
+            row["重心_CoM缺失关键点"] = ""
         return row
 
     def _process_video(idx: int, v: Path) -> tuple[int, dict[str, Any], dict[str, Any] | None]:
