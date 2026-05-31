@@ -2,14 +2,14 @@
 
 来源：`docs/yolo_migration_plan_optimized.md`（三审定稿版）
 日期：2026-05-30
-用途：每个条目可直接作为一个仓库 Issue 提交。粒度=中间粒度，共 11 个实施 Issue（S0–S4）+ 2 个后置决策阶段说明（S5/S6）。
+用途：每个条目可直接作为一个仓库 Issue 提交。粒度=中间粒度，共 11 个实施 Issue（S0–S4）+ 6 个 M4 决策与扩展 Issue（#23–#28）。
 
 ## 仓库追踪索引（已落地）
 
 本清单已在仓库（`YGuo-2/vision`）建为正式 Issue 与 Milestone：
 
-- **总追踪 / 作战地图**：Issue #12 `[Tracking] YOLO 迁移总追踪`（分组清单 + 依赖图；子任务勾选默认手动维护，若后续配置自动化再随对应 Issue 关闭同步更新）。
-- **实施 Issue**：#1–#11，编号与本文「Issue #N」一一对应。
+- **总追踪 / 作战地图**：Issue #12 `[Tracking] YOLO 迁移总追踪`（已收尾，全部子任务关闭）。
+- **实施 / 决策 Issue**：#1–#11、#23–#28 均已关闭；#23–#28 为 S5/S6 追加拆票。
 - **Milestone**（进度条 + 阶段筛选）：
 
   | Milestone | 包含 Issue |
@@ -18,7 +18,7 @@
   | M1 MediaPipe 加固 | #3 #4 #5 #6 |
   | M2 YOLO 离线闭环 | #7 #8 #9 |
   | M3 标定与分级 | #10 #11 |
-  | M4 决策与扩展 | （空，S5/S6 待 S3 结论后开票） |
+  | M4 决策与扩展 | #23 #24 #25 #26 #27 #28 |
 
 ## 约定
 
@@ -399,15 +399,20 @@ S1 后续会改 `_extract_pose_features()`、`mirror_pose_features()`、`_select
 
 ---
 
-## 后置阶段（暂不拆细 Issue）
+## M4 决策与扩展（已拆票并收尾）
 
 ### S5 — 扩展入口与可选 Hybrid
-依赖 #10 的“可用结论”。在离线闭环、标定、分级评估稳定后，才按序扩 batch → CLI `--backend/--feature-layout` → UI 后端选择 → （可选）离线 Hybrid。**Hybrid 是否实现取决于 S0 初判**：若已判定“补脚=重跑 MediaPipe full、收益被抵消”，本步直接删除不实现。
-> 暂不拆细原因：入口数量与是否做 Hybrid 取决于 S3 数字结论，过早写验收标准会失效。
+已拆为 #23–#27 并全部关闭：
+
+- #23 GPU 复测决策门：no-go，当前环境不启动实时 / UI 默认扩展。
+- #24 batch backend/layout 参数：保留离线调试 / 标定入口，`score_authorized=False`。
+- #25 CLI 实时预览：按 #23 no-go 关闭 / 不实现。
+- #26 UI 后端选择：按 #23 / #25 no-go 关闭 / 不实现。
+- #27 Hybrid：默认不实现 `yolo_body_mp_pose_supplement`。
 
 ### S6 — 默认切换决策
-纯决策阶段，无独立实现。决定是否/在哪默认用 YOLO（实时预览 / 模板匹配 / 评估各自独立决策）。
-> 暂不拆细原因：默认切换的 go/no-go 完全依赖 S3 标定数字与 S5 回归结果，须等前序数据齐备后再开 Issue。
+已拆为 #28 并关闭。当前 S6 决策见 `docs/yolo_default_switch_decision.md`：
+**全部不切默认，仅保留离线 / 实验入口**。
 
 ---
 
@@ -417,4 +422,4 @@ S1 后续会改 `_extract_pose_features()`、`mirror_pose_features()`、`_select
 - **M1 MediaPipe 加固**：#3 #4 #5 #6（旧路径不变 + valid_mask 迁移完成）
 - **M2 YOLO 离线闭环**：#7 #8 #9
 - **M3 标定与分级**：#10 #11
-- **M4 决策/扩展**：S5 / S6（按需开 Issue）
+- **M4 决策/扩展**：#23 #24 #25 #26 #27 #28（已完成）

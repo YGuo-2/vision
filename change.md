@@ -1,3 +1,32 @@
+## 2026-05-31: YOLO 迁移总追踪收尾（Issue #12）
+
+### 问题描述
+
+Issue #12 是 YOLO 迁移总追踪 / 作战地图。当前 #1–#11、#23–#28 已全部完成并关闭，但
+`docs/yolo_migration_issues.md` 仍停留在 M4 “S5/S6 待 S3 结论后开票 / 暂不拆细 Issue”的旧状态，
+与仓库真实 issue 状态不一致。
+
+### 修改内容
+
+- `docs/yolo_migration_issues.md`：将仓库追踪索引更新为 #1–#11、#23–#28 均已关闭，M4
+  包含 #23 #24 #25 #26 #27 #28，并写明 S5 / S6 各决策结果。
+- 新增 `tests/test_tracking_issue_sync.py`：锁住总追踪文档必须列出 M4 最终 issue 与决策，
+  并禁止旧的“待开票 / 暂不拆细 / 按需开 Issue”表述回流。
+- PR #35 审查补强：同步 GitHub Issue #12 正文，将旧 M4 待拆票清单改为最终关闭清单，
+  并写明 S5 / S6 最终结论与关闭依据。
+
+### 验证方法
+
+```powershell
+E:\CodeProject\vision\.venv\Scripts\python.exe -m pytest tests\test_tracking_issue_sync.py tests\test_s6_default_switch_decision.py -q
+E:\CodeProject\vision\.venv\Scripts\python.exe -m pytest tests -q
+E:\CodeProject\vision\.venv\Scripts\python.exe -m py_compile tests\test_tracking_issue_sync.py
+gh issue view 12 --repo YGuo-2/vision --json state,body
+git diff --check
+```
+
+---
+
 ## 2026-05-31: YOLO 迁移 S6 — 默认切换决策（Issue #28）
 
 ### 问题描述
