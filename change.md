@@ -1,4 +1,26 @@
-## 2026-06-01: YOLO 迁移 S2 — YOLO adapter + COCO17→Pose33-like 映射（Issue #7）
+## 2026-05-31: PR #18 审查修复 - YOLO adapter 任务记录日期校正
+
+### 问题描述
+
+审查 PR #18（Issue #7）时发现本次 YOLO adapter 任务记录误写为未来日期 `2026-06-01`，
+与当前任务完成日期不一致，后续追踪 issue、PR 与归档记录时容易造成时间线混乱。
+
+### 修改内容
+
+- 将本条 YOLO 迁移 S2 记录日期从 `2026-06-01` 校正为 `2026-05-31`。
+- 保持原有 YOLO adapter 功能记录、验证命令与范围说明不变。
+
+### 验证方法
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests\test_yolo_landmark_mapping.py tests\test_yolo_backend_contract.py -q
+.\.venv\Scripts\python.exe -m pytest tests\test_pose33_v3_golden.py -q
+.\.venv\Scripts\python.exe -m py_compile core\yolo_adapter.py apps\main.py apps\app_ui.py core\vision_pipeline.py
+```
+
+---
+
+## 2026-05-31: YOLO 迁移 S2 — YOLO adapter + COCO17→Pose33-like 映射（Issue #7）
 
 ### 问题描述
 
