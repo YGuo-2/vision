@@ -38,7 +38,16 @@ tracker 段边界语义
 ------------------
 单视频 / 单 segment 内 tracker 状态不跨任务复用。``extract_yolo_landmark_series``
 在每段开始处调用 ``adapter.reset_tracker()``，因此 **track_id 在段边界必然重置**。
-完整多人鲁棒策略（中心最近、tie-break、跨段 track 延续）是 Issue #9，不在本期。
+完整跨段 track 延续 / 中心最近 / tie-break 等多人鲁棒策略本期不做。
+
+多人场景闸门（Issue #9 / S2）
+----------------------------
+``extract_yolo_landmark_series`` 暴露每帧检出人数并据此判定多人闸门：
+检出 ``num_persons>1`` 时 meta 标 ``multi_person_detected=True`` /
+``review_required=True`` / ``gate_status="multi_person_review_required"``。
+判定逻辑集中在纯函数 ``evaluate_multi_person_gate``。**闸门本身只判定 + 写 meta，
+拒绝/降级出分由下游评分入口执行**（``body_core_compare`` 闭环遇 ``review_required``
+直接拒绝出分）。单人（``max_persons<=1``）才走「最大框/最高分取单人」。
 """
 
 from __future__ import annotations
@@ -69,7 +78,30 @@ DEFAULT_YOLO_MODEL_NAME: str = "yolo11n-pose.pt"
 TRACK_RESET_NOTE: str = (
     "tracker state is NOT reused across videos/segments; track_id resets at each "
     "segment boundary (extract_yolo_landmark_series calls reset_tracker() per call). "
-    "Full multi-person gating / cross-segment track continuation is Issue #9."
+    "Cross-segment track continuation (center-nearest / tie-break) is deferred."
+)
+
+# --------------------------------------------------------------------------- #
+# 多人场景闸门（YOLO 迁移 Issue #9 / S2）
+# --------------------------------------------------------------------------- #
+# 背景：batch_tech_eval / batch_dual_compare 跑的是学员视频，教练、镜面反射、路人入镜
+# 常见（S0 spike 已实证：学员样本最多检出 8 人、单视频 274 帧多人）。YOLO「最大框/最高
+# 分取单人」可能稳定选错实例——这是**正确性风险**，不是鲁棒性优化。MVP 必须能识别并
+# 拒绝/降级，**不允许静默选最大框**。
+#
+# 本期策略（MVP）：
+#   - 单人（max_persons<=1）：才走 select_main_person 的「最大框/最高分取单人」。
+#   - 多人（max_persons>1）：meta 标 multi_person_detected=True，闸门判 review_required，
+#     下游（body_core 闭环 / batch）必须拒绝出分或降级「需人工复核」，不混入正常评分。
+#   - 完整多人鲁棒策略（中心最近、tie-break、track 延续）本期不做。
+GATE_STATUS_OK: str = "ok"
+GATE_STATUS_MULTI_PERSON: str = "multi_person_review_required"
+MULTI_PERSON_GATE_NOTE: str = (
+    "multi-person frames detected (num_persons>1); 'largest box' single-person "
+    "selection may stably pick the wrong instance. This is a CORRECTNESS risk: the "
+    "video is flagged review_required and MUST NOT enter outward-facing scoring. "
+    "Full multi-person robustness (center-nearest / tie-break / track continuation) "
+    "is out of scope this round (Issue #9 MVP)."
 )
 # 标定状态说明（写入 meta）。
 CALIBRATION_NOTE: str = (
@@ -313,6 +345,47 @@ def empty_sequence_row() -> tuple[np.ndarray, np.ndarray]:
 
 
 # --------------------------------------------------------------------------- #
+# 多人场景闸门判定（纯函数，便于下游与测试直接调用）
+# --------------------------------------------------------------------------- #
+def evaluate_multi_person_gate(
+    num_persons_per_frame: "list[int] | tuple[int, ...] | np.ndarray",
+) -> dict:
+    """根据每帧检出人数判定多人闸门状态。
+
+    参数
+    ----
+    num_persons_per_frame:
+        每帧检出人数序列（``extract_yolo_landmark_series`` 的 ``num_persons_per_frame``）。
+
+    返回
+    ----
+    dict，含：
+      - ``multi_person_detected`` (bool)：是否存在 ``num_persons>1`` 的帧。
+      - ``max_persons`` (int)：整段最大检出人数。
+      - ``multi_person_frames`` (int)：``num_persons>1`` 的帧数。
+      - ``gate_status`` (str)：``GATE_STATUS_OK`` 或 ``GATE_STATUS_MULTI_PERSON``。
+      - ``review_required`` (bool)：是否必须降级人工复核 / 拒绝出分。
+      - ``gate_note`` (str)：多人时附说明，单人时为空串。
+
+    语义铁律：``review_required=True`` 的视频**不得进入对外评分**，下游必须拒绝出分
+    或降级「需人工复核」，**不允许静默选最大框当唯一目标**。
+    """
+    counts = [int(n) for n in num_persons_per_frame] if num_persons_per_frame is not None else []
+    max_persons = int(max(counts)) if counts else 0
+    multi_person_frames = int(sum(1 for n in counts if n > 1))
+    multi_person_detected = max_persons > 1
+    gate_status = GATE_STATUS_MULTI_PERSON if multi_person_detected else GATE_STATUS_OK
+    return {
+        "multi_person_detected": multi_person_detected,
+        "max_persons": max_persons,
+        "multi_person_frames": multi_person_frames,
+        "gate_status": gate_status,
+        "review_required": bool(multi_person_detected),
+        "gate_note": MULTI_PERSON_GATE_NOTE if multi_person_detected else "",
+    }
+
+
+# --------------------------------------------------------------------------- #
 # YOLO 结果对象解析（容忍 torch tensor 或 numpy；便于测试注入 fake result）
 # --------------------------------------------------------------------------- #
 def _to_numpy(x: Any) -> np.ndarray | None:
@@ -373,7 +446,9 @@ def extract_persons(res: Any) -> list[dict[str, Any]]:
 def select_main_person(persons: list[dict[str, Any]]) -> int:
     """单人 MVP：取面积最大的框（无框时取置信度最高）。
 
-    完整多人闸门（中心最近 / tie-break / 拒绝出分）是 Issue #9，本期只做这一简化选择。
+    **仅在单人场景（``num_persons<=1``）才应被信任**——多人时由多人闸门
+    （``evaluate_multi_person_gate``）拒绝/降级出分，不允许静默用本函数选最大框当
+    唯一目标。完整多人鲁棒选择（中心最近 / tie-break / track 延续）本期不做。
     """
     if not persons:
         raise ValueError("persons 为空，无法选择主目标")
@@ -484,7 +559,7 @@ class YoloPoseAdapter:
     单人选择
     --------
     本期 = 最大框 / 最高分取单人（``select_main_person``）。``num_persons`` 暴露给
-    每帧结果，供 Issue #9 构建多人闸门，但闸门本身不在此实现。
+    每帧结果，多人闸门由序列层 ``evaluate_multi_person_gate`` 判定并要求下游拒绝/降级。
     """
 
     def __init__(
@@ -662,6 +737,10 @@ def extract_yolo_landmark_series(
     multi_person_frames = int(sum(1 for n in num_persons_per_frame if n > 1))
     max_persons = int(max(num_persons_per_frame)) if num_persons_per_frame else 0
 
+    # 多人闸门判定：max_persons>1 → multi_person_detected + review_required。
+    # 本期只判定并写 meta；拒绝/降级出分由下游评分入口（body_core 闭环 / batch）执行。
+    gate = evaluate_multi_person_gate(num_persons_per_frame)
+
     meta = {
         "video": str(video_path),
         "backend": "yolo",
@@ -680,10 +759,14 @@ def extract_yolo_landmark_series(
         "start_frame": int(start_i),
         "end_frame": int(start_i + len(rows) - 1) if rows else int(start_i),
         "layout": "pose33_normalized_xyzw(yolo_conf)",
-        # 多人信息只做暴露（供 Issue #9 闸门构建），本期不实现拒绝/降级闸门。
+        # 多人闸门：检出 num_persons>1 即标记并要求下游拒绝/降级，不静默选最大框。
         "num_persons_per_frame": num_persons_per_frame,
         "max_persons": max_persons,
         "multi_person_frames": multi_person_frames,
+        "multi_person_detected": gate["multi_person_detected"],
+        "gate_status": gate["gate_status"],
+        "review_required": gate["review_required"],
+        "gate_note": gate["gate_note"],
         "track_ids": track_ids,
         "track_policy": "single_target_largest_box; per-segment reset",
         "track_reset_note": TRACK_RESET_NOTE,

@@ -1,3 +1,66 @@
+## 2026-05-31: YOLO 迁移 S2 — 多人场景闸门（Issue #9）
+
+### 问题描述
+
+`batch_tech_eval` / `batch_dual_compare` 跑的是学员视频，教练、镜面反射、路人入镜常见
+（S0 spike 已实证：学员样本最多检出 8 人、单视频 274 帧多人）。YOLO「最大框/最高分取单人」
+可能**稳定选错实例**——这是正确性风险，不是鲁棒性优化。MVP 必须能识别并拒绝/降级，
+**不允许静默选最大框**。本期依赖 #7（YOLO adapter，已合并 main），在序列层判定多人并写
+meta，在 YOLO 评分入口（#8 的 `body_core_compare` 闭环）强制拒绝/降级出分。硬约束：
+单人样本不受影响；MediaPipe 默认路径与 `pose33_v3` golden 不漂移；完整多人鲁棒策略
+（中心最近、tie-break、跨段 track 延续）本期不做。
+
+### 修改内容
+
+- **`core/yolo_adapter.py` 新增多人闸门判定**：
+  - 新增纯函数 `evaluate_multi_person_gate(num_persons_per_frame)`，返回
+    `multi_person_detected` / `max_persons` / `multi_person_frames` / `gate_status` /
+    `review_required` / `gate_note`。语义铁律：`review_required=True` 的视频不得进入对外评分。
+  - 新增常量 `GATE_STATUS_OK="ok"`、`GATE_STATUS_MULTI_PERSON="multi_person_review_required"`、
+    `MULTI_PERSON_GATE_NOTE`（说明多人 = 正确性风险、必须人工复核）。
+  - `extract_yolo_landmark_series` 的 meta 在原有 `num_persons_per_frame`/`max_persons`/
+    `multi_person_frames` 基础上新增 `multi_person_detected`/`gate_status`/`review_required`/
+    `gate_note`（检出 `num_persons>1` 即标 `review_required=True`）。
+  - 更新模块/函数 docstring：闸门已落地（不再是「留给 #9」），`select_main_person` 注明仅单人
+    场景可信、多人由闸门拒绝/降级。
+- **`core/body_core_compare.py` 在 YOLO 评分入口强制拒绝/降级**：
+  - 新增异常 `MultiPersonReviewRequiredError`（携带 `max_persons`/`multi_person_frames`）。
+  - `BodyCoreMatchResult` 新增 `review_required`/`multi_person_detected`/`max_persons`/
+    `multi_person_frames` 字段；`score` 类型放宽为 `float | None`（降级模式不产出分数）。
+  - `match_body_core_template` 新增 `reject_multi_person: bool = True` 参数：
+    默认多人抛 `MultiPersonReviewRequiredError`（不混入正常评分）；
+    `reject_multi_person=False` 时降级——返回 `score=None` + `review_required=True`。
+    单人 / MediaPipe 路径不受影响。
+  - `_extract_body_core_yolo` 随 `backend_meta` 透传闸门字段；`create_body_core_template`
+    把多人闸门字段（`multi_person_detected`/`review_required`/`gate_status` 等）一并写入模板 meta。
+- **`apps/match_template.py` CLI 接线**：新增 `--allow-multi-person`（降级而非拒绝）；
+  body_core 匹配捕获 `MultiPersonReviewRequiredError` 打印「需人工复核、拒绝出分」，
+  降级时 `score=N/A` 且打印多人复核提示，避免格式化 `None` 崩溃。
+- **测试**：
+  - `tests/test_yolo_backend_contract.py` 增补：`evaluate_multi_person_gate` 单人/多人/空序列
+    判定；序列层多人帧触发 `multi_person_detected`/`review_required`/`gate_status`，单人样本不触发。
+  - `tests/test_body_core_layout.py` 增补：默认多人视频抛 `MultiPersonReviewRequiredError`、
+    `--allow-multi-person` 降级返回 `score=None`+`review_required=True`、单人不受影响、
+    多人来源模板 meta 透传 `review_required`。全程用 fake adapter + `patch_cv2_capture`，
+    无网络、不下载模型、不读真实视频。
+
+### 验证方法
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests\test_yolo_backend_contract.py tests\test_body_core_layout.py -q   # 38 passed（含本期多人闸门用例）
+.\.venv\Scripts\python.exe -m pytest tests\test_pose33_v3_golden.py -q                                        # 16 passed（MediaPipe 默认不漂移）
+.\.venv\Scripts\python.exe -m pytest tests -q                                                                 # 113 passed（此前 104 + 本期 9 新增）
+.\.venv\Scripts\python.exe -m py_compile core\yolo_adapter.py core\body_core_compare.py apps\match_template.py apps\make_template.py apps\app_ui.py apps\main.py   # exit 0
+```
+
+- `tests/test_pose33_v3_golden.py` 全绿 → MediaPipe 旧 `pose33_v3` 路径行为不漂移（行为不变硬门槛）。
+- 多人帧触发 `multi_person_detected`/`review_required` 并被拒绝/降级，不静默选最大框（验收①）。
+- 多人视频明确标「需人工复核/拒绝」，不混入正常评分结果（验收②）。
+- 单人样本照常出分、不受闸门影响（验收③）。
+- 全量 113 passed（此前 104 + 本期 9 新增）→ 无回归。
+
+---
+
 ## 2026-05-31: YOLO 迁移 S2 — body_core_v1 布局引入 + 离线模板闭环（Issue #8）
 
 ### 问题描述

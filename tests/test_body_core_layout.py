@@ -37,6 +37,7 @@ from core.action_compare import _assert_feature_layout_match  # noqa: E402
 from core.body_core_compare import (  # noqa: E402
     BODY_CORE_V1_PLACEHOLDER_BASELINE,
     CALIBRATION_STATUS_UNVALIDATED,
+    MultiPersonReviewRequiredError,
     create_body_core_template,
     extract_body_core_features,
     match_body_core_template,
@@ -377,3 +378,108 @@ def test_mediapipe_can_generate_body_core_v1_template(tmp_path):
     assert meta["feature_layout"] == "body_core_v1"
     assert meta["backend"] == "mediapipe"
     assert meta["calibration_status"] == CALIBRATION_STATUS_UNVALIDATED
+
+
+# --------------------------------------------------------------------------- #
+# 7) 多人场景闸门（Issue #9 / S2）：拒绝 / 降级出分，不静默选最大框
+# --------------------------------------------------------------------------- #
+def _multi_person_body_core_frame(seed: int = 0):
+    """构造一帧两人（两个不同大小框）的 body_core YOLO 结果。"""
+    xy, conf = _make_body_core_coco17(seed=seed)
+    return FakeYoloResult.multi(
+        [
+            (xy, conf, (0.3, 0.5, 0.2, 0.4)),   # 较小框
+            (xy, conf, (0.65, 0.5, 0.5, 0.9)),  # 较大框 → 会被最大框选中
+        ]
+    )
+
+
+def _yolo_body_core_template(tmp_path, n=60):
+    out_tpl = tmp_path / "yolo_body_core_v1.npz"
+    adapter_make = FakeYoloAdapter(frames=_periodic_yolo_frames(n), valid_conf_thr=0.5)
+    with patch_cv2_capture(n_frames=n, fps=30.0):
+        return create_body_core_template(
+            "fake://std.mp4", backend="yolo", out_path=out_tpl, yolo_model=adapter_make
+        )
+
+
+def test_match_rejects_multi_person_video_by_default(tmp_path):
+    # 默认 reject_multi_person=True：多人视频抛 MultiPersonReviewRequiredError，
+    # 不混入正常评分结果。
+    tpl_path = _yolo_body_core_template(tmp_path)
+
+    n = 30
+    frames = [_periodic_yolo_frames(1)[0] for _ in range(n)]
+    frames[10] = _multi_person_body_core_frame()   # 插入一帧多人
+    frames[20] = _multi_person_body_core_frame()
+    adapter = FakeYoloAdapter(frames=frames, valid_conf_thr=0.5)
+
+    with patch_cv2_capture(n_frames=n, fps=30.0):
+        with pytest.raises(MultiPersonReviewRequiredError) as ei:
+            match_body_core_template(tpl_path, "fake://multi.mp4", backend="yolo", yolo_model=adapter)
+    assert ei.value.max_persons == 2
+    assert ei.value.multi_person_frames == 2
+
+
+def test_match_degrades_multi_person_video_when_not_rejecting(tmp_path):
+    # reject_multi_person=False：降级——返回 score=None + review_required=True，
+    # 仍不产出对外分数。
+    tpl_path = _yolo_body_core_template(tmp_path)
+
+    n = 30
+    frames = [_periodic_yolo_frames(1)[0] for _ in range(n)]
+    frames[5] = _multi_person_body_core_frame()
+    adapter = FakeYoloAdapter(frames=frames, valid_conf_thr=0.5)
+
+    with patch_cv2_capture(n_frames=n, fps=30.0):
+        res = match_body_core_template(
+            tpl_path,
+            "fake://multi.mp4",
+            backend="yolo",
+            yolo_model=adapter,
+            reject_multi_person=False,
+        )
+
+    assert res.review_required is True
+    assert res.multi_person_detected is True
+    assert res.max_persons == 2
+    assert res.multi_person_frames == 1
+    # 降级模式不产出分数，避免多人视频混入正常评分。
+    assert res.score is None
+    assert res.calibration_status == CALIBRATION_STATUS_UNVALIDATED
+
+
+def test_match_single_person_video_unaffected_by_gate(tmp_path):
+    # 单人样本不受影响：照常出分，review_required=False。
+    tpl_path = _yolo_body_core_template(tmp_path)
+
+    n = 60
+    adapter = FakeYoloAdapter(frames=_periodic_yolo_frames(n), valid_conf_thr=0.5)
+    with patch_cv2_capture(n_frames=n, fps=30.0):
+        res = match_body_core_template(
+            tpl_path, "fake://single.mp4", backend="yolo", yolo_model=adapter
+        )
+
+    assert res.review_required is False
+    assert res.multi_person_detected is False
+    assert res.score is not None
+    assert 0.0 <= res.score <= 1.0
+
+
+def test_multi_person_template_meta_flags_review_required(tmp_path):
+    # 生成模板的视频若多人，模板 meta 也应透传 multi_person_detected / review_required，
+    # 便于下游识别该模板来源不可信。
+    out_tpl = tmp_path / "multi_tpl.npz"
+    n = 30
+    frames = _periodic_yolo_frames(n)
+    frames[12] = _multi_person_body_core_frame()
+    adapter = FakeYoloAdapter(frames=frames, valid_conf_thr=0.5)
+    with patch_cv2_capture(n_frames=n, fps=30.0):
+        tpl_path = create_body_core_template(
+            "fake://multi_std.mp4", backend="yolo", out_path=out_tpl, yolo_model=adapter
+        )
+
+    meta = dict(np.load(tpl_path, allow_pickle=True)["meta"].item())
+    assert meta["multi_person_detected"] is True
+    assert meta["review_required"] is True
+    assert meta["max_persons"] == 2
