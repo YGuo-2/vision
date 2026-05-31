@@ -12,6 +12,7 @@ import numpy as np
 
 from core import action_compare as ac
 from core.rule_scoring import extract_pose_raw
+from core.paths import outputs_dir
 
 
 def _find_standard_video(std_dir: Path, *, kind: str) -> Path:
@@ -91,7 +92,7 @@ def main() -> None:
         side_video = _find_standard_video(std_dir, kind="side")
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_dir = Path(args.out_dir) if args.out_dir else (Path(__file__).resolve().parent / "outputs" / f"dual_compare_{ts}")
+    out_dir = Path(args.out_dir) if args.out_dir else (outputs_dir() / f"dual_compare_{ts}")
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "templates").mkdir(parents=True, exist_ok=True)
     (out_dir / "skeleton").mkdir(parents=True, exist_ok=True)

@@ -12,6 +12,7 @@ from .pose_features import (
     MEDIAPIPE_VALIDITY_POLICY,
     derive_valid_mask,
 )
+from .paths import models_dir
 from .vision_pipeline import MediaPipePipeline, PipelineConfig
 
 
@@ -125,9 +126,9 @@ def extract_pose_raw(
     start_i = max(0, start_i)
     end_i = max(start_i, end_i)
 
-    models_dir = Path(__file__).resolve().parent / "models"
+    models_dir_path = models_dir()
     pipe = MediaPipePipeline(
-        models_dir=models_dir,
+        models_dir=models_dir_path,
         cfg=PipelineConfig(pose_variant=pose_variant, running_mode="video", enable_hands=False),
     )
 

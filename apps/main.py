@@ -24,6 +24,7 @@ from queue import Queue
 import cv2
 
 from core.vision_pipeline import MediaPipePipeline, PipelineConfig
+from core.paths import models_dir
 
 
 def _open_capture(source: str) -> cv2.VideoCapture:
@@ -91,7 +92,7 @@ def _process_video_multithread(
     frame_q: "Queue[tuple[int, object] | None]" = Queue(maxsize=workers * 2)
     result_q: "Queue[tuple[int, object, list[str]]]" = Queue(maxsize=workers * 2)
 
-    models_dir = Path(__file__).resolve().parent / "models"
+    models_dir_path = models_dir()
 
     def reader() -> None:
         idx = 0
@@ -106,7 +107,7 @@ def _process_video_multithread(
 
     def worker(worker_id: int) -> None:
         pipe = MediaPipePipeline(
-            models_dir=models_dir,
+            models_dir=models_dir_path,
             cfg=PipelineConfig(pose_variant=pose_variant, running_mode="image"),
         )
         while True:
@@ -209,8 +210,8 @@ def run(source: str, *, show: bool = True, out_path: str | None = None, pose_var
     fps_for_ts = src_fps if (is_file and src_fps > 1e-3) else 30.0
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0) if is_file else 0
 
-    models_dir = Path(__file__).resolve().parent / "models"
-    pipe = MediaPipePipeline(models_dir=models_dir, cfg=PipelineConfig(pose_variant=pose_variant, running_mode="video"))
+    models_dir_path = models_dir()
+    pipe = MediaPipePipeline(models_dir=models_dir_path, cfg=PipelineConfig(pose_variant=pose_variant, running_mode="video"))
 
     writer: cv2.VideoWriter | None = None
     if out_path:

@@ -14,6 +14,7 @@ from core.pose_features import (
     derive_valid_mask,
     pose_view_score,
 )
+from core.paths import models_dir
 from core.vision_pipeline import MediaPipePipeline, PipelineConfig
 
 Status = Literal["合格", "不合格", "无法判定"]
@@ -143,9 +144,9 @@ def extract_pose_and_view_scores(
     start_i = max(0, start_i)
     end_i = max(start_i, end_i)
 
-    models_dir = Path(__file__).resolve().parent / "models"
+    models_dir_path = models_dir()
     pipe = MediaPipePipeline(
-        models_dir=models_dir,
+        models_dir=models_dir_path,
         cfg=PipelineConfig(pose_variant=pose_variant, running_mode="video", enable_hands=False),
     )
 

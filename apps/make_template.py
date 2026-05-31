@@ -8,7 +8,14 @@ import cv2
 import numpy as np
 
 from core.vision_pipeline import MediaPipePipeline, PipelineConfig
-from core.pose_features import find_active_range, motion_energy, normalize_pose_xy_v3
+from core.pose_features import (
+    DEFAULT_VALID_CONF_THR,
+    MEDIAPIPE_VALIDITY_POLICY,
+    find_active_range,
+    motion_energy,
+    normalize_pose_xy_v3,
+)
+from core.paths import models_dir, templates_dir
 from core.video_writer import open_video_writer
 
 
@@ -36,9 +43,9 @@ def main() -> None:
     fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0) or 30.0
     n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
 
-    models_dir = Path(__file__).resolve().parent / "models"
+    models_dir_path = models_dir()
     pipe = MediaPipePipeline(
-        models_dir=models_dir,
+        models_dir=models_dir_path,
         cfg=PipelineConfig(pose_variant=args.pose, running_mode="video", enable_hands=False),
     )
 
@@ -74,8 +81,7 @@ def main() -> None:
     start = max(0, min(start, feat_arr.shape[0] - 1))
     end = max(start, min(end, feat_arr.shape[0] - 1))
 
-    out_dir = Path(__file__).resolve().parent / "templates"
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = templates_dir()
     out_path = Path(args.out) if args.out else (out_dir / f"{video_path.stem}_{args.pose}.npz")
 
     meta = {
@@ -88,6 +94,14 @@ def main() -> None:
         "feature_layout": "pose_indices_11_32_xy_rot_scale_norm_v3",
         "running_mode": "video",
         "cfg": asdict(PipelineConfig(pose_variant=args.pose, running_mode="video", enable_hands=False)),
+        # 模板 metadata 扩展（YOLO 迁移 S1 / Issue #6）：增量字段，向后兼容。
+        "backend": "mediapipe",
+        "model_name": f"pose_landmarker_{args.pose}",
+        "feature_layout_name": "pose33_v3",
+        "normalizer_version": "v3",
+        "confidence_kind": "visibility",
+        "validity_policy": MEDIAPIPE_VALIDITY_POLICY,
+        "valid_conf_thr": float(DEFAULT_VALID_CONF_THR),
     }
 
     np.savez_compressed(
@@ -109,7 +123,7 @@ def main() -> None:
         vw, actual_path, codec = open_video_writer(preview_path, fps=fps, size=(w, h))
 
         pipe2 = MediaPipePipeline(
-            models_dir=models_dir,
+            models_dir=models_dir_path,
             cfg=PipelineConfig(pose_variant=args.pose, running_mode="video", enable_hands=False),
         )
         i = 0

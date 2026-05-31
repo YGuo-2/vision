@@ -12,6 +12,7 @@ import numpy as np
 
 from .pose_features import (
     DEFAULT_VALID_CONF_THR,
+    MEDIAPIPE_VALIDITY_POLICY,
     derive_valid_mask,
     find_active_range,
     mirror_pose_features,
@@ -24,12 +25,47 @@ from .pose_features import (
     subsequence_dtw_with_path,
 )
 from .feature_layout import POSE33_V3, FeatureLayoutSpec, is_valid_feature_shape
+from .paths import models_dir, templates_dir
 from .rule_scoring import RuleViolation, extract_pose_raw, score_rules
 from .vision_pipeline import MediaPipePipeline, PipelineConfig
 from .video_writer import open_video_writer
 
 
 ProgressCb = Callable[[str, int, int], None]  # (stage, done, total)
+
+
+# 模板 metadata 扩展（YOLO 迁移 S1 / Issue #6）：
+# 新增字段全部为“增量、向后兼容”——旧模板缺这些键时由 normalize_template_meta 补默认值，
+# 既不改动既有 `feature_layout` 字符串（loader 仍按其 `_v3` 后缀分支），也不影响任何评分逻辑。
+def template_meta_defaults() -> dict:
+    """返回 Issue #6 新增的 7 个模板 metadata 字段及其默认值。
+
+    用于：1) 写模板时补齐新字段；2) 加载旧模板（缺字段）时填默认值。
+    ``validity_policy`` / ``valid_conf_thr`` 复用 ``core.pose_features`` 的集中式常量，
+    与 raw 提取链路（``extract_pose_raw``）保持同一来源，避免字面量散落。
+    """
+    return {
+        "backend": "mediapipe",
+        "model_name": "pose_landmarker_full",
+        "feature_layout_name": "pose33_v3",
+        "normalizer_version": "v3",
+        "confidence_kind": "visibility",
+        "validity_policy": MEDIAPIPE_VALIDITY_POLICY,
+        "valid_conf_thr": float(DEFAULT_VALID_CONF_THR),
+    }
+
+
+def normalize_template_meta(meta: dict) -> dict:
+    """用默认值补齐缺失的新字段（不覆盖已存在的键），保证下游看到完整字段集。
+
+    向后兼容关键点：旧模板没有这些键，``setdefault`` 只填空缺，既不动
+    既有 ``feature_layout``，也不动任何已有值。返回同一个 dict（原地补齐）。
+    """
+    if meta is None:
+        meta = {}
+    for key, value in template_meta_defaults().items():
+        meta.setdefault(key, value)
+    return meta
 
 
 def _valid_mask_from_raw(landmarks: np.ndarray, meta: dict) -> np.ndarray:
@@ -132,9 +168,9 @@ def _extract_pose_features(
 
     # Single-thread path: VIDEO mode (more stable landmarks).
     if workers == 1:
-        models_dir = Path(__file__).resolve().parent / "models"
+        models_dir_path = models_dir()
         pipe = MediaPipePipeline(
-            models_dir=models_dir,
+            models_dir=models_dir_path,
             cfg=PipelineConfig(pose_variant=pose_variant, running_mode="video", enable_hands=False),
         )
         feats: list[np.ndarray] = []
@@ -189,7 +225,7 @@ def _extract_pose_features(
 
     cap.release()
 
-    models_dir = Path(__file__).resolve().parent / "models"
+    models_dir_path = models_dir()
     feat_arr = np.zeros((total, *zero_frame_shape), dtype=np.float32)
     view_arr = np.zeros((total,), dtype=np.float32) if compute_view else None
 
@@ -216,7 +252,7 @@ def _extract_pose_features(
         cap2.set(cv2.CAP_PROP_POS_FRAMES, float(warm_start))
 
         pipe = MediaPipePipeline(
-            models_dir=models_dir,
+            models_dir=models_dir_path,
             cfg=PipelineConfig(pose_variant=pose_variant, running_mode="video", enable_hands=False),
         )
 
@@ -569,8 +605,7 @@ def create_template_from_video(
     start_i = max(0, min(start_i, features.shape[0] - 1))
     end_i = max(start_i, min(end_i, features.shape[0] - 1))
 
-    out_dir = Path(__file__).resolve().parent / "templates"
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = templates_dir()
     out_path = Path(out_path) if out_path else (out_dir / f"{video_path.stem}_{pose_variant}.npz")
 
     meta = {
@@ -585,6 +620,14 @@ def create_template_from_video(
         "feature_layout": "pose_indices_11_32_xy_rot_scale_norm_v3",
         "running_mode": "video",
         "cfg": asdict(PipelineConfig(pose_variant=pose_variant, running_mode="video", enable_hands=False)),
+        # 模板 metadata 扩展（YOLO 迁移 S1 / Issue #6）：增量字段，向后兼容。
+        "backend": "mediapipe",
+        "model_name": f"pose_landmarker_{pose_variant}",
+        "feature_layout_name": "pose33_v3",
+        "normalizer_version": "v3",
+        "confidence_kind": "visibility",
+        "validity_policy": MEDIAPIPE_VALIDITY_POLICY,
+        "valid_conf_thr": float(DEFAULT_VALID_CONF_THR),
     }
 
     np.savez_compressed(
@@ -626,7 +669,7 @@ def compare_video_to_template(
 
     tpl = np.load(template_path, allow_pickle=True)
     query = tpl["features"]
-    meta = tpl["meta"].item()
+    meta = normalize_template_meta(tpl["meta"].item())
     pv = pose_variant or meta.get("pose_variant", "full")
     layout = str(meta.get("feature_layout", "pose_indices_11_32_xy_rot_scale_norm"))
     if layout.endswith("_v3"):
@@ -731,8 +774,8 @@ def compare_video_to_dual_templates(
 
     feat_f = tpl_f["features"]
     feat_s = tpl_s["features"]
-    meta_f = tpl_f["meta"].item()
-    meta_s = tpl_s["meta"].item()
+    meta_f = normalize_template_meta(tpl_f["meta"].item())
+    meta_s = normalize_template_meta(tpl_s["meta"].item())
 
     layout_f = str(meta_f.get("feature_layout", "pose_indices_11_32_xy_rot_scale_norm"))
     layout_s = str(meta_s.get("feature_layout", "pose_indices_11_32_xy_rot_scale_norm"))
@@ -1040,9 +1083,9 @@ def export_match_preview(
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
     vw, actual_path, codec = open_video_writer(out_path, fps=fps, size=(w, h))
 
-    models_dir = Path(__file__).resolve().parent / "models"
+    models_dir_path = models_dir()
     pipe = MediaPipePipeline(
-        models_dir=models_dir,
+        models_dir=models_dir_path,
         cfg=PipelineConfig(pose_variant=pose_variant, running_mode="video", enable_hands=False),
     )
 

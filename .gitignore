@@ -3,16 +3,26 @@ __pycache__/
 .idea/
 .trae/
 .claude/
+
+# ---------------------------------------------------------------------------
+# 统一 artifact 根目录（YOLO 迁移 S1 / Issue #6）
+# ---------------------------------------------------------------------------
+# 三个顶层产物根由 core/paths.py 统一解析（<repo_root>/models|templates|outputs）。
+# 模型权重（.task/.pt/.onnx）与 templates/outputs 产物一律不入库。
 models/*.task
 models/*.pt
 models/*.onnx
+templates/
+outputs/
+
+# 旧的分包 models 拷贝仍留在磁盘（core/models、analysis/models），统一后不再使用，
+# 但其权重文件同样不入库。
 analysis/models/*.task
 core/models/*.task
+
 *.mp4
 *.avi
 *.zip
-templates/
-outputs/
 vision_old/
 _pip_*.log
 标准样本/
