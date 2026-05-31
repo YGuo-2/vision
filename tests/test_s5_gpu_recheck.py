@@ -37,7 +37,17 @@ def test_gpu_recheck_report_has_preregistered_no_go_decision():
     assert "torch_cuda_unavailable" in text
 
 
-def test_benchmark_env_only_writes_probe_json(tmp_path):
+def test_benchmark_env_only_writes_probe_json(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        bench_annotate_fps,
+        "collect_env",
+        lambda: {
+            "python": "test",
+            "opencv": "test",
+            "torch_cuda_available": False,
+        },
+    )
+
     out_dir = tmp_path / "gpu_recheck"
     rc = bench_annotate_fps.main(["--out", str(out_dir), "--env-only"])
 
