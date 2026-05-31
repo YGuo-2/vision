@@ -13,6 +13,15 @@ import numpy as np
 from core import action_compare as ac
 from core.rule_scoring import extract_pose_raw
 from core.paths import outputs_dir
+from batch.backend_options import (
+    BACKEND_YOLO,
+    FEATURE_LAYOUT_BODY_CORE,
+    add_backend_layout_args,
+    csv_meta_fields,
+    is_default_pose33_path,
+    meta_for_backend,
+    normalize_backend_layout,
+)
 
 
 def _find_standard_video(std_dir: Path, *, kind: str) -> Path:
@@ -69,7 +78,9 @@ def main() -> None:
     ap.add_argument("--rules", action="store_true", help="Enable rule-based scoring")
     ap.add_argument("--action", default="both", choices=["stance", "punch", "both"], help="Rule action scope")
     ap.add_argument("--error-analysis", action="store_true", help="Export error analysis CSVs (rules + joints)")
+    add_backend_layout_args(ap)
     args = ap.parse_args()
+    backend, feature_layout = normalize_backend_layout(args.backend, args.feature_layout)
     enable_error_analysis = bool(getattr(args, "error_analysis", False))
 
     std_dir = Path(args.standard_dir) if args.standard_dir else None
@@ -96,6 +107,17 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "templates").mkdir(parents=True, exist_ok=True)
     (out_dir / "skeleton").mkdir(parents=True, exist_ok=True)
+
+    if not is_default_pose33_path(backend, feature_layout):
+        _run_body_core_batch(
+            args=args,
+            backend=backend,
+            front_video=front_video,
+            side_video=side_video,
+            student_dir=student_dir,
+            out_dir=out_dir,
+        )
+        return
 
     # 1) Create templates from the two standard videos.
     front_tpl = out_dir / "templates" / f"standard_front_{args.pose}.npz"
@@ -246,6 +268,133 @@ def main() -> None:
         print(f"Saved error rules: {out_dir / 'error_rules.csv'}")
     if enable_error_analysis:
         print(f"Saved error joints: {out_dir / 'error_joints.csv'}")
+
+
+def _load_npz_meta(path: Path) -> dict[str, Any]:
+    data = np.load(path, allow_pickle=True)
+    return dict(data["meta"].item() or {})
+
+
+def _body_core_result_dict(res: Any, *, meta: dict[str, Any]) -> dict[str, Any]:
+    score_authorized = bool(meta.get("score_authorized", False))
+    return {
+        "template_path": str(res.template_path),
+        "video_path": str(res.video_path),
+        "backend": str(res.backend),
+        "feature_layout": str(res.feature_layout),
+        "start_frame": int(res.start_frame),
+        "end_frame": int(res.end_frame),
+        "cost": float(res.cost),
+        "avg_cost": float(res.avg_cost),
+        "debug_score": None if res.score is None else float(res.score),
+        "calibration_status": str(res.calibration_status),
+        "score_authorized": score_authorized,
+        "valid_frame_ratio": res.valid_frame_ratio,
+        "review_required": bool(res.review_required),
+        "multi_person_detected": bool(res.multi_person_detected),
+        "max_persons": int(res.max_persons),
+        "multi_person_frames": int(res.multi_person_frames),
+        "multi_person_gate_source": str(res.multi_person_gate_source or ""),
+    }
+
+
+def _body_core_row(v: Path, front_res: Any, side_res: Any, *, meta: dict[str, Any]) -> dict[str, Any]:
+    review_required = bool(front_res.review_required or side_res.review_required or meta.get("review_required", False))
+    review_status = "需人工复核" if review_required else "调试/标定"
+    row: dict[str, Any] = {
+        "video": str(v),
+        **csv_meta_fields({**meta, "review_required": review_required}),
+        "review_status": review_status,
+        "front_debug_score": "" if front_res.score is None else float(front_res.score),
+        "side_debug_score": "" if side_res.score is None else float(side_res.score),
+        "front_avg_cost": float(front_res.avg_cost),
+        "side_avg_cost": float(side_res.avg_cost),
+        "front_valid_frame_ratio": "" if front_res.valid_frame_ratio is None else float(front_res.valid_frame_ratio),
+        "side_valid_frame_ratio": "" if side_res.valid_frame_ratio is None else float(side_res.valid_frame_ratio),
+        "front_review_required": bool(front_res.review_required),
+        "side_review_required": bool(side_res.review_required),
+        "max_persons": max(int(front_res.max_persons), int(side_res.max_persons)),
+        "multi_person_frames": int(front_res.multi_person_frames) + int(side_res.multi_person_frames),
+    }
+    return row
+
+
+def _run_body_core_batch(*, args, backend: str, front_video: Path, side_video: Path, student_dir: Path, out_dir: Path) -> None:
+    """body_core_v1 debug/calibration batch path.
+
+    Scores are written only as ``*_debug_score`` with ``score_authorized=False``.
+    They never populate the pose33 outward-facing score columns.
+    """
+    from core.body_core_compare import create_body_core_template, match_body_core_template
+
+    if backend == BACKEND_YOLO and args.rules:
+        print("YOLO body_core_v1 不支持规则评分；本批次仅输出调试/标定分数。")
+
+    front_tpl = create_body_core_template(
+        front_video,
+        backend=backend,
+        pose_variant=args.pose,
+        out_path=out_dir / "templates" / f"standard_front_{backend}_{FEATURE_LAYOUT_BODY_CORE}.npz",
+    )
+    side_tpl = create_body_core_template(
+        side_video,
+        backend=backend,
+        pose_variant=args.pose,
+        out_path=out_dir / "templates" / f"standard_side_{backend}_{FEATURE_LAYOUT_BODY_CORE}.npz",
+    )
+    template_meta = _load_npz_meta(front_tpl)
+    batch_meta = meta_for_backend(backend, template_meta, pose_variant=args.pose)
+
+    student_videos = sorted([p for p in student_dir.iterdir() if p.is_file() and p.suffix.lower() in {".mp4", ".mov", ".avi"}])
+    if not student_videos:
+        raise FileNotFoundError(f"No student videos found in: {student_dir}")
+
+    rows: list[dict[str, Any]] = []
+    jsonl_path = out_dir / "compare_results.jsonl"
+    with jsonl_path.open("w", encoding="utf-8") as jf:
+        for v in student_videos:
+            front_res = match_body_core_template(
+                front_tpl,
+                v,
+                backend=backend,
+                pose_variant=args.pose,
+                reject_multi_person=False,
+            )
+            side_res = match_body_core_template(
+                side_tpl,
+                v,
+                backend=backend,
+                pose_variant=args.pose,
+                reject_multi_person=False,
+            )
+            row = _body_core_row(v, front_res, side_res, meta=batch_meta)
+            rows.append(row)
+            jf.write(
+                json.dumps(
+                    _jsonable(
+                        {
+                            "video_path": str(v),
+                            "backend": backend,
+                            "feature_layout": FEATURE_LAYOUT_BODY_CORE,
+                            "meta": {**batch_meta, "review_required": bool(row["review_required"])},
+                            "front_debug_match": _body_core_result_dict(front_res, meta=batch_meta),
+                            "side_debug_match": _body_core_result_dict(side_res, meta=batch_meta),
+                        }
+                    ),
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+
+    csv_path = out_dir / "compare_results.csv"
+    with csv_path.open("w", encoding="utf-8-sig", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        w.writeheader()
+        w.writerows(rows)
+
+    print(f"Saved templates: {front_tpl} , {side_tpl}")
+    print(f"Saved debug/calibration results: {csv_path}")
+    print(f"Saved jsonl: {jsonl_path}")
 
 
 if __name__ == "__main__":

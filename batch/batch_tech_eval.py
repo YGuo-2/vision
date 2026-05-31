@@ -11,6 +11,14 @@ from typing import Any
 
 from analysis.tech_eval import evaluate_video_assets, evaluate_video_detail, export_debug_video, to_jsonable
 from core.paths import outputs_dir
+from batch.backend_options import (
+    FEATURE_LAYOUT_BODY_CORE,
+    add_backend_layout_args,
+    csv_meta_fields,
+    is_default_pose33_path,
+    meta_for_backend,
+    normalize_backend_layout,
+)
 
 VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv"}
 
@@ -36,7 +44,9 @@ def main() -> None:
     ap.add_argument("--full", action="store_true", help="Also export full jsonl with numeric details")
     ap.add_argument("--debug-video", action="store_true", help="Export per-video debug skeleton mp4 (overlay skeleton + statuses)")
     ap.add_argument("--workers", type=int, default=10, help="Number of worker threads (default: 10)")
+    add_backend_layout_args(ap)
     args = ap.parse_args()
+    backend, feature_layout = normalize_backend_layout(args.backend, args.feature_layout)
 
     video_dir = Path(args.video_dir)
     if not video_dir.exists():
@@ -49,6 +59,15 @@ def main() -> None:
     videos = _iter_videos(video_dir)
     if not videos:
         raise FileNotFoundError(f"No videos found in: {video_dir}")
+
+    if not is_default_pose33_path(backend, feature_layout):
+        _run_unvalidated_body_core_batch(
+            videos=videos,
+            out_dir=out_dir,
+            args=args,
+            backend=backend,
+        )
+        return
 
     rows: list[dict[str, Any]] = []
     full_jsonl = out_dir / "tech_report_full.jsonl"
@@ -192,6 +211,117 @@ def main() -> None:
         if full_f is not None:
             for d in full_lines:
                 full_f.write(json.dumps(d, ensure_ascii=False) + "\n")
+    finally:
+        if full_f is not None:
+            full_f.close()
+
+    csv_path = out_dir / "tech_report.csv"
+    with csv_path.open("w", encoding="utf-8-sig", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        w.writeheader()
+        w.writerows(rows)
+
+    print(f"Saved report: {csv_path}")
+    if args.full:
+        print(f"Saved full:   {full_jsonl}")
+
+
+def _unvalidated_reason(meta: dict[str, Any]) -> str:
+    if bool(meta.get("review_required", False)):
+        return "YOLO body_core_v1 检出多人，需人工复核，不进入对外评分"
+    return "body_core_v1 未授权 full tech_eval；仅用于离线调试/标定，不进入对外评分"
+
+
+def _body_core_unvalidated_row(v: Path, meta: dict[str, Any]) -> dict[str, Any]:
+    reason = _unvalidated_reason(meta)
+    row = {
+        "video": str(v.name),
+        "view_mode": "skipped",
+        "重心(侧面优先)": "无法判定",
+        "重心说明": reason,
+        "重心原因类型": "unvalidated_backend",
+        "重心缺失关键点": "",
+        "重心_侧面": "无法判定",
+        "重心_侧面说明": reason,
+        "重心_侧面原因类型": "unvalidated_backend",
+        "重心_侧面缺失关键点": "",
+        "重心_正面": "无法判定",
+        "重心_正面说明": reason,
+        "重心_正面原因类型": "unvalidated_backend",
+        "重心_正面缺失关键点": "",
+        "回收速度": "无法判定",
+        "回收速度说明": reason,
+        "回收速度原因类型": "unvalidated_backend",
+        "回收速度缺失关键点": "",
+        "发力顺序": "无法判定",
+        "发力顺序说明": reason,
+        "发力顺序原因类型": "unvalidated_backend",
+        "发力顺序缺失关键点": "",
+        "拳面角度": "无法判定",
+        "拳面角度说明": reason,
+        "拳面角度原因类型": "unvalidated_backend",
+        "拳面角度缺失关键点": "",
+        "backend": str(meta.get("backend", "")),
+        "重心_CoM(方案3)": "无法判定",
+        "重心_CoM说明": reason,
+        "重心_CoM原因类型": "unvalidated_backend",
+        "重心_CoM缺失关键点": "",
+        **csv_meta_fields(meta),
+    }
+    row["review_status"] = "需人工复核" if bool(meta.get("review_required", False)) else "未标定跳过"
+    return row
+
+
+def _body_core_meta_for_video(v: Path, *, backend: str, pose_variant: str) -> dict[str, Any]:
+    if backend == "yolo":
+        from core.yolo_adapter import extract_yolo_landmark_series
+
+        _landmarks, _valid_mask, source_meta = extract_yolo_landmark_series(v)
+        return meta_for_backend(backend, source_meta, pose_variant=pose_variant) | {
+            key: source_meta[key]
+            for key in ("multi_person_detected", "max_persons", "multi_person_frames", "gate_status", "gate_note")
+            if key in source_meta
+        }
+
+    from core.body_core_compare import extract_body_core_features
+
+    _features, _fps, source_meta = extract_body_core_features(
+        v,
+        backend=backend,
+        pose_variant=pose_variant,
+    )
+    return meta_for_backend(backend, source_meta, pose_variant=pose_variant)
+
+
+def _run_unvalidated_body_core_batch(*, videos: list[Path], out_dir: Path, args, backend: str) -> None:
+    rows: list[dict[str, Any]] = []
+    full_jsonl = out_dir / "tech_report_full.jsonl"
+    full_f = full_jsonl.open("w", encoding="utf-8") if args.full else None
+    try:
+        for v in videos:
+            meta = _body_core_meta_for_video(v, backend=backend, pose_variant=args.pose)
+            meta["feature_layout"] = FEATURE_LAYOUT_BODY_CORE
+            meta["score_authorized"] = False
+            row = _body_core_unvalidated_row(v, meta)
+            rows.append(row)
+            if full_f is not None:
+                full_f.write(
+                    json.dumps(
+                        to_jsonable(
+                            {
+                                "video_path": str(v),
+                                "backend": backend,
+                                "feature_layout": FEATURE_LAYOUT_BODY_CORE,
+                                "tech_eval_status": "skipped",
+                                "skip_reason": "unvalidated_body_core_v1",
+                                "score_authorized": False,
+                                "meta": meta,
+                            }
+                        ),
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
     finally:
         if full_f is not None:
             full_f.close()
