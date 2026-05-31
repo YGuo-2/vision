@@ -1,3 +1,32 @@
+## 2026-05-31: YOLO 迁移 S6 — 默认切换决策（Issue #28）
+
+### 问题描述
+
+Issue #28 是纯决策阶段，需要基于 #1 许可、#10 标定、#23 GPU 复测、#24 batch、#25 CLI、
+#26 UI、#27 Hybrid 的结果，分别决定实时预览、模板匹配、规则 / 技术评估三条链路是否默认使用
+YOLO。当前 #23/#25/#26/#27 均走 no-go / 不实现分支，#10 也仅授权预览，不能把 YOLO 切成默认。
+
+### 修改内容
+
+- 新增 `docs/yolo_default_switch_decision.md`：汇总 #1/#10/#23/#24/#25/#26/#27 输入，明确
+  S6 结论为“全部不切默认，仅保留离线 / 实验入口”。
+- `docs/yolo_migration_plan_optimized.md`：将 S6 小节从“可能结论”更新为 Issue #28 当前决策，
+  并列出未来重新评估默认切换的前置条件。
+- `docs/yolo_gpu_recheck_report.md`：同步 #28 已执行，指向 S6 决策文档。
+- 新增 `tests/test_s6_default_switch_decision.py`：锁住三条链路默认继续 MediaPipe、Hybrid 不实现、
+  离线实验入口 `score_authorized=False`、未来重开需许可 / GPU / 标定 / 回滚 / 来源可见性条件。
+
+### 验证方法
+
+```powershell
+E:\CodeProject\vision\.venv\Scripts\python.exe -m pytest tests\test_s6_default_switch_decision.py tests\test_s5_gpu_recheck.py -q
+E:\CodeProject\vision\.venv\Scripts\python.exe -m pytest tests -q
+E:\CodeProject\vision\.venv\Scripts\python.exe -m py_compile tests\test_s6_default_switch_decision.py
+git diff --check
+```
+
+---
+
 ## 2026-05-31: YOLO 迁移 S5c — UI 后端选择入口关闭决议（Issue #26）
 
 ### 问题描述

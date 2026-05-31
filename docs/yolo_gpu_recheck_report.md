@@ -133,8 +133,8 @@ E:\CodeProject\vision\.venv\Scripts\python.exe -m analysis.bench_annotate_fps `
   不依赖 #23 的实时 go 结论；仍必须保持 `calibration_status=unvalidated` 与
   `score_authorized=False`。
 - #27（Hybrid）：**默认不实现**；若未来要推翻，必须先有 GPU 环境下 Hybrid 补点代价的数字依据。
-- #28（S6 默认切换决策）：**仍需执行**，但在当前 no-go 分支下应简化为“全部不切默认，仅保留离线 /
-  实验入口”的收尾决策。
+- #28（S6 默认切换决策）：**已执行**，见 `docs/yolo_default_switch_decision.md`。当前 no-go 分支下结论为
+  **全部不切默认，仅保留离线 / 实验入口**。
 
 ---
 
