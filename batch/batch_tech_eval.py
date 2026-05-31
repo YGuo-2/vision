@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from analysis.tech_eval import evaluate_video_assets, evaluate_video_detail, export_debug_video, to_jsonable
+from core.paths import outputs_dir
 
 VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv"}
 
@@ -42,7 +43,7 @@ def main() -> None:
         raise FileNotFoundError(f"video_dir not found: {video_dir}")
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_dir = Path(args.out_dir) if args.out_dir else (Path(__file__).resolve().parent / "outputs" / f"tech_eval_{ts}")
+    out_dir = Path(args.out_dir) if args.out_dir else (outputs_dir() / f"tech_eval_{ts}")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     videos = _iter_videos(video_dir)

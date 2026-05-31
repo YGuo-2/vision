@@ -17,6 +17,7 @@ from PIL import Image, ImageTk
 from core.action_compare import compare_video_to_template, create_template_from_video
 from analysis.tech_eval import evaluate_video_assets, evaluate_video_detail, export_debug_video, to_jsonable
 from core.vision_pipeline import MediaPipePipeline, PipelineConfig
+from core.paths import models_dir, outputs_dir
 
 
 ACTION_LABELS_ZH = {
@@ -794,7 +795,7 @@ class TechEvalWindow:
             out_dir = Path(out_dir_raw)
         else:
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            out_dir = Path(__file__).resolve().parent / "outputs" / f"tech_eval_{ts}"
+            out_dir = outputs_dir() / f"tech_eval_{ts}"
         out_dir.mkdir(parents=True, exist_ok=True)
 
         csv_path = out_dir / "tech_report.csv"
@@ -1218,9 +1219,9 @@ class App:
             return
 
         try:
-            models_dir = Path(__file__).resolve().parent / "models"
+            models_dir_path = models_dir()
             pipe = MediaPipePipeline(
-                models_dir=models_dir,
+                models_dir=models_dir_path,
                 cfg=PipelineConfig(pose_variant=state.pose_variant, running_mode="video"),
             )
         except Exception as e:
@@ -1298,7 +1299,7 @@ class App:
         total: int,
     ) -> None:
         # Parallel processing for offline videos using IMAGE mode pipelines.
-        models_dir = Path(__file__).resolve().parent / "models"
+        models_dir_path = models_dir()
         workers = max(1, int(state.workers))
         frame_q: "Queue[tuple[int, object] | None]" = Queue(maxsize=workers * 2)
         result_q: "Queue[tuple[int, object, list[str]]]" = Queue(maxsize=workers * 2)
@@ -1316,7 +1317,7 @@ class App:
 
         def worker() -> None:
             pipe = MediaPipePipeline(
-                models_dir=models_dir,
+                models_dir=models_dir_path,
                 cfg=PipelineConfig(pose_variant=state.pose_variant, running_mode="image"),
             )
             while True:

@@ -8,6 +8,8 @@ import numpy as np
 
 from core.vision_pipeline import MediaPipePipeline, PipelineConfig
 from core.pose_features import normalize_pose_xy, normalize_pose_xy_v1, normalize_pose_xy_v3, subsequence_dtw
+from core.feature_layout import POSE33_V3
+from core.paths import models_dir, templates_dir
 from core.video_writer import open_video_writer
 
 
@@ -23,9 +25,9 @@ def _extract_features(
 
     fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0) or 30.0
 
-    models_dir = Path(__file__).resolve().parent / "models"
+    models_dir_path = models_dir()
     pipe = MediaPipePipeline(
-        models_dir=models_dir,
+        models_dir=models_dir_path,
         cfg=PipelineConfig(pose_variant=pose_variant, running_mode="video", enable_hands=False),
     )
 
@@ -65,7 +67,7 @@ def main() -> None:
     meta = tpl["meta"].item()
     pose_variant = args.pose or meta.get("pose_variant", "full")
     layout = str(meta.get("feature_layout", "pose_indices_11_32_xy_rot_scale_norm"))
-    if layout.endswith("_v3"):
+    if layout == POSE33_V3.name or layout.endswith("_v3"):
         normalizer = normalize_pose_xy_v3
     elif layout.endswith("_v2"):
         normalizer = normalize_pose_xy
@@ -87,8 +89,7 @@ def main() -> None:
     print(f"Cost:     total={cost:.2f}  avg/frame={avg_cost:.3f}  score={score:.3f}")
 
     if args.preview:
-        out_dir = Path(__file__).resolve().parent / "templates"
-        out_dir.mkdir(parents=True, exist_ok=True)
+        out_dir = templates_dir()
         out_path = out_dir / f"{video_path.stem}.match_{Path(args.template).stem}.mp4"
 
         cap = cv2.VideoCapture(str(video_path))
@@ -98,9 +99,9 @@ def main() -> None:
         h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
         vw, actual_path, codec = open_video_writer(out_path, fps=fps, size=(w, h))
 
-        models_dir = Path(__file__).resolve().parent / "models"
+        models_dir_path = models_dir()
         pipe = MediaPipePipeline(
-            models_dir=models_dir,
+            models_dir=models_dir_path,
             cfg=PipelineConfig(pose_variant=pose_variant, running_mode="video", enable_hands=False),
         )
         i = 0

@@ -10,6 +10,7 @@ import cv2
 import numpy as np
 
 from core.vision_pipeline import MediaPipePipeline, PipelineConfig
+from core.paths import models_dir, outputs_dir
 
 VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv"}
 
@@ -73,9 +74,9 @@ def _extract_pose_and_video(
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
 
-    models_dir = Path(__file__).resolve().parent / "models"
+    models_dir_path = models_dir()
     pipe = MediaPipePipeline(
-        models_dir=models_dir,
+        models_dir=models_dir_path,
         cfg=PipelineConfig(
             pose_variant=pose_variant,
             running_mode="video",
@@ -173,7 +174,7 @@ def main() -> None:
         raise FileNotFoundError(f"source_dir not found: {source_dir}")
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_dir = Path(args.out_dir) if args.out_dir else (Path(__file__).resolve().parent / "outputs" / f"标准动作视频--分解版_骨架_{ts}")
+    out_dir = Path(args.out_dir) if args.out_dir else (outputs_dir() / f"标准动作视频--分解版_骨架_{ts}")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     skip_keywords = tuple(k.strip() for k in str(args.skip_keywords).split(",") if k.strip())

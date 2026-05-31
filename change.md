@@ -1,3 +1,64 @@
+## 2026-05-31: YOLO 迁移 S1 — artifact root 统一 + 模板 metadata 扩展（Issue #6）
+
+### 问题描述
+
+此前 `models` / `templates` / `outputs` 三个顶层产物目录散落在各包里，统一用
+`Path(__file__).resolve().parent / "models"` 之类写法推导（`core`/`apps`/`batch`/`analysis`
+均有）。由于 `__file__` 锚点随所在包不同，同一类产物可能指向不同位置，难维护、易踩坑。
+同时模板 metadata 缺少后端/布局/有效性信息，无法为 S2 接入 YOLO 做铺垫。本次将三个根目录
+收口到唯一 helper，并以「增量、向后兼容」方式扩展模板 metadata。验收硬门槛：`pose33_v3`
+golden 不漂移、旧模板仍可加载比对。
+
+### 修改内容
+
+- **集中式根目录解析**：新增 `core/paths.py`（仅依赖 `pathlib`，不导入业务模块避免循环），
+  统一锚定仓库根（`core/` 包父目录）：`repo_root()` / `models_dir()` / `templates_dir()` /
+  `outputs_dir()`。`templates_dir`/`outputs_dir` 返回前 `mkdir(parents=True, exist_ok=True)`；
+  `models_dir` 仅保证目录存在，**不删除/移动**任何已有模型文件（缺失 `.task` 由
+  `MediaPipePipeline` 自动下载）。
+- **替换全部散落写法**：约定 `from core.paths import models_dir`（`core/` 内用相对 import），
+  局部变量改名 `models_dir_path = models_dir()` 后透传；模板与 outputs 同理。覆盖：
+  - models（9 处）：`core/action_compare.py`(3)、`core/rule_scoring.py`、`analysis/tech_eval.py`、
+    `apps/main.py`(2)、`apps/app_ui.py`(2)、`apps/make_template.py`、`apps/match_template.py`(2)、
+    `batch/batch_export_skeleton.py`。
+  - templates（3 处）：`core/action_compare.py::create_template_from_video`、
+    `apps/make_template.py`、`apps/match_template.py`(preview)。
+  - outputs（4 处）：`apps/app_ui.py`、`batch/batch_tech_eval.py`、`batch/batch_export_skeleton.py`、
+    `batch/batch_dual_compare.py`（均保留 `--out_dir` 覆盖分支）。
+- **模板 metadata 扩展（增量字段）**：在两处写模板入口
+  （`core/action_compare.py::create_template_from_video`、`apps/make_template.py`）的 `meta`
+  新增 `backend="mediapipe"`、`model_name="pose_landmarker_<variant>"`、`feature_layout="pose33_v3"`、
+  `normalizer_version="v3"`、`confidence_kind="visibility"`、`validity_policy=MEDIAPIPE_VALIDITY_POLICY`、
+  `valid_conf_thr=DEFAULT_VALID_CONF_THR`（后两者复用 `core.pose_features` 集中式常量）。
+  旧模板里的历史 `feature_layout="pose_indices_11_32_xy_rot_scale_norm_v3"` 作为 legacy alias 兼容读取，
+  新模板统一写 #4 注册表布局名，便于 #7/#8 后续直接读取同一字段。
+- **旧模板兼容加载**：`core/action_compare.py` 新增 `template_meta_defaults()` 与
+  `normalize_template_meta()`（`setdefault` 补默认、不覆盖已有键），在
+  `compare_video_to_template` / `compare_video_to_dual_templates` 的 `meta = tpl["meta"].item()`
+  之后统一补齐，缺字段的旧模板照常加载比对。
+- **审查修复**：规范 metadata 字段名，移除新模板写入 `feature_layout_name` 的分叉；双模板比较时
+  canonical 化旧/新 `pose33_v3` alias，避免一个旧模板搭配一个新模板时被误判为 layout mismatch。
+- **.gitignore**：补充 Issue #6 统一根目录注释块，保留 `templates/`、`outputs/`、
+  `models/*.task|*.pt|*.onnx`，并保留 `core/models/*.task`、`analysis/models/*.task`（旧拷贝仍在磁盘）。
+- **测试**：新增 `tests/test_artifact_roots.py`（各入口解析到同一 models/templates/outputs root，
+  且生产文件不再出现 `parent / "models|templates|outputs"` 字面量）与
+  `tests/test_template_metadata.py`（新模板 7 字段齐全；剥离新字段的旧模板仍可加载比对）。
+
+### 验证方法
+
+```powershell
+.\.venv\Scripts\python.exe -m py_compile apps\main.py apps\app_ui.py apps\make_template.py apps\match_template.py core\vision_pipeline.py core\action_compare.py core\rule_scoring.py core\pose_features.py core\paths.py analysis\tech_eval.py batch\batch_tech_eval.py batch\batch_export_skeleton.py batch\batch_dual_compare.py
+.\.venv\Scripts\python.exe -m pytest tests\test_artifact_roots.py tests\test_template_metadata.py -q   # 13 passed
+.\.venv\Scripts\python.exe -m pytest tests\test_pose33_v3_golden.py -q                                  # 16 passed（行为不漂移）
+.\.venv\Scripts\python.exe -m pytest tests -q                                                           # 64 passed
+```
+
+- `tests/test_pose33_v3_golden.py` 全绿 → metadata 扩展未改动 features / 分数 / golden（行为不变硬门槛）。
+- `tests/test_artifact_roots.py` 全绿 → 各入口收口到同一顶层 root，生产代码无残留散落字面量。
+- `tests/test_template_metadata.py` 全绿 → 新模板字段齐全、旧模板向后兼容可加载。
+
+---
+
 ## 2026-05-31: YOLO 迁移 S1 — valid_mask 契约迁移 + 逐位等价回归（Issue #5）
 
 ### 问题描述

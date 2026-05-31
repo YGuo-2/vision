@@ -12,6 +12,7 @@ import numpy as np
 
 from .pose_features import (
     DEFAULT_VALID_CONF_THR,
+    MEDIAPIPE_VALIDITY_POLICY,
     derive_valid_mask,
     find_active_range,
     mirror_pose_features,
@@ -24,12 +25,65 @@ from .pose_features import (
     subsequence_dtw_with_path,
 )
 from .feature_layout import POSE33_V3, FeatureLayoutSpec, is_valid_feature_shape
+from .paths import models_dir, templates_dir
 from .rule_scoring import RuleViolation, extract_pose_raw, score_rules
 from .vision_pipeline import MediaPipePipeline, PipelineConfig
 from .video_writer import open_video_writer
 
 
 ProgressCb = Callable[[str, int, int], None]  # (stage, done, total)
+
+
+# 历史模板曾把 feature_layout 写成 normalizer 描述字符串；Issue #6 后统一写注册表布局名。
+LEGACY_DEFAULT_FEATURE_LAYOUT = "pose_indices_11_32_xy_rot_scale_norm"
+LEGACY_POSE33_V3_FEATURE_LAYOUT = "pose_indices_11_32_xy_rot_scale_norm_v3"
+
+
+# 模板 metadata 扩展（YOLO 迁移 S1 / Issue #6）：
+# 新增字段全部为“增量、向后兼容”——旧模板缺这些键时由 normalize_template_meta 补默认值，
+# 旧模板已有的历史 `feature_layout` 字符串不被覆盖，新模板则写入注册表布局名 `pose33_v3`。
+def template_meta_defaults() -> dict:
+    """返回 Issue #6 模板 metadata 字段及其默认值。
+
+    用于：1) 写模板时补齐新字段；2) 加载旧模板（缺字段）时填默认值。
+    ``validity_policy`` / ``valid_conf_thr`` 复用 ``core.pose_features`` 的集中式常量，
+    与 raw 提取链路（``extract_pose_raw``）保持同一来源，避免字面量散落。
+    """
+    return {
+        "backend": "mediapipe",
+        "model_name": "pose_landmarker_full",
+        "feature_layout": POSE33_V3.name,
+        "normalizer_version": "v3",
+        "confidence_kind": "visibility",
+        "validity_policy": MEDIAPIPE_VALIDITY_POLICY,
+        "valid_conf_thr": float(DEFAULT_VALID_CONF_THR),
+    }
+
+
+def normalize_template_meta(meta: dict) -> dict:
+    """用默认值补齐缺失的新字段（不覆盖已存在的键），保证下游看到完整字段集。
+
+    向后兼容关键点：旧模板没有这些键时补默认；旧模板已有的历史
+    ``feature_layout`` 字符串不覆盖，保证 loader 仍可按后缀识别 v1/v2/v3。
+    返回同一个 dict（原地补齐）。
+    """
+    if meta is None:
+        meta = {}
+    legacy_layout_name = meta.pop("feature_layout_name", None)
+    if "feature_layout" not in meta and legacy_layout_name:
+        meta["feature_layout"] = legacy_layout_name
+    for key, value in template_meta_defaults().items():
+        meta.setdefault(key, value)
+    return meta
+
+
+def _runtime_feature_layout(raw_meta: dict, normalized_meta: dict) -> str:
+    """Return the layout that should drive matching, preserving old-template fallbacks."""
+    if "feature_layout" in raw_meta:
+        return str(raw_meta["feature_layout"])
+    if "feature_layout_name" in raw_meta:
+        return str(normalized_meta.get("feature_layout", raw_meta["feature_layout_name"]))
+    return LEGACY_DEFAULT_FEATURE_LAYOUT
 
 
 def _valid_mask_from_raw(landmarks: np.ndarray, meta: dict) -> np.ndarray:
@@ -132,9 +186,9 @@ def _extract_pose_features(
 
     # Single-thread path: VIDEO mode (more stable landmarks).
     if workers == 1:
-        models_dir = Path(__file__).resolve().parent / "models"
+        models_dir_path = models_dir()
         pipe = MediaPipePipeline(
-            models_dir=models_dir,
+            models_dir=models_dir_path,
             cfg=PipelineConfig(pose_variant=pose_variant, running_mode="video", enable_hands=False),
         )
         feats: list[np.ndarray] = []
@@ -189,7 +243,7 @@ def _extract_pose_features(
 
     cap.release()
 
-    models_dir = Path(__file__).resolve().parent / "models"
+    models_dir_path = models_dir()
     feat_arr = np.zeros((total, *zero_frame_shape), dtype=np.float32)
     view_arr = np.zeros((total,), dtype=np.float32) if compute_view else None
 
@@ -216,7 +270,7 @@ def _extract_pose_features(
         cap2.set(cv2.CAP_PROP_POS_FRAMES, float(warm_start))
 
         pipe = MediaPipePipeline(
-            models_dir=models_dir,
+            models_dir=models_dir_path,
             cfg=PipelineConfig(pose_variant=pose_variant, running_mode="video", enable_hands=False),
         )
 
@@ -337,11 +391,9 @@ def _assert_feature_layout_match(
     right_arr = np.asarray(right)
     left_shape = _feature_frame_shape(left_arr)
     right_shape = _feature_frame_shape(right_arr)
-    layout_matches = (
-        left_layout is None
-        or right_layout is None
-        or str(left_layout) == str(right_layout)
-    )
+    left_layout_c = _canonical_feature_layout(left_layout)
+    right_layout_c = _canonical_feature_layout(right_layout)
+    layout_matches = left_layout_c is None or right_layout_c is None or left_layout_c == right_layout_c
     if left_arr.ndim == 3 and right_arr.ndim == 3 and left_shape == right_shape and layout_matches:
         return
 
@@ -355,6 +407,26 @@ def _assert_feature_layout_match(
         f" {_desc(right_label, right_arr, right_shape, right_layout)}。"
         " 请使用相同 feature_layout 重新生成模板或特征。"
     )
+
+
+def _canonical_feature_layout(layout: str | None) -> str | None:
+    """Map legacy layout aliases to the registered layout name used in new metadata."""
+    if layout is None:
+        return None
+    layout_s = str(layout)
+    if layout_s == POSE33_V3.name or layout_s == LEGACY_POSE33_V3_FEATURE_LAYOUT:
+        return POSE33_V3.name
+    return layout_s
+
+
+def _normalizer_version_from_layout(layout: str) -> str:
+    """Resolve normalizer version from current layout names and legacy aliases."""
+    layout = str(layout)
+    if _canonical_feature_layout(layout) == POSE33_V3.name or layout.endswith("_v3"):
+        return "v3"
+    if layout.endswith("_v2"):
+        return "v2"
+    return "v1"
 
 
 def _estimate_period_frames(energy: np.ndarray, fps: float) -> int | None:
@@ -569,8 +641,7 @@ def create_template_from_video(
     start_i = max(0, min(start_i, features.shape[0] - 1))
     end_i = max(start_i, min(end_i, features.shape[0] - 1))
 
-    out_dir = Path(__file__).resolve().parent / "templates"
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = templates_dir()
     out_path = Path(out_path) if out_path else (out_dir / f"{video_path.stem}_{pose_variant}.npz")
 
     meta = {
@@ -582,9 +653,16 @@ def create_template_from_video(
         "auto_start_frame": int(auto_start),
         "auto_end_frame": int(auto_end),
         "pose_variant": pose_variant,
-        "feature_layout": "pose_indices_11_32_xy_rot_scale_norm_v3",
+        "feature_layout": POSE33_V3.name,
         "running_mode": "video",
         "cfg": asdict(PipelineConfig(pose_variant=pose_variant, running_mode="video", enable_hands=False)),
+        # 模板 metadata 扩展（YOLO 迁移 S1 / Issue #6）：增量字段，向后兼容。
+        "backend": "mediapipe",
+        "model_name": f"pose_landmarker_{pose_variant}",
+        "normalizer_version": "v3",
+        "confidence_kind": "visibility",
+        "validity_policy": MEDIAPIPE_VALIDITY_POLICY,
+        "valid_conf_thr": float(DEFAULT_VALID_CONF_THR),
     }
 
     np.savez_compressed(
@@ -626,12 +704,14 @@ def compare_video_to_template(
 
     tpl = np.load(template_path, allow_pickle=True)
     query = tpl["features"]
-    meta = tpl["meta"].item()
+    raw_meta = dict(tpl["meta"].item() or {})
+    meta = normalize_template_meta(dict(raw_meta))
     pv = pose_variant or meta.get("pose_variant", "full")
-    layout = str(meta.get("feature_layout", "pose_indices_11_32_xy_rot_scale_norm"))
-    if layout.endswith("_v3"):
+    layout = _runtime_feature_layout(raw_meta, meta)
+    normalizer_version = _normalizer_version_from_layout(layout)
+    if normalizer_version == "v3":
         normalizer = normalize_pose_xy_v3
-    elif layout.endswith("_v2"):
+    elif normalizer_version == "v2":
         normalizer = normalize_pose_xy
     else:
         normalizer = normalize_pose_xy_v1
@@ -731,11 +811,13 @@ def compare_video_to_dual_templates(
 
     feat_f = tpl_f["features"]
     feat_s = tpl_s["features"]
-    meta_f = tpl_f["meta"].item()
-    meta_s = tpl_s["meta"].item()
+    raw_meta_f = dict(tpl_f["meta"].item() or {})
+    raw_meta_s = dict(tpl_s["meta"].item() or {})
+    meta_f = normalize_template_meta(dict(raw_meta_f))
+    meta_s = normalize_template_meta(dict(raw_meta_s))
 
-    layout_f = str(meta_f.get("feature_layout", "pose_indices_11_32_xy_rot_scale_norm"))
-    layout_s = str(meta_s.get("feature_layout", "pose_indices_11_32_xy_rot_scale_norm"))
+    layout_f = _runtime_feature_layout(raw_meta_f, meta_f)
+    layout_s = _runtime_feature_layout(raw_meta_s, meta_s)
     _assert_feature_layout_match(
         feat_f,
         feat_s,
@@ -745,19 +827,14 @@ def compare_video_to_dual_templates(
         right_layout=layout_s,
     )
 
-    def _layout_ver(layout: str) -> str:
-        if layout.endswith("_v3"):
-            return "v3"
-        if layout.endswith("_v2"):
-            return "v2"
-        return "v1"
-
-    if _layout_ver(layout_f) != _layout_ver(layout_s):
+    layout_ver_f = _normalizer_version_from_layout(layout_f)
+    layout_ver_s = _normalizer_version_from_layout(layout_s)
+    if layout_ver_f != layout_ver_s:
         raise ValueError("Front/side templates use different feature layouts; regenerate templates with the same version.")
 
-    if layout_f.endswith("_v3"):
+    if layout_ver_f == "v3":
         normalizer = normalize_pose_xy_v3
-    elif layout_f.endswith("_v2"):
+    elif layout_ver_f == "v2":
         normalizer = normalize_pose_xy
     else:
         normalizer = normalize_pose_xy_v1
@@ -1040,9 +1117,9 @@ def export_match_preview(
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
     vw, actual_path, codec = open_video_writer(out_path, fps=fps, size=(w, h))
 
-    models_dir = Path(__file__).resolve().parent / "models"
+    models_dir_path = models_dir()
     pipe = MediaPipePipeline(
-        models_dir=models_dir,
+        models_dir=models_dir_path,
         cfg=PipelineConfig(pose_variant=pose_variant, running_mode="video", enable_hands=False),
     )
 
