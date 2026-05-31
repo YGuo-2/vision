@@ -1,3 +1,64 @@
+## 2026-05-31: PR #29 审查补强 — S5 GPU 复测 harness 指标字段
+
+### 问题描述
+
+子 agent 审查 PR #29 时指出：当前 CUDA 不可用时报告可以产出 no-go 证据，但若后续换成
+CUDA-enabled torch 复跑，`analysis/bench_annotate_fps.py` 的 CUDA 可用分支只写
+`annotate_fps`，尚不能产出 #23 预注册表要求对照的 YOLO 裸推理 FPS、漏检 / 缺失帧率与
+body_core 抖动指标。
+
+### 修改内容
+
+- `analysis/bench_annotate_fps.py`：YOLO 预览分支在每帧 `infer_frame()` 周围单独计时，输出
+  `yolo_raw_infer_fps` / `yolo_raw_infer_sec`；统计 `yolo_miss_rate`、
+  `yolo_body_core_full_valid_rate`、`yolo_body_core_missing_rate`；基于连续 full-valid
+  body_core 帧计算 `yolo_body_core_jitter_median`。
+- `docs/yolo_gpu_recheck_report.md`：补充说明 CUDA 可用时 harness 会写出上述字段，用于对照裸推理
+  FPS、失败 / 漏检帧率与抖动阈值。
+- `tests/test_s5_gpu_recheck.py`：新增 body_core 抖动 helper 与 CSV schema 回归，锁住 #23
+  预注册指标字段不会被后续删掉。
+
+### 验证方法
+
+```powershell
+E:\CodeProject\vision\.venv\Scripts\python.exe -m pytest tests\test_s5_gpu_recheck.py tests\test_yolo_backend_contract.py -q
+E:\CodeProject\vision\.venv\Scripts\python.exe -m pytest tests -q
+E:\CodeProject\vision\.venv\Scripts\python.exe -m py_compile analysis\bench_annotate_fps.py
+git diff --check
+```
+
+---
+
+## 2026-05-31: YOLO 迁移 S5 — GPU 复测决策门（Issue #23）
+
+### 问题描述
+
+S0 的 CPU spike 显示本机 CPU 上 YOLO 不提速（YOLO/MediaPipe 纯推理 FPS 比 0.41），而 S5
+是否扩实时入口 / UI / 默认切换必须改看 GPU 上 `annotate()` 端到端链路。此前仓库没有独立
+benchmark harness 能按 Hands 开 / 关两档复测 `apps/main.py` 同等预览链路，也没有 #23 的
+GPU 复测决策报告。
+
+### 修改内容
+
+- 新增 `analysis/bench_annotate_fps.py`：独立 S5 benchmark harness，只读调用既有
+  `MediaPipePipeline.annotate()` 与 `YoloPoseAdapter.infer_frame()`，支持 Hands 开 / 关两档、
+  `--asset-root` 引用本地 gitignored 样本、`--device cuda`、环境探针与 JSON/CSV 输出；不接主链路。
+- 新增 `docs/yolo_gpu_recheck_report.md`：固定本机环境、预注册 GPU runtime / 6 样本覆盖 /
+  Hands 开关 FPS 比 / 漏检 / 抖动阈值，并按实测 `torch=2.12.0+cpu`、
+  `torch.cuda.is_available()=False`、有效 GPU benchmark rows=0 判定 **no-go**。
+- 分流结论：#25 / #26 在当前环境关闭不实现；#24 可独立推进；#27 默认不实现；#28 仍需执行但
+  no-go 分支下简化为“全部不切默认，仅保留离线 / 实验入口”。
+
+### 验证方法
+
+```powershell
+E:\CodeProject\vision\.venv\Scripts\python.exe -m analysis.bench_annotate_fps --samples docs/yolo_eval_samples.json --asset-root E:\CodeProject\vision --models-dir E:\CodeProject\vision\models --yolo-model E:\CodeProject\vision\models\yolo11n-pose.pt --device cuda --out outputs/gpu_recheck  # 写出 status=skipped / skip_reason=torch_cuda_unavailable
+E:\CodeProject\vision\.venv\Scripts\python.exe -m py_compile analysis\bench_annotate_fps.py
+E:\CodeProject\vision\.venv\Scripts\python.exe -m pytest tests\test_pose33_v3_golden.py -q
+```
+
+---
+
 ## 2026-05-31: PR #22 审查补强 — S4 结构化状态
 
 ### 问题描述
