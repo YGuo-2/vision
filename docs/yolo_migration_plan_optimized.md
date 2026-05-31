@@ -430,7 +430,7 @@ COCO17 到 Pose33-like 的真实映射：
 - YOLO-only CSV/JSONL 中未评估原因清晰，不把不可评估当合格或不合格。
 - MediaPipe 旧技术评估回归不退化。
 
-### S5. 扩展入口和可选 Hybrid
+### S5. 扩展入口和 Hybrid 决议
 
 目标：在离线闭环、标定、分级评估都稳定后，才扩到完整入口。
 
@@ -439,7 +439,9 @@ COCO17 到 Pose33-like 的真实映射：
 1. `batch_dual_compare.py`、`batch_export_skeleton.py`、`batch_tech_eval.py` 增加 backend/layout 参数和输出 metadata。
 2. `apps/main.py` 增加 `--backend`、`--feature-layout`，只作为显式参数。
 3. `apps/app_ui.py` 增加后端选择和规则完整度提示。
-4. Hybrid 只作为离线显式模式：`yolo_body_mp_pose_supplement`。
+4. Hybrid 已由 Issue #27 / `docs/yolo_gpu_recheck_report.md` supersede：当前不实现
+   `yolo_body_mp_pose_supplement`，不保留半成品 runtime 路径；若未来要恢复，必须另开实现子任务并先满足
+   #27 的 CUDA 有效复测、Hybrid 专用 benchmark、补点指标恢复证据等触发条件。
 
 > Hybrid 性质提醒（复审）：靠 MediaPipe 补脚/补脸，本质是把整个 PoseLandmarker 又跑一遍，YOLO 的性能收益基本被抵消。在“重心/发力顺序必须要脚部”的业务前提下，应在 S0 就初判 **“Hybrid 是否任何时候都不如直接用 MediaPipe full”**；若 S0 已判定 Hybrid 不划算，则本步直接删除，不实现。
 
@@ -511,7 +513,7 @@ COCO17 到 Pose33-like 的真实映射：
 | 第一阶段完整拆 `PoseBackend` | 后置，先做序列提取和 layout 注册 |
 | 完整 capability lattice | 简化为首批 metadata 字段 |
 | MediaPipe 默认逐步迁到 `body_core_v1` | 改为显式 opt-in，旧默认不变 |
-| P4 实现 Hybrid 补点 | 后置到 S5，且仅离线显式开启 |
+| P4 实现 Hybrid 补点 | 已由 Issue #27 / GPU 复测报告 supersede，当前不实现；未来需另开实现子任务并满足触发条件 |
 | CLI/UI/batch 同时接入 | 改为先离线模板闭环，再 batch，再 CLI/UI |
 | 默认实时链路候选 `yolo_body_mp_hands` | 保留为未来可能，不进 MVP |
 

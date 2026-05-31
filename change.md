@@ -1,3 +1,62 @@
+## 2026-05-31: YOLO 迁移 S5d — Hybrid 默认不实现决议（Issue #27）
+
+### 问题描述
+
+Issue #27 需要基于 #23 GPU 复测和 S0/S3 结论，决定是否实现离线 Hybrid
+`yolo_body_mp_pose_supplement`。Hybrid 的本质是 YOLO body 后再跑 MediaPipe Pose 补脚 / 补脸；
+如果没有数字证明其性能代价可接受，就会抵消 YOLO 的主要收益，还可能引入半成品路径。
+
+### 修改内容
+
+- `docs/yolo_gpu_recheck_report.md`：新增 “Hybrid 决议（Issue #27）” 小节，引用
+  `torch.cuda.is_available()=False`、GPU 有效复测覆盖 0/6、S0 CPU speedup=0.41、COCO17 缺脚跟脚尖
+  等数字 / 事实，明确结论为不实现 `yolo_body_mp_pose_supplement`。
+- 明确未来重新评估 Hybrid 的触发条件：CUDA 有效复测、Hybrid 专用 benchmark、补点指标恢复证据，
+  且仍只能作为离线显式模式，不能进入默认 / 实时路径。
+- 新增 `tests/test_s5_hybrid_decision.py`：锁住 #27 报告必须含数字依据、默认不实现结论，并确认
+  `apps/`、`batch/`、`core/`、`analysis/` 中不存在半成品 Hybrid runtime 代码路径。
+
+### 验证方法
+
+```powershell
+E:\CodeProject\vision\.venv\Scripts\python.exe -m pytest tests\test_s5_hybrid_decision.py -q
+E:\CodeProject\vision\.venv\Scripts\python.exe -m pytest tests\test_pose33_v3_golden.py -q
+E:\CodeProject\vision\.venv\Scripts\python.exe -m py_compile tests\test_s5_hybrid_decision.py
+git diff --check
+```
+
+---
+
+## 2026-05-31: PR #31 审查补强 — Hybrid 决议同步迁移计划文档
+
+### 问题描述
+
+子 agent 审查 PR #31 时指出：虽然 GPU 复测报告已明确 Issue #27 当前不实现
+`yolo_body_mp_pose_supplement`，但 `docs/yolo_migration_plan.md` 与
+`docs/yolo_migration_plan_optimized.md` 仍保留“后置实现 Hybrid / 离线显式 Hybrid”的旧计划表述，
+可能误导后续 agent 或开发者继续实现已被 supersede 的路径。
+
+### 修改内容
+
+- `docs/yolo_migration_plan.md`：将 Hybrid 命名、P4、P6 中的旧实现表述同步为 Issue #27
+  决议：当前不实现，不保留半成品 runtime；未来必须另开实现子任务并满足 CUDA 有效复测、
+  Hybrid 专用 benchmark、补点指标恢复证据等触发条件。
+- `docs/yolo_migration_plan_optimized.md`：将 S5 与“审批后删减 / 后置项”表格同步为
+  Issue #27 supersede 结论，避免继续描述为“后置到 S5 且离线显式开启”。
+- `tests/test_s5_hybrid_decision.py`：新增计划文档一致性回归，锁住两个计划文档必须引用
+  Issue #27 / GPU 复测报告、写明当前不实现和未来另开实现子任务，并禁止旧 Hybrid 实现承诺回流。
+
+### 验证方法
+
+```powershell
+E:\CodeProject\vision\.venv\Scripts\python.exe -m pytest tests\test_s5_hybrid_decision.py -q
+E:\CodeProject\vision\.venv\Scripts\python.exe -m pytest tests -q
+E:\CodeProject\vision\.venv\Scripts\python.exe -m py_compile tests\test_s5_hybrid_decision.py
+git diff --check
+```
+
+---
+
 ## 2026-05-31: PR #30 审查补强 — batch_export_skeleton 已存在输出 meta 透传
 
 ### 问题描述

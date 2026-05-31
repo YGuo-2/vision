@@ -138,7 +138,37 @@ E:\CodeProject\vision\.venv\Scripts\python.exe -m analysis.bench_annotate_fps `
 
 ---
 
-## 六、后续若要复测 GPU 的前置条件
+## 六、Hybrid 决议（Issue #27）
+
+**结论：不实现 `yolo_body_mp_pose_supplement`，代码库不保留半成品 Hybrid 路径。**
+
+本决议按 Issue #27 的触发条件逐条对照：
+
+| 判据 | 触发实现所需条件 | 当前数字 / 事实 | 结论 |
+|---|---|---|---|
+| GPU runtime | `torch.cuda.is_available() == True` 且 device_count >= 1 | `False`，device_count=0 | 不满足 |
+| S0 同批样本 GPU 覆盖 | 6/6 个样本跑完有效 GPU benchmark | 0/6 | 不满足 |
+| 实时 / 默认入口提速 | Hands 关 FPS 比 >= 1.30；Hands 开 FPS 比 >= 1.20 | 无有效 GPU 行 | 不满足 |
+| CPU 基线收益 | 至少不慢于 MediaPipe full | S0 CPU 纯推理 speedup = 0.41（YOLO 更慢） | 不满足 |
+| 补点价值 | 补回重心 / 发力顺序所需脚跟脚尖，且性能代价可接受 | COCO17 缺脚跟脚尖；靠 MediaPipe Pose 补脚/脸本质仍需跑完整 PoseLandmarker | 不满足 |
+
+因此，Hybrid 的唯一触发条件没有满足：既没有 GPU 有效复测数字证明补点代价可接受，也没有证据证明
+“YOLO body + MediaPipe Pose supplement”比直接使用 MediaPipe full 更有工程收益。当前更稳妥的边界是：
+
+- 实时 / UI：按 #23 no-go，#25 / #26 不实现。
+- 离线 batch：按 #24，只保留显式 `body_core_v1` 调试 / 标定入口，且 `score_authorized=False`。
+- full tech_eval / 规则评分：默认仍 MediaPipe full；YOLO-only / Hybrid 不进入对外评分。
+
+若未来要重新评估 Hybrid，必须先单独满足以下全部条件，再另开实现子任务：
+
+1. CUDA-enabled torch 环境下 `analysis/bench_annotate_fps.py --device cuda` 对 6/6 样本跑完。
+2. 新增 Hybrid 专用 benchmark，明确记录第二个 PoseLandmarker 的额外耗时、内存 / 显存占用。
+3. 证明补回的脚跟脚尖 / 嘴角能让重心、发力顺序等核心指标恢复评估，且误判样例可接受。
+4. Hybrid 仍只能作为离线显式模式，不能进入默认 / 实时路径，直到 S6 重新决策。
+
+---
+
+## 七、后续若要复测 GPU 的前置条件
 
 若之后要重新打开 #25 / #26，先不要改主链路，先满足以下条件并复跑本报告命令：
 
