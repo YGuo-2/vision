@@ -1,0 +1,268 @@
+# -*- coding: utf-8 -*-
+"""
+YOLO 后端契约回归（YOLO 迁移 Issue #7 / S2）。
+
+验收目标（对应 Issue #7）
+-------------------------
+- 无人帧 / 空结果 → 零行 + 全 False mask，不崩。
+- track_id 在段边界重置（``reset_tracker`` 语义）；序列层每次调用都重置。
+- 序列层输出仅为 numpy 数组（landmarks/valid_mask），meta 携带规定字段
+  （backend/model_name/running_mode/confidence_kind/validity_policy/valid_conf_thr
+   /frame_count/fps + calibration/track_reset note）。
+- 暴露 ``num_persons``（供 Issue #9 多人闸门构建）；本期不实现拒绝/降级闸门。
+- 懒加载：导入本模块/adapter 不触发 ultralytics import。
+
+确定性 / 无网络
+--------------
+不下载模型、不读真实视频：用 ``FakeYoloAdapter`` + ``patch_cv2_capture`` 驱动序列层，
+用 ``FakeYoloResult`` 驱动单帧解析。
+
+验收命令
+--------
+    .\\.venv\\Scripts\\python.exe -m pytest tests\\test_yolo_backend_contract.py
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from core.yolo_adapter import (  # noqa: E402
+    SingleTargetTracker,
+    YoloPoseAdapter,
+    empty_frame_result,
+    empty_sequence_row,
+    extract_yolo_landmark_series,
+    select_main_person,
+    extract_persons,
+    yolo_result_to_arrays,
+    yolo_result_to_frame,
+)
+from tests.yolo_fakes import (  # noqa: E402
+    FakeYoloAdapter,
+    FakeYoloResult,
+    make_coco17,
+    patch_cv2_capture,
+)
+
+
+# --------------------------------------------------------------------------- #
+# 懒加载：导入 adapter 不应触发 ultralytics import
+# --------------------------------------------------------------------------- #
+def test_adapter_import_is_lazy():
+    # 本测试进程中导入 core.yolo_adapter 后，ultralytics 不应进入 sys.modules
+    # （除非别的依赖显式引入；本仓库 fake 路径不引入）。
+    assert "core.yolo_adapter" in sys.modules
+    assert "ultralytics" not in sys.modules
+
+
+# --------------------------------------------------------------------------- #
+# 无人帧 / 空结果
+# --------------------------------------------------------------------------- #
+def test_empty_sequence_row_zero_and_false():
+    row, valid = empty_sequence_row()
+    assert row.shape == (33, 4)
+    assert valid.shape == (33,)
+    assert np.all(row == 0.0)
+    assert not np.any(valid)
+
+
+def test_no_person_frame_result_pose_none():
+    fr = empty_frame_result(num_persons=0)
+    assert fr.pose33 is None
+    assert fr.track_id is None
+    assert fr.meta is not None and fr.meta["num_persons"] == 0
+
+
+def test_yolo_result_empty_does_not_crash():
+    res = FakeYoloResult.empty()
+    row, valid, num_persons, sel = yolo_result_to_arrays(res, valid_conf_thr=0.5)
+    assert np.all(row == 0.0)
+    assert not np.any(valid)
+    assert num_persons == 0
+    assert sel is None
+    # None 结果也不崩
+    row2, valid2, n2, sel2 = yolo_result_to_arrays(None, valid_conf_thr=0.5)
+    assert np.all(row2 == 0.0) and not np.any(valid2) and n2 == 0 and sel2 is None
+    # 边界层同理
+    fr = yolo_result_to_frame(res, valid_conf_thr=0.5)
+    assert fr.pose33 is None
+
+
+# --------------------------------------------------------------------------- #
+# num_persons 暴露（Issue #9 闸门的基础；本期只暴露不拦截）
+# --------------------------------------------------------------------------- #
+def test_num_persons_exposed_for_multi_person():
+    xy, conf = make_coco17(conf_value=0.9)
+    res = FakeYoloResult.multi(
+        [
+            (xy, conf, (0.3, 0.5, 0.2, 0.4)),   # 较小框
+            (xy, conf, (0.6, 0.5, 0.5, 0.9)),   # 较大框 → 应被选中
+        ]
+    )
+    persons = extract_persons(res)
+    assert len(persons) == 2
+    # 最大框选择：index 1 面积更大
+    assert select_main_person(persons) == 1
+
+    _row, _valid, num_persons, sel = yolo_result_to_arrays(res, valid_conf_thr=0.5)
+    assert num_persons == 2   # 暴露人数
+    assert sel == 1
+    # 本期不实现拒绝/降级闸门（Issue #9）——这里只断言 num_persons 被如实暴露。
+
+
+# --------------------------------------------------------------------------- #
+# SingleTargetTracker 段边界重置语义
+# --------------------------------------------------------------------------- #
+def test_tracker_assigns_and_persists_within_segment():
+    tr = SingleTargetTracker()
+    assert tr.update(True) == 1   # 首次检出 → id 1
+    assert tr.update(True) == 1   # 持续检出 → 沿用
+    assert tr.update(False) is None  # 未检出帧 track_id 为 None
+    assert tr.update(True) == 1   # 短暂丢失后仍沿用（未超过 max_missed）
+
+
+def test_tracker_drops_after_max_missed_then_new_id():
+    tr = SingleTargetTracker(max_missed=2)
+    assert tr.update(True) == 1
+    assert tr.update(False) is None  # missed=1
+    assert tr.update(False) is None  # missed=2
+    assert tr.update(False) is None  # missed=3 > 2 → 丢弃 active
+    assert tr.update(True) == 2      # 重新检出 → 新 id 2
+
+
+def test_tracker_reset_restarts_ids_at_segment_boundary():
+    tr = SingleTargetTracker()
+    assert tr.update(True) == 1
+    assert tr.update(True) == 1
+    # 段边界：reset 后 id 从 1 重新开始（不跨段复用）
+    tr.reset()
+    assert tr.active_id is None
+    assert tr.next_id == 1
+    assert tr.update(True) == 1
+
+
+# --------------------------------------------------------------------------- #
+# 序列层：只返回 numpy + meta 字段 + 段边界 track 重置（用 FakeYoloAdapter）
+# --------------------------------------------------------------------------- #
+def _build_frames(n_person_frames: int, n_empty_tail: int = 0):
+    xy, conf = make_coco17(conf_value=0.9)
+    frames = [FakeYoloResult.single(xy, conf) for _ in range(n_person_frames)]
+    frames += [FakeYoloResult.empty() for _ in range(n_empty_tail)]
+    return frames
+
+
+def test_sequence_layer_returns_numpy_only_with_meta():
+    frames = _build_frames(5)
+    adapter = FakeYoloAdapter(frames=frames, valid_conf_thr=0.5)
+    with patch_cv2_capture(n_frames=len(frames), fps=24.0):
+        landmarks, valid_mask, meta = extract_yolo_landmark_series(
+            "fake://video.mp4", yolo_model=adapter
+        )
+
+    assert isinstance(landmarks, np.ndarray)
+    assert isinstance(valid_mask, np.ndarray)
+    assert landmarks.shape == (5, 33, 4)
+    assert valid_mask.shape == (5, 33)
+    assert landmarks.dtype == np.float32
+    assert valid_mask.dtype == bool
+
+    # meta 必备字段
+    for key in (
+        "backend",
+        "model_name",
+        "running_mode",
+        "confidence_kind",
+        "validity_policy",
+        "valid_conf_thr",
+        "frame_count",
+        "fps",
+    ):
+        assert key in meta, f"meta 缺少字段 {key}"
+    assert meta["backend"] == "yolo"
+    assert meta["confidence_kind"] == "yolo_conf"
+    assert meta["validity_policy"] == "confidence_thr"
+    assert meta["calibration_status"] == "unvalidated"
+    assert "preview" in meta["calibration_note"].lower() or "debug" in meta["calibration_note"].lower()
+    assert meta["fps"] == pytest.approx(24.0)
+    # 段边界 track 重置说明写入 meta
+    assert "reset" in meta["track_reset_note"].lower()
+    # num_persons 暴露
+    assert meta["max_persons"] == 1
+    assert meta["multi_person_frames"] == 0
+    assert len(meta["num_persons_per_frame"]) == 5
+
+
+def test_sequence_layer_handles_no_person_frames():
+    # 全部无人帧 → 零行 + 全 False mask，不崩。
+    frames = _build_frames(0, n_empty_tail=4)
+    adapter = FakeYoloAdapter(frames=frames, valid_conf_thr=0.5)
+    with patch_cv2_capture(n_frames=len(frames), fps=30.0):
+        landmarks, valid_mask, meta = extract_yolo_landmark_series(
+            "fake://empty.mp4", yolo_model=adapter
+        )
+    assert landmarks.shape == (4, 33, 4)
+    assert valid_mask.shape == (4, 33)
+    assert np.all(landmarks == 0.0)
+    assert not np.any(valid_mask)
+    assert meta["max_persons"] == 0
+    # 无人帧 track_id 全 None
+    assert all(t is None for t in meta["track_ids"])
+
+
+def test_sequence_layer_track_ids_reset_across_calls():
+    # 两次独立调用（模拟两个段/两个视频）：track_id 都应从 1 起，不跨调用累加。
+    frames_a = _build_frames(3)
+    frames_b = _build_frames(3)
+    adapter_a = FakeYoloAdapter(frames=frames_a, valid_conf_thr=0.5)
+    adapter_b = FakeYoloAdapter(frames=frames_b, valid_conf_thr=0.5)
+
+    with patch_cv2_capture(n_frames=3, fps=30.0):
+        _lm_a, _vm_a, meta_a = extract_yolo_landmark_series("fake://seg_a.mp4", yolo_model=adapter_a)
+    with patch_cv2_capture(n_frames=3, fps=30.0):
+        _lm_b, _vm_b, meta_b = extract_yolo_landmark_series("fake://seg_b.mp4", yolo_model=adapter_b)
+
+    # 段内首个有人帧 track_id 都应为 1（段边界重置语义）
+    first_a = next(t for t in meta_a["track_ids"] if t is not None)
+    first_b = next(t for t in meta_b["track_ids"] if t is not None)
+    assert first_a == 1
+    assert first_b == 1
+
+
+def test_sequence_layer_reuse_adapter_resets_tracker():
+    # 复用同一个 adapter 跑两段：第二段开始 extract 会 reset_tracker，track_id 重新从 1。
+    frames = _build_frames(3)
+    adapter = FakeYoloAdapter(frames=frames, valid_conf_thr=0.5)
+
+    with patch_cv2_capture(n_frames=3, fps=30.0):
+        _lm1, _vm1, meta1 = extract_yolo_landmark_series("fake://seg1.mp4", yolo_model=adapter)
+    # 第二段：重置 cursor（FakeYoloAdapter.reset_tracker 由 extract 内部调用）
+    with patch_cv2_capture(n_frames=3, fps=30.0):
+        _lm2, _vm2, meta2 = extract_yolo_landmark_series("fake://seg2.mp4", yolo_model=adapter)
+
+    first1 = next(t for t in meta1["track_ids"] if t is not None)
+    first2 = next(t for t in meta2["track_ids"] if t is not None)
+    assert first1 == 1
+    assert first2 == 1  # 段边界重置，未跨段累加
+
+
+# --------------------------------------------------------------------------- #
+# adapter 构造：默认模型路径解析 + tracker 重置（不加载 ultralytics）
+# --------------------------------------------------------------------------- #
+def test_adapter_default_model_path_and_no_eager_load():
+    adapter = YoloPoseAdapter()  # 不调用 _load，不触发 ultralytics import
+    assert adapter.model_name == "yolo11n-pose.pt"
+    assert adapter.valid_conf_thr == 0.5
+    assert adapter.confidence_kind == "yolo_conf"
+    # 构造后仍未导入 ultralytics
+    assert "ultralytics" not in sys.modules
+    # reset_tracker 可用
+    adapter.reset_tracker()
+    assert adapter.last_num_persons == 0
