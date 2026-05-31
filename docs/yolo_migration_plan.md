@@ -28,7 +28,7 @@ YOLO-pose 作为主要人体姿态后端是可行的，但不建议把 YOLO COCO
 | `core/action_compare.py` | 模板生成、DTW、双模板比对 | 需要透传 backend/layout，并在 metadata 记录后端、模型、布局、补点策略 |
 | `core/rule_scoring.py` | Pose33 原始数组和规则扣分 | 每条规则声明 required landmarks；缺失时未评估或启用补充后端 |
 | `analysis/tech_eval.py` | 直拳技术指标，依赖脸部/脚部/可见度 | 必须纳入迁移范围，不能只改 `core` |
-| `apps/main.py`、`apps/app_ui.py` | CLI/UI 实时和离线入口 | `apps/main.py` 按 Issue #25 no-go 当前保持 MediaPipe CLI；UI / 后续入口另按 #26 / #28 决策 |
+| `apps/main.py`、`apps/app_ui.py` | CLI/UI 实时和离线入口 | `apps/main.py` 按 Issue #25 no-go 当前保持 MediaPipe CLI；`apps/app_ui.py` 按 Issue #26 no-go 当前不增加 YOLO 后端选择；默认切换另按 #28 决策 |
 | `apps/make_template.py`、`apps/match_template.py` | 独立模板脚本 | 增加 backend/layout 参数，拒绝不兼容模板静默混用 |
 | `batch/*.py` | 批量比对、骨架导出、技术评估 | 增加 backend/layout 参数，导出 metadata |
 
@@ -295,13 +295,15 @@ Hybrid，也不在代码库保留半成品 runtime 路径。
 - `apps/main.py` 的 YOLO 实时预览入口已由 Issue #25 / `docs/yolo_gpu_recheck_report.md`
   supersede：#23 GPU 复测 no-go 时当前不实现 `--backend yolo` / `--feature-layout body_core_v1`，
   保持既有 MediaPipe CLI 默认路径；未来若要恢复，必须先重新跑满 GPU 复测并另开实现子任务。
-- `apps/app_ui.py` 增加后端选择、特征布局选择、规则完整度提示。
+- `apps/app_ui.py` 的 YOLO 后端选择与规则完整度提示已由 Issue #26 /
+  `docs/yolo_gpu_recheck_report.md` supersede：#23 / #25 no-go 时当前不实现，保持既有 MediaPipe UI；
+  未来若要恢复，必须先重新打开并落地 #25 后续实现子任务，再另开 UI 实现子任务。
 - `apps/make_template.py`、`apps/match_template.py`、`batch/batch_dual_compare.py`、`batch/batch_export_skeleton.py`、`batch/batch_tech_eval.py` 透传 backend/layout/supplement。
 - 更新 README 或使用说明。
 
 注意：
 - 默认值在 P6 前建议仍为 MediaPipe 或“自动但偏保守”，避免未标定 YOLO 影响用户结果。
-- UI 文案要避免承诺 YOLO-only 可完整评估所有规则。
+- UI 文案要避免承诺 YOLO-only 可完整评估所有规则；当前 #26 no-go 分支不新增 YOLO UI 文案或控件。
 
 验收标准：
 - CLI 当前可运行 / 可保留：
@@ -310,7 +312,7 @@ Hybrid，也不在代码库保留半成品 runtime 路径。
   - `apps/make_template.py --backend yolo --feature-layout body_core_v1 ...`
   - `apps/match_template.py --backend yolo --feature-layout body_core_v1 ...`
 - `apps/main.py` 的 YOLO 实时预览命令不属于当前验收范围；除非未来另开 #25 后续实现子任务，否则不加入当前 CLI 可运行清单。
-- UI 主预览、动作比对、直拳检测都能选择后端。
+- UI 主预览、动作比对、直拳检测当前保持 MediaPipe 旧路径；YOLO 后端选择不属于当前验收范围。
 - batch 输出包含 backend/layout/supplement metadata。
 
 ### P6. 标定、性能和默认切换
