@@ -1,3 +1,35 @@
+## 2026-06-01: 完成 #41 实时预览 Hands 开关
+
+### 问题描述
+
+Issue #41 要求在不引入 YOLO 后端选择、不改变 MediaPipe 默认行为的前提下，为 CLI / UI
+实时预览增加显式 Hands 关闭开关，用于当前 MediaPipe 链路的 pose-only 提速 smoke。默认仍必须保持
+Hands 开启，避免既有 V 手势识别与手部骨架显示体验突变。
+
+### 修改内容
+
+- `apps/main.py`：
+  - 新增 `run(..., enable_hands=True)` 参数，默认保持 Hands 开启。
+  - CLI 新增 `--no-hands`，显式关闭时将 `PipelineConfig(enable_hands=False)` 透传到单线程
+    VIDEO 路径与离线多线程 IMAGE 路径。
+- `apps/app_ui.py`：
+  - 主 UI 选项区新增默认开启的“启用手部检测（V 手势 / 手部骨架）”复选框。
+  - `UiState` 增加 `enable_hands` 字段，单线程实时路径与离线多线程路径均从 UI 状态透传到
+    `PipelineConfig`。
+  - 清理 `UiState` 中重复的 `pose_variant` 字段。
+- `tests/test_s5_hands_toggle.py`：
+  - 覆盖 CLI 默认 Hands 开启、`--no-hands` 显式关闭、离线多线程路径透传。
+  - 覆盖 UI state 默认开启 / 显式关闭，以及 worker pipeline 使用 `state.enable_hands`。
+
+### 验证方法
+
+```powershell
+.\.venv\Scripts\python.exe -m py_compile .\apps\main.py .\apps\app_ui.py .\tests\test_s5_hands_toggle.py
+.\.venv\Scripts\python.exe -m pytest tests\test_s5_hands_toggle.py -q
+```
+
+---
+
 ## 2026-06-01: 完成 #40 TensorRT / ONNX engine benchmark spike
 
 ### 问题描述

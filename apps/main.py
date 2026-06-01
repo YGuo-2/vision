@@ -72,6 +72,7 @@ def _process_video_multithread(
     out_path: str | None,
     show: bool,
     pose_variant: str,
+    enable_hands: bool,
     workers: int,
 ) -> None:
     # This mode parallelizes per-frame processing using IMAGE mode pipelines.
@@ -108,7 +109,7 @@ def _process_video_multithread(
     def worker(worker_id: int) -> None:
         pipe = MediaPipePipeline(
             models_dir=models_dir_path,
-            cfg=PipelineConfig(pose_variant=pose_variant, running_mode="image"),
+            cfg=PipelineConfig(pose_variant=pose_variant, running_mode="image", enable_hands=enable_hands),
         )
         while True:
             item = frame_q.get()
@@ -196,7 +197,14 @@ def _process_video_multithread(
     cv2.destroyAllWindows()
 
 
-def run(source: str, *, show: bool = True, out_path: str | None = None, pose_variant: str = "full") -> None:
+def run(
+    source: str,
+    *,
+    show: bool = True,
+    out_path: str | None = None,
+    pose_variant: str = "full",
+    enable_hands: bool = True,
+) -> None:
     cap = _open_capture(source)
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open source: {source}")
@@ -211,7 +219,10 @@ def run(source: str, *, show: bool = True, out_path: str | None = None, pose_var
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0) if is_file else 0
 
     models_dir_path = models_dir()
-    pipe = MediaPipePipeline(models_dir=models_dir_path, cfg=PipelineConfig(pose_variant=pose_variant, running_mode="video"))
+    pipe = MediaPipePipeline(
+        models_dir=models_dir_path,
+        cfg=PipelineConfig(pose_variant=pose_variant, running_mode="video", enable_hands=enable_hands),
+    )
 
     writer: cv2.VideoWriter | None = None
     if out_path:
@@ -266,6 +277,7 @@ def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--source", default="0", help="Camera index like 0/1, or a video file path like demo.mp4")
     p.add_argument("--pose", default="full", choices=["lite", "full", "heavy"], help="Pose model variant")
+    p.add_argument("--no-hands", action="store_true", help="Disable hand landmarker for pose-only preview/export")
     p.add_argument("--no-show", action="store_true", help="Disable preview window (useful for batch)")
     p.add_argument("--out", default=None, help="Optional output video path, e.g. out.mp4")
     p.add_argument(
@@ -286,10 +298,17 @@ def main() -> None:
             out_path=args.out,
             show=not args.no_show,
             pose_variant=args.pose,
+            enable_hands=not args.no_hands,
             workers=max(1, int(args.workers)),
         )
     else:
-        run(args.source, show=not args.no_show, out_path=args.out, pose_variant=args.pose)
+        run(
+            args.source,
+            show=not args.no_show,
+            out_path=args.out,
+            pose_variant=args.pose,
+            enable_hands=not args.no_hands,
+        )
 
 
 if __name__ == "__main__":
