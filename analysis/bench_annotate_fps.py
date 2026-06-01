@@ -119,6 +119,19 @@ def collect_env() -> dict[str, Any]:
         env["mediapipe_error"] = repr(exc)
 
     env["opencv"] = cv2.__version__
+    for module_name, key in (
+        ("onnx", "onnx"),
+        ("onnxruntime", "onnxruntime"),
+        ("onnxslim", "onnxslim"),
+        ("tensorrt", "tensorrt"),
+    ):
+        try:
+            module = __import__(module_name)
+            env[key] = getattr(module, "__version__", "installed")
+            if module_name == "onnxruntime":
+                env["onnxruntime_providers"] = module.get_available_providers()
+        except Exception as exc:  # noqa: BLE001
+            env[f"{key}_error"] = repr(exc)
     env.update(_nvidia_smi_info())
     return env
 
@@ -175,15 +188,26 @@ def load_samples(samples_json: Path, *, asset_root: Path | None = None) -> list[
     return samples
 
 
-def _default_cases(device: str) -> list[BenchCase]:
+def _infer_yolo_delegate(model_path: Path) -> str:
+    suffix = model_path.suffix.lower()
+    if suffix == ".onnx":
+        return "onnxruntime"
+    if suffix == ".engine":
+        return "tensorrt"
+    return "pytorch"
+
+
+def _default_cases(device: str, *, yolo_delegate: str = "pytorch") -> list[BenchCase]:
     device_norm = str(device).lower()
     cuda_requested = device_norm.startswith("cuda") or device_norm.isdigit()
+    delegate = str(yolo_delegate)
+    pytorch_delegate = delegate == "pytorch"
     yolo_cases: list[BenchCase] = []
-    if cuda_requested:
+    if cuda_requested and pytorch_delegate:
         yolo_cases.extend(
             [
-                BenchCase("yolo_cpu_body_only", "yolo", False, "cpu", "pytorch"),
-                BenchCase("yolo_cpu_body_mp_hands", "yolo", True, "cpu", "pytorch"),
+                BenchCase("yolo_cpu_body_only", "yolo", False, "cpu", delegate),
+                BenchCase("yolo_cpu_body_mp_hands", "yolo", True, "cpu", delegate),
             ]
         )
     yolo_cases.extend(
@@ -193,7 +217,7 @@ def _default_cases(device: str) -> list[BenchCase]:
                 "yolo",
                 False,
                 device,
-                "pytorch",
+                delegate,
                 requires_cuda=cuda_requested,
             ),
             BenchCase(
@@ -201,12 +225,12 @@ def _default_cases(device: str) -> list[BenchCase]:
                 "yolo",
                 True,
                 device,
-                "pytorch",
+                delegate,
                 requires_cuda=cuda_requested,
             ),
         ]
     )
-    if cuda_requested:
+    if cuda_requested and pytorch_delegate:
         yolo_cases.extend(
             [
                 BenchCase(
@@ -805,6 +829,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--yolo-model", default=None)
     parser.add_argument("--pose-variant", default="full", choices=["lite", "full", "heavy"])
     parser.add_argument("--device", default="cuda", help="YOLO device, e.g. cuda, 0, cpu")
+    parser.add_argument("--yolo-delegate", default=None, help="Optional benchmark label, e.g. pytorch, onnxruntime, tensorrt")
     parser.add_argument("--valid-conf-thr", type=float, default=DEFAULT_YOLO_VALID_CONF_THR)
     parser.add_argument("--limit-frames", type=int, default=None, help="Optional smoke-test frame cap per sample/case")
     parser.add_argument("--warmup-frames", type=int, default=10, help="Warmup frames per sample/case, excluded from timed metrics")
@@ -827,11 +852,12 @@ def main(argv: list[str] | None = None) -> int:
     samples = load_samples(Path(args.samples), asset_root=asset_root)
     models_dir = Path(args.models_dir).resolve() if args.models_dir else repo_models_dir()
     yolo_model = Path(args.yolo_model).resolve() if args.yolo_model else models_dir / "yolo11n-pose.pt"
+    yolo_delegate = str(args.yolo_delegate) if args.yolo_delegate else _infer_yolo_delegate(yolo_model)
 
     records: list[dict[str, Any]] = []
     for sample in samples:
         if not sample.path.exists():
-            for case in _default_cases(args.device):
+            for case in _default_cases(args.device, yolo_delegate=yolo_delegate):
                 records.append(
                     {
                         "sample_id": sample.sample_id,
@@ -850,7 +876,7 @@ def main(argv: list[str] | None = None) -> int:
                     }
                 )
             continue
-        for case in _default_cases(args.device):
+        for case in _default_cases(args.device, yolo_delegate=yolo_delegate):
             if case.requires_cuda and not env.get("torch_cuda_available", False):
                 records.append(_skip_record(sample, case, "torch_cuda_unavailable"))
                 continue
