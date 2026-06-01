@@ -23,6 +23,8 @@
   no-go”，并明确 #25/#26/#27 继续关闭不是因为 RTX 4060 不可用。
 - PR #36 子 agent 审查结论：未发现 P0/P1/P2 阻塞问题；按非阻塞建议补强 PR body 的 issue
   关联说明，明确本 PR 是修正已关闭 issue 的公开口径，不重新打开实现范围。
+- PR #36 已合并到 `main`（merge commit `b4c3631`），远端分支与本地修复分支已清理；本地
+  `main` 已快进到 `origin/main`。
 - `requirements-spike.txt`：显式加入 PyTorch `cu128` wheel 索引与版本，避免后续裸装 PyPI torch
   又得到 CPU wheel。
 - 更新 S5/S6/tracking 回归测试，锁住“CUDA 已修复 + 真实 GPU 数据 no-go”的口径。
