@@ -1,3 +1,35 @@
+## 2026-06-01: 完成 #42 latest-frame 实时解耦 smoke
+
+### 问题描述
+
+Issue #42 要求在不替换默认实时循环、不改变 MediaPipe 默认路径语义的前提下，提供一个 opt-in
+实时采集 / 推理 / 渲染解耦 smoke：采集侧只保留最新帧，推理消费最新帧，输出 p90 latency 与丢帧计数，
+不能只报告 FPS。
+
+### 修改内容
+
+- `apps/main.py`：
+  - 新增 `LatestFrameQueue` / `LatestFrameItem`，单槽保存最新帧，旧帧被覆盖时累计
+    `dropped_frames`。
+  - 新增 `RealtimeLatestFrameMetrics`，输出 `capture_fps`、`infer_fps`、`render_fps`、
+    `latency_p90_ms`、`dropped_frames` 等 smoke 指标。
+  - 新增 `run_realtime_latest_frame_smoke()`，使用独立 capture / inference 线程和最新帧队列，
+    VIDEO mode 时间戳保持单调；仅通过 `--realtime-latest-frame` 显式进入。
+  - CLI 新增 `--realtime-latest-frame` 与 `--limit-frames`；默认 `run()` 热循环不被替换。
+- `tests/test_s5_realtime_latest_frame.py`：
+  - 覆盖 latest-frame 队列丢弃旧帧语义、metrics schema、CLI opt-in、默认 CLI 仍走 `run()`、
+    fake capture/pipeline smoke，以及源码级确认默认 `run()` / UI `_worker_loop` 未被 latest-frame
+    实验路径替换。
+
+### 验证方法
+
+```powershell
+.\.venv\Scripts\python.exe -m py_compile .\apps\main.py .\tests\test_s5_realtime_latest_frame.py
+.\.venv\Scripts\python.exe -m pytest tests\test_s5_realtime_latest_frame.py -q
+```
+
+---
+
 ## 2026-06-01: 完成 #41 实时预览 Hands 开关
 
 ### 问题描述

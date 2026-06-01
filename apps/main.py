@@ -18,13 +18,70 @@ from __future__ import annotations
 import argparse
 import threading
 import time
+from dataclasses import dataclass, asdict
 from pathlib import Path
-from queue import Queue
+from queue import Empty, Queue
+from typing import Any
 
 import cv2
 
 from core.vision_pipeline import MediaPipePipeline, PipelineConfig
 from core.paths import models_dir
+
+
+@dataclass(frozen=True)
+class LatestFrameItem:
+    index: int
+    frame: object
+    captured_at: float
+    timestamp_ms: int
+
+
+@dataclass(frozen=True)
+class RealtimeLatestFrameMetrics:
+    captured_frames: int
+    processed_frames: int
+    rendered_frames: int
+    dropped_frames: int
+    capture_fps: float | None
+    infer_fps: float | None
+    render_fps: float | None
+    latency_p90_ms: float | None
+
+
+class LatestFrameQueue:
+    """Single-slot queue that keeps only the newest frame."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._item: LatestFrameItem | None = None
+        self._dropped = 0
+        self._closed = False
+
+    @property
+    def dropped_frames(self) -> int:
+        with self._lock:
+            return self._dropped
+
+    def close(self) -> None:
+        with self._lock:
+            self._closed = True
+
+    def put(self, item: LatestFrameItem) -> None:
+        with self._lock:
+            if self._item is not None:
+                self._dropped += 1
+            self._item = item
+
+    def get_latest(self) -> LatestFrameItem | None:
+        with self._lock:
+            item = self._item
+            self._item = None
+            return item
+
+    def is_closed(self) -> bool:
+        with self._lock:
+            return self._closed
 
 
 def _open_capture(source: str) -> cv2.VideoCapture:
@@ -64,6 +121,33 @@ def _print_progress(done: int, total: int, t0: float) -> None:
     print("\r" + msg, end="", flush=True)
     if done >= total:
         print()
+
+
+def _percentile(values: list[float], pct: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return float(ordered[0])
+    pos = (len(ordered) - 1) * (float(pct) / 100.0)
+    lo = int(pos)
+    hi = min(lo + 1, len(ordered) - 1)
+    frac = pos - lo
+    return float(ordered[lo] * (1.0 - frac) + ordered[hi] * frac)
+
+
+def _rate(count: int, seconds: float) -> float | None:
+    if count <= 0 or seconds <= 1e-9:
+        return None
+    return round(count / seconds, 3)
+
+
+def _round_ms(value: float | None) -> float | None:
+    return None if value is None else round(value * 1000.0, 3)
+
+
+def _metrics_to_dict(metrics: RealtimeLatestFrameMetrics) -> dict[str, Any]:
+    return asdict(metrics)
 
 
 def _process_video_multithread(
@@ -197,6 +281,146 @@ def _process_video_multithread(
     cv2.destroyAllWindows()
 
 
+def run_realtime_latest_frame_smoke(
+    source: str,
+    *,
+    show: bool = True,
+    pose_variant: str = "full",
+    enable_hands: bool = True,
+    limit_frames: int | None = None,
+) -> RealtimeLatestFrameMetrics:
+    """Opt-in realtime smoke path: capture and inference share latest-frame semantics."""
+    cap = _open_capture(source)
+    if not cap.isOpened():
+        raise RuntimeError(f"Cannot open source: {source}")
+
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+
+    is_file = not source.isdigit()
+    src_fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+    fps_for_ts = src_fps if (is_file and src_fps > 1e-3) else 30.0
+
+    frame_q = LatestFrameQueue()
+    result_q: "Queue[tuple[int, object, list[str], float, float]]" = Queue(maxsize=1)
+    stop_evt = threading.Event()
+    limit = None if limit_frames is None else max(0, int(limit_frames))
+
+    counts = {"captured": 0, "processed": 0, "rendered": 0}
+    latency_sec: list[float] = []
+    capture_started = time.monotonic()
+    capture_ended = capture_started
+    infer_started: float | None = None
+    infer_ended: float | None = None
+    render_started: float | None = None
+    render_ended: float | None = None
+
+    def capture_loop() -> None:
+        nonlocal capture_ended
+        idx = 0
+        try:
+            while not stop_evt.is_set():
+                if limit is not None and idx >= limit:
+                    break
+                ok, frame = cap.read()
+                if not ok:
+                    break
+                captured_at = time.monotonic()
+                ts = int(idx * 1000.0 / max(1e-6, fps_for_ts)) if is_file else int((captured_at - capture_started) * 1000)
+                frame_q.put(LatestFrameItem(index=idx, frame=frame, captured_at=captured_at, timestamp_ms=ts))
+                counts["captured"] += 1
+                idx += 1
+        finally:
+            capture_ended = time.monotonic()
+            frame_q.close()
+
+    def infer_loop() -> None:
+        nonlocal infer_started, infer_ended
+        pipe = MediaPipePipeline(
+            models_dir=models_dir(),
+            cfg=PipelineConfig(
+                pose_variant=pose_variant,
+                running_mode="video",
+                enable_hands=enable_hands,
+            ),
+        )
+        infer_started = time.monotonic()
+        while not stop_evt.is_set():
+            item = frame_q.get_latest()
+            if item is None:
+                if frame_q.is_closed():
+                    break
+                time.sleep(0.001)
+                continue
+            annotated, actions = pipe.annotate(item.frame, timestamp_ms=item.timestamp_ms)
+            inferred_at = time.monotonic()
+            counts["processed"] += 1
+            try:
+                result_q.put((item.index, annotated, actions, item.captured_at, inferred_at), timeout=0.1)
+            except Exception:
+                pass
+        infer_ended = time.monotonic()
+
+    t_capture = threading.Thread(target=capture_loop, daemon=True)
+    t_infer = threading.Thread(target=infer_loop, daemon=True)
+    t_capture.start()
+    t_infer.start()
+
+    try:
+        while True:
+            if t_capture.is_alive() or t_infer.is_alive() or not result_q.empty():
+                try:
+                    _idx, annotated, actions, captured_at, _inferred_at = result_q.get(timeout=0.05)
+                except Empty:
+                    continue
+                now = time.monotonic()
+                if render_started is None:
+                    render_started = now
+                latency_sec.append(now - captured_at)
+                counts["rendered"] += 1
+
+                y = 30
+                for action in actions[:5]:
+                    cv2.putText(annotated, action, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (20, 20, 240), 2, cv2.LINE_AA)
+                    y += 30
+                cv2.putText(
+                    annotated,
+                    f"Latest-frame smoke FPS: {counts['rendered'] / max(1e-6, now - (render_started or now)):.1f}",
+                    (10, y + 5),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7,
+                    (255, 255, 255),
+                    1,
+                )
+                if show:
+                    cv2.imshow("MediaPipe (Latest Frame Smoke)", annotated)
+                    if (cv2.waitKey(1) & 0xFF) == ord("q"):
+                        stop_evt.set()
+                        break
+                render_ended = time.monotonic()
+                continue
+            break
+    finally:
+        stop_evt.set()
+        t_capture.join(timeout=2.0)
+        t_infer.join(timeout=2.0)
+        cap.release()
+        cv2.destroyAllWindows()
+
+    infer_duration = 0.0 if infer_started is None or infer_ended is None else infer_ended - infer_started
+    render_duration = 0.0 if render_started is None or render_ended is None else render_ended - render_started
+    return RealtimeLatestFrameMetrics(
+        captured_frames=counts["captured"],
+        processed_frames=counts["processed"],
+        rendered_frames=counts["rendered"],
+        dropped_frames=frame_q.dropped_frames,
+        capture_fps=_rate(counts["captured"], capture_ended - capture_started),
+        infer_fps=_rate(counts["processed"], infer_duration),
+        render_fps=_rate(counts["rendered"], render_duration),
+        latency_p90_ms=_round_ms(_percentile(latency_sec, 90)),
+    )
+
+
 def run(
     source: str,
     *,
@@ -281,12 +505,29 @@ def main() -> None:
     p.add_argument("--no-show", action="store_true", help="Disable preview window (useful for batch)")
     p.add_argument("--out", default=None, help="Optional output video path, e.g. out.mp4")
     p.add_argument(
+        "--realtime-latest-frame",
+        action="store_true",
+        help="Opt-in smoke mode: capture/infer/render use latest-frame queues and print latency metrics.",
+    )
+    p.add_argument("--limit-frames", type=int, default=None, help="Optional frame cap for smoke modes")
+    p.add_argument(
         "--workers",
         type=int,
         default=1,
         help="Offline video worker threads (>=1). For >1, uses per-frame IMAGE mode (better throughput, less temporal smoothing).",
     )
     args = p.parse_args()
+
+    if args.realtime_latest_frame:
+        metrics = run_realtime_latest_frame_smoke(
+            args.source,
+            show=not args.no_show,
+            pose_variant=args.pose,
+            enable_hands=not args.no_hands,
+            limit_frames=args.limit_frames,
+        )
+        print(_metrics_to_dict(metrics))
+        return
 
     # Route to multithreaded path only for offline videos.
     if (not args.source.isdigit()) and args.workers and args.workers > 1:
