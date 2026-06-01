@@ -57,7 +57,7 @@ no-go，并连锁关闭 / 不实现 #25 CLI 实时预览、#26 UI 后端选择�
 - [x] 根据真实 GPU 结果修正文档、测试与 `change.md`。
 - [x] 跑 targeted tests、YOLO 相关测试、golden、全量测试与 `py_compile`。
 - [x] 推送 PR，并交给子 agent 审查。
-- [ ] 合并 PR 并清理分支。
+- [x] 合并 PR 并清理分支。
 
 ## 验收证据
 
