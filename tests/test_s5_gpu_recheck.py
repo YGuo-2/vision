@@ -170,6 +170,28 @@ def test_default_cases_keep_cpu_baseline_when_cuda_is_requested():
     assert cases["yolo_body_only_fp16_512"].warmup_shape == (512, 512, 3)
 
 
+def test_exported_yolo_model_delegate_is_inferred_from_suffix():
+    assert bench_annotate_fps._infer_yolo_delegate(Path("yolo11n-pose.pt")) == "pytorch"
+    assert bench_annotate_fps._infer_yolo_delegate(Path("yolo11n-pose.onnx")) == "onnxruntime"
+    assert bench_annotate_fps._infer_yolo_delegate(Path("yolo11n-pose.engine")) == "tensorrt"
+
+
+def test_exported_yolo_default_cases_skip_pytorch_only_fp16_variants():
+    cases = {
+        case.name: case
+        for case in bench_annotate_fps._default_cases("cuda", yolo_delegate="onnxruntime")
+    }
+
+    assert cases["yolo_body_only"].delegate == "onnxruntime"
+    assert cases["yolo_body_mp_hands"].delegate == "onnxruntime"
+    assert "yolo_cpu_body_only" not in cases
+    assert "yolo_cpu_body_mp_hands" not in cases
+    assert "yolo_body_only_fp16_640" not in cases
+    assert "yolo_body_mp_hands_fp16_640" not in cases
+    assert "yolo_body_only_fp16_512" not in cases
+    assert "yolo_body_mp_hands_fp16_512" not in cases
+
+
 def test_timing_metrics_separate_warmup_and_timed_latency():
     warmup = bench_annotate_fps.FrameLoopStats(
         frames=2,

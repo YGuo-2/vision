@@ -12,6 +12,7 @@ __pycache__/
 models/*.task
 models/*.pt
 models/*.onnx
+models/*.engine
 templates/
 outputs/
 

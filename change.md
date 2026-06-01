@@ -1,3 +1,42 @@
+## 2026-06-01: 完成 #40 TensorRT / ONNX engine benchmark spike
+
+### 问题描述
+
+Issue #40 要求验证 `models/yolo11n-pose.pt` 导出 TensorRT engine / ONNXRuntime 的可行性，
+并形成是否另开 P2b engine adapter opt-in 的决策。该阶段必须保证 `.engine/.onnx` 产物不入库，
+失败也要记录缺失依赖、安装命令与替代路径，同时不得将 engine/ONNX 结果接入对外评分或默认入口。
+
+### 修改内容
+
+- `analysis/bench_annotate_fps.py`：
+  - `collect_env()` 增加 ONNX、ONNXRuntime、ONNXSlim、TensorRT 版本 / provider 探针。
+  - 新增 `--yolo-delegate` 与模型后缀推断：`.pt=pytorch`、`.onnx=onnxruntime`、`.engine=tensorrt`。
+  - 非 PyTorch delegate 只保留 MediaPipe CPU baseline 与 exported model CUDA case，避免 ONNX/TensorRT
+    spike 误跑 PyTorch-only CPU baseline 与 FP16 640/512 case。
+- `.gitignore`：新增 `models/*.engine`，与既有 `models/*.onnx` 一起防止导出产物入库。
+- `tests/test_s5_gpu_recheck.py`：补充 exported model delegate 推断与非 PyTorch delegate case
+  矩阵测试。
+- 新增 `docs/yolo_engine_benchmark_report.md`：
+  - 记录 TensorRT 导出命令、失败原因 `ModuleNotFoundError("No module named 'tensorrt'")`。
+  - 记录已尝试 `tensorrt-cu12 --extra-index-url https://pypi.nvidia.com`，但 2.2GB wheel 经本地代理
+    长时间未完成，故本轮不产出 `.engine`。
+  - 记录 ONNXRuntime CUDA 6 样本 smoke：body-only raw infer FPS 均值 63.075，body+hands raw infer
+    FPS 均值 68.336，所有行 `status=ok`，但仍仅作为 smoke，不建议立即创建 P2b production adapter。
+
+### 验证方法
+
+```powershell
+.\.venv\Scripts\python.exe -m py_compile .\analysis\bench_annotate_fps.py .\tests\test_s5_gpu_recheck.py
+.\.venv\Scripts\python.exe -m pytest tests\test_s5_gpu_recheck.py -q
+$env:HTTP_PROXY  = "http://127.0.0.1:7890"
+$env:HTTPS_PROXY = "http://127.0.0.1:7890"
+.\.venv\Scripts\python.exe -c "from ultralytics import YOLO; m=YOLO('models/yolo11n-pose.pt'); m.export(format='engine', half=True, imgsz=640, device=0, workspace=2, verbose=False)"
+.\.venv\Scripts\python.exe -m analysis.bench_annotate_fps --samples docs\yolo_eval_samples.json --asset-root E:\CodeProject\vision --models-dir E:\CodeProject\vision\models --yolo-model E:\CodeProject\vision\models\yolo11n-pose.onnx --device cuda --yolo-delegate onnxruntime --limit-frames 1 --warmup-frames 1 --out outputs\engine_recheck_issue40_onnx_smoke
+git status --short --ignored models outputs
+```
+
+---
+
 ## 2026-06-01: 推进 #39 YOLO FP16 / imgsz / warmup opt-in
 
 ### 问题描述
