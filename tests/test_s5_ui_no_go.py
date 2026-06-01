@@ -21,10 +21,10 @@ def test_issue26_report_records_ui_no_go_decision():
     text = REPORT.read_text(encoding="utf-8")
     for keyword in (
         "UI 后端选择决议（Issue #26）",
-        "不实现 `apps/app_ui.py` 的 YOLO 后端选择控件",
-        "torch.cuda.is_available() = False",
-        "0/6",
-        "#25 已关闭 / 不实现",
+        "当前仍不实现 `apps/app_ui.py` 的 YOLO 后端选择控件",
+        "CUDA 可用，但 #23 实时阈值未达标",
+        "6/6",
+        "#25 仍关闭 / 不实现",
         "score_authorized=False",
         "另开 UI 实现子任务",
     ):

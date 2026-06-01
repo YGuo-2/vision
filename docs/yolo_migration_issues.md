@@ -404,10 +404,10 @@ S1 后续会改 `_extract_pose_features()`、`mirror_pose_features()`、`_select
 ### S5 — 扩展入口与可选 Hybrid
 已拆为 #23–#27 并全部关闭：
 
-- #23 GPU 复测决策门：no-go，当前环境不启动实时 / UI 默认扩展。
+- #23 GPU 复测决策门：CUDA 环境已修复并完成 6/6 样本复测，但真实实时阈值未达标，仍 no-go。
 - #24 batch backend/layout 参数：保留离线调试 / 标定入口，`score_authorized=False`。
-- #25 CLI 实时预览：按 #23 no-go 关闭 / 不实现。
-- #26 UI 后端选择：按 #23 / #25 no-go 关闭 / 不实现。
+- #25 CLI 实时预览：按 #23 CUDA 实测 no-go 继续关闭 / 不实现。
+- #26 UI 后端选择：按 #23 / #25 结论继续关闭 / 不实现。
 - #27 Hybrid：默认不实现 `yolo_body_mp_pose_supplement`。
 
 ### S6 — 默认切换决策

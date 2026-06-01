@@ -20,14 +20,21 @@ from core.yolo_adapter import BODY_CORE_V1_VALID_INDICES, FrameResult, Landmark 
 REPORT = _REPO_ROOT / "docs" / "yolo_gpu_recheck_report.md"
 
 
-def test_gpu_recheck_report_has_preregistered_no_go_decision():
+def test_gpu_recheck_report_has_cuda_fixed_no_go_decision():
     assert REPORT.exists(), f"GPU 复测报告缺失：{REPORT}"
     text = REPORT.read_text(encoding="utf-8")
 
     for keyword in (
         "预注册阈值",
-        "torch.cuda.is_available()",
-        "0/6",
+        "CUDA 修正版",
+        "torch=2.11.0+cu128",
+        "torch.cuda.is_available() = True",
+        "6/6 样本真实 GPU 复测",
+        "Hands 关 FPS 比仅 1/6",
+        "Hands 开 FPS 比 0/6",
+        "YOLO raw FPS 0/6",
+        "body_core 抖动 3/6",
+        "真实 GPU 数据 no-go",
         "no-go",
         "#25",
         "#26",
@@ -37,8 +44,16 @@ def test_gpu_recheck_report_has_preregistered_no_go_decision():
         assert keyword in text, f"GPU 复测报告缺少关键口径：{keyword}"
 
     assert "analysis/bench_annotate_fps.py" in text
-    assert "torch_cuda_unavailable" in text
     assert "yolo_raw_infer_fps" in text
+    assert "旧 CPU torch 前提已纠正" in text
+
+    stale_final_claims = (
+        "0/6 个样本产生有效 GPU",
+        "skip_reason = torch_cuda_unavailable",
+        "GPU runtime 可用性：`False`",
+    )
+    for stale in stale_final_claims:
+        assert stale not in text, f"GPU 复测报告仍保留 CPU torch 无效前提作为最终结论：{stale}"
 
 
 def test_benchmark_env_only_writes_probe_json(tmp_path, monkeypatch):

@@ -21,9 +21,11 @@ def test_issue25_report_records_cli_no_go_decision():
     text = REPORT.read_text(encoding="utf-8")
     for keyword in (
         "CLI 实时预览决议（Issue #25）",
-        "不实现 `apps/main.py --backend yolo`",
-        "torch.cuda.is_available() = False",
-        "0/6",
+        "当前仍不实现 `apps/main.py --backend yolo`",
+        "torch.cuda.is_available() = True",
+        "6/6",
+        "仅 1/6 达标",
+        "0/6 达标",
         "Hands 开",
         "Hands 关",
         "score_authorized=False",
