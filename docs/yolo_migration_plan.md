@@ -293,11 +293,12 @@ Hybrid，也不在代码库保留半成品 runtime 路径。
 
 任务：
 - `apps/main.py` 的 YOLO 实时预览入口已由 Issue #25 / `docs/yolo_gpu_recheck_report.md`
-  supersede：#23 GPU 复测 no-go 时当前不实现 `--backend yolo` / `--feature-layout body_core_v1`，
-  保持既有 MediaPipe CLI 默认路径；未来若要恢复，必须先重新跑满 GPU 复测并另开实现子任务。
+  supersede：#23 CUDA 修复后真实 GPU 复测仍 no-go，当前不实现 `--backend yolo` /
+  `--feature-layout body_core_v1`，保持既有 MediaPipe CLI 默认路径；未来若要恢复，
+  必须先让 Hands 关 / Hands 开实时阈值和 YOLO raw / 抖动阈值全部达标，并另开实现子任务。
 - `apps/app_ui.py` 的 YOLO 后端选择与规则完整度提示已由 Issue #26 /
-  `docs/yolo_gpu_recheck_report.md` supersede：#23 / #25 no-go 时当前不实现，保持既有 MediaPipe UI；
-  未来若要恢复，必须先重新打开并落地 #25 后续实现子任务，再另开 UI 实现子任务。
+  `docs/yolo_gpu_recheck_report.md` supersede：#23 CUDA 实测 no-go 且 #25 仍不实现时当前不实现，
+  保持既有 MediaPipe UI；未来若要恢复，必须先重新打开并落地 #25 后续实现子任务，再另开 UI 实现子任务。
 - `apps/make_template.py`、`apps/match_template.py`、`batch/batch_dual_compare.py`、`batch/batch_export_skeleton.py`、`batch/batch_tech_eval.py` 透传 backend/layout/supplement。
 - 更新 README 或使用说明。
 

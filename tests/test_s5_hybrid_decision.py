@@ -22,7 +22,9 @@ def test_hybrid_decision_report_records_no_implementation():
     for keyword in (
         "Hybrid 决议（Issue #27）",
         "不实现 `yolo_body_mp_pose_supplement`",
-        "0/6",
+        "6/6 个样本跑完有效 GPU benchmark",
+        "Hands 关 1/6 达标",
+        "Hands 开 0/6 达标",
         "0.41",
         "torch.cuda.is_available() == True",
         "score_authorized=False",

@@ -25,8 +25,10 @@ def test_s6_decision_records_all_default_paths_stay_mediapipe():
         "继续 MediaPipe",
         "J1 corr=0.280",
         "J4 一致率=0.50",
-        "torch.cuda.is_available()=False",
-        "0/6",
+        "CUDA 已修复",
+        "6/6 样本有效",
+        "Hands 关 FPS 比仅 1/6",
+        "Hands 开 0/6",
         "score_authorized=False",
         "yolo_body_mp_pose_supplement",
     ):

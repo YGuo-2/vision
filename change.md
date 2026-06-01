@@ -1,3 +1,47 @@
+## 2026-06-01: 修复 YOLO GPU 复测环境误判并重跑 #23
+
+### 问题描述
+
+本机有 NVIDIA GeForce RTX 4060 Laptop GPU，但此前 `.venv` 中安装的是 CPU 版 torch，
+导致 `torch.cuda.is_available()=False`，#23 GPU 复测按 0/6 有效 GPU 行判定 no-go，
+并连锁影响 #25 CLI 实时入口、#26 UI 后端选择、#27 Hybrid 与 #28 默认切换决策。该 no-go
+依据属于环境前提错误，不能作为最终 S5/S6 结论。
+
+### 修改内容
+
+- 将 `.venv` 中 torch / torchvision 修正为 CUDA 版：`torch=2.11.0+cu128`、
+  `torchvision=0.26.0+cu128`，确认 `torch.cuda.is_available()=True` 且设备为 RTX 4060。
+- 重新运行 `analysis.bench_annotate_fps`，6/6 S0 样本均产生有效 GPU benchmark 行。
+- `docs/yolo_gpu_recheck_report.md`：重写为 CUDA 修正版报告，撤销“CPU torch / 0 行 GPU 数据”
+  作为最终依据；记录真实 GPU 复测后仍 no-go：Hands 关 FPS 比仅 1/6 达到 1.30，Hands 开
+  0/6 达到 1.20，YOLO raw FPS 0/6 达到 62.85，body_core 抖动 3/6 超阈值。
+- `docs/yolo_gpu_readiness_review.md`：从核查 / 待修复文档更新为修复结果复盘。
+- `docs/yolo_default_switch_decision.md`、`docs/yolo_migration_plan*.md`、
+  `docs/yolo_migration_issues.md`：同步 #23 新依据，保持 #25/#26/#28 当前不切默认 / 不实现，
+  但不再引用 CPU torch 无效环境作为最终结论。
+- 同步 GitHub Issue #23/#25/#26/#27/#28 正文：公开追踪口径改为“CUDA 已修复 + 真实 GPU 数据
+  no-go”，并明确 #25/#26/#27 继续关闭不是因为 RTX 4060 不可用。
+- PR #36 子 agent 审查结论：未发现 P0/P1/P2 阻塞问题；按非阻塞建议补强 PR body 的 issue
+  关联说明，明确本 PR 是修正已关闭 issue 的公开口径，不重新打开实现范围。
+- `requirements-spike.txt`：显式加入 PyTorch `cu128` wheel 索引与版本，避免后续裸装 PyPI torch
+  又得到 CPU wheel。
+- 更新 S5/S6/tracking 回归测试，锁住“CUDA 已修复 + 真实 GPU 数据 no-go”的口径。
+
+### 验证方法
+
+```powershell
+E:\CodeProject\vision\.venv\Scripts\python.exe -c "import torch, torchvision; print(torch.__version__, torchvision.__version__, torch.cuda.is_available(), torch.version.cuda, torch.cuda.get_device_name(0))"
+E:\CodeProject\vision\.venv\Scripts\python.exe -m analysis.bench_annotate_fps --samples docs/yolo_eval_samples.json --asset-root E:\CodeProject\vision --models-dir E:\CodeProject\vision\models --yolo-model E:\CodeProject\vision\models\yolo11n-pose.pt --device cuda --out outputs/gpu_recheck
+E:\CodeProject\vision\.venv\Scripts\python.exe -m pytest tests\test_s5_gpu_recheck.py tests\test_s5_cli_no_go.py tests\test_s5_ui_no_go.py tests\test_s5_hybrid_decision.py tests\test_s6_default_switch_decision.py tests\test_tracking_issue_sync.py -q
+E:\CodeProject\vision\.venv\Scripts\python.exe -m pytest tests\test_yolo_landmark_mapping.py tests\test_yolo_backend_contract.py tests\test_body_core_layout.py tests\test_batch_backend_args.py -q
+E:\CodeProject\vision\.venv\Scripts\python.exe -m pytest tests\test_pose33_v3_golden.py -q
+E:\CodeProject\vision\.venv\Scripts\python.exe -m pytest tests -q
+E:\CodeProject\vision\.venv\Scripts\python.exe -m py_compile analysis\bench_annotate_fps.py tests\test_s5_gpu_recheck.py tests\test_s5_cli_no_go.py tests\test_s5_ui_no_go.py tests\test_s5_hybrid_decision.py tests\test_s6_default_switch_decision.py tests\test_tracking_issue_sync.py
+git diff --check
+```
+
+---
+
 ## 2026-05-31: YOLO 迁移总追踪收尾（Issue #12）
 
 ### 问题描述
