@@ -986,8 +986,8 @@ class TechEvalWindow:
 class UiState:
     source: str
     pose_variant: str
-    pose_variant: str
     workers: int
+    enable_hands: bool
     save_output: bool
     out_path: str | None
 
@@ -1001,6 +1001,7 @@ class App:
         self.source_var = StringVar(value="0")
         self.pose_var = StringVar(value="full")
         self.workers_var = IntVar(value=2)
+        self.enable_hands_var = BooleanVar(value=True)
         self.save_var = BooleanVar(value=False)
         self.out_var = StringVar(value="")
         self.status_var = StringVar(value="就绪")
@@ -1057,6 +1058,10 @@ class App:
         ttk.Label(opts, text="离线线程数（视频文件）：").pack(anchor="w", pady=(10, 0))
         self.workers_spin = ttk.Spinbox(opts, from_=1, to=16, textvariable=self.workers_var, width=6)
         self.workers_spin.pack(anchor="w", pady=(6, 0))
+
+        ttk.Checkbutton(opts, text="启用手部检测（V 手势 / 手部骨架）", variable=self.enable_hands_var).pack(
+            anchor="w", pady=(10, 0)
+        )
 
         ttk.Checkbutton(opts, text="导出结果视频", variable=self.save_var, command=self._toggle_out).pack(
             anchor="w", pady=(10, 0)
@@ -1154,6 +1159,7 @@ class App:
             source=source,
             pose_variant=self.pose_var.get().strip() or "full",
             workers=workers,
+            enable_hands=bool(self.enable_hands_var.get()),
             save_output=bool(self.save_var.get()),
             out_path=out_path,
         )
@@ -1222,7 +1228,11 @@ class App:
             models_dir_path = models_dir()
             pipe = MediaPipePipeline(
                 models_dir=models_dir_path,
-                cfg=PipelineConfig(pose_variant=state.pose_variant, running_mode="video"),
+                cfg=PipelineConfig(
+                    pose_variant=state.pose_variant,
+                    running_mode="video",
+                    enable_hands=state.enable_hands,
+                ),
             )
         except Exception as e:
             cap.release()
@@ -1318,7 +1328,11 @@ class App:
         def worker() -> None:
             pipe = MediaPipePipeline(
                 models_dir=models_dir_path,
-                cfg=PipelineConfig(pose_variant=state.pose_variant, running_mode="image"),
+                cfg=PipelineConfig(
+                    pose_variant=state.pose_variant,
+                    running_mode="image",
+                    enable_hands=state.enable_hands,
+                ),
             )
             while True:
                 item = frame_q.get()
