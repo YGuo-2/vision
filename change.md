@@ -1,3 +1,74 @@
+## 2026-06-01: 完成 #38 benchmark warmup 与稳定态延迟口径
+
+### 问题描述
+
+Issue #38 要求修正 #23 GPU 复测 benchmark 的测量口径：原脚本没有 warmup、缺少
+per-frame latency 分布，并且 `--device cuda` 时一旦 CUDA 不可用会跳过整个矩阵，导致
+MediaPipe CPU / YOLO CPU 基线无法在同一份输出中保留。旧口径容易把 CUDA/model 首帧
+初始化成本当成代表性 FPS，影响后续 P1/P2a 二次决策。
+
+### 修改内容
+
+- `analysis/bench_annotate_fps.py`：
+  - 新增 `--warmup-frames`（默认 10）与 `FrameLoopStats`，正式 FPS 和 p50/p90/p99
+    只统计 timed frames。
+  - 输出新增 `delegate`、`warmup_frames`、`timed_frames`、`cold_first_infer_sec`、
+    `cold_first_annotate_sec`、`timed_latency_ms_p50/p90/p99`、
+    `yolo_raw_infer_latency_ms_p50/p90/p99`，保留旧字段。
+  - `--device cuda` 时固定输出 MediaPipe CPU、YOLO CPU、YOLO CUDA 矩阵；CUDA 不可用时
+    只跳过需要 CUDA 的 YOLO case，不再跳过整轮 benchmark。
+  - YOLO warmup 复用同一个 `YoloPoseAdapter` 做原始推理，然后重置指标与 tracker，
+    避免 CUDA/model cold-start 污染正式计时；MediaPipe warmup 使用独立 VIDEO runner，
+    避免正式段 timestamp 从 0 开始时发生倒退。
+- `tests/test_s5_gpu_recheck.py`：补充 CSV schema、设备矩阵与 warmup/timed 指标口径测试。
+- `docs/yolo_gpu_recheck_report.md`：补充 Issue #38 benchmark 口径修正说明，保留 #23
+  CUDA 修正版历史 no-go 结果。
+
+### 验证方法
+
+```powershell
+.\.venv\Scripts\python.exe -m py_compile .\analysis\bench_annotate_fps.py .\tests\test_s5_gpu_recheck.py
+.\.venv\Scripts\python.exe -m pytest tests\test_s5_gpu_recheck.py -q
+.\.venv\Scripts\python.exe -m analysis.bench_annotate_fps --samples docs\yolo_eval_samples.json --asset-root E:\CodeProject\vision --models-dir E:\CodeProject\vision\models --yolo-model E:\CodeProject\vision\models\yolo11n-pose.pt --device cuda --limit-frames 1 --warmup-frames 1 --out outputs/gpu_recheck_issue38_smoke
+```
+
+---
+
+## 2026-06-01: YOLO 性能优化路线图文档准备
+
+### 问题描述
+
+`docs/yolo_perf_optimization_plan.md` 已指出 #23 GPU 复测 no-go 可能受到 warmup、逐帧
+`model.predict()`、FP32、串行渲染等因素影响，但原文还停留在分析方案层，缺少可直接推送到
+GitHub 的细分 issue、路线图 issue 草案、方案择优规则与代码链路复核证据。
+
+### 修改内容
+
+- 细读并复核 `docs/yolo_perf_optimization_plan.md`、`core/yolo_adapter.py`、
+  `analysis/bench_annotate_fps.py`、`core/vision_pipeline.py`、`apps/main.py`、
+  `apps/app_ui.py`、`core/body_core_compare.py` 等关键链路。
+- `docs/yolo_perf_optimization_plan.md`：新增代码链路复核、性能瓶颈排序、候选方案对比、
+  择优规则、P0–P5 细分 issue 草案与新路线图 issue 草案。
+- 新增 `docs/specs/yolo_perf_optimization_design.md`：按 Design-First 方式记录设计目标、
+  不变量、方案分解、验收要求和任务清单。
+- 已启动独立子 agent 进行视觉链路与算法现状只读分析；后续还会启动独立文档审查子 agent，
+  按审查意见继续迭代文档。
+- 子 agent 文档审查指出 P0 同设备口径、warmup 帧语义、P1 快路径契约复用、P2 spike/adapter
+  粒度、P3 默认不改、P4 GPU delegate API 探测、P5 只 profile 不改分数等边界需要补强。
+- 已按审查意见补强文档：P0 增加 MP CPU / YOLO CPU / YOLO CUDA 设备矩阵与 warmup rewind
+  语义；P1 明确新快路径必须复用既有解析 / 映射 / 多人闸门；P2 拆为 P2a export benchmark
+  spike 与条件 P2b adapter；路线图拆成 YOLO 二次决策和现有实时体验优化两条泳道。
+
+### 验证方法
+
+```powershell
+Get-Content -Raw docs\yolo_perf_optimization_plan.md
+Get-Content -Raw docs\specs\yolo_perf_optimization_design.md
+git diff --check
+```
+
+---
+
 ## 2026-06-01: 修复 YOLO GPU 复测环境误判并重跑 #23
 
 ### 问题描述
