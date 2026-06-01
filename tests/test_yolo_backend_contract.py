@@ -344,8 +344,119 @@ def test_adapter_default_model_path_and_no_eager_load():
     assert adapter.model_name == "yolo11n-pose.pt"
     assert adapter.valid_conf_thr == 0.6  # S3（#10）落库阈值；仍不授权对外评分
     assert adapter.confidence_kind == "yolo_conf"
+    assert adapter.imgsz == 640
+    assert adapter.device == "cpu"
+    assert adapter.requested_half is False
+    assert adapter.half is False
+    assert adapter.warmup is False
+    assert adapter._warmup_done is False
     # 构造后仍未导入 ultralytics
     assert "ultralytics" not in sys.modules
     # reset_tracker 可用
     adapter.reset_tracker()
     assert adapter.last_num_persons == 0
+
+
+def test_adapter_half_is_opt_in_and_cpu_falls_back():
+    adapter = YoloPoseAdapter(device="cpu", half=True, warmup=True, warmup_shape=(480, 640))
+
+    assert adapter.requested_half is True
+    assert adapter.half is False
+    assert adapter.warmup is True
+    assert adapter.warmup_shape == (480, 640, 3)
+    assert "ultralytics" not in sys.modules
+
+
+def test_adapter_cuda_half_predict_and_warmup_only_once(monkeypatch):
+    xy, conf = make_coco17(conf_value=0.9)
+    result = FakeYoloResult.single(xy, conf)
+
+    class FakeModel:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        def predict(self, frame, **kwargs):
+            self.calls.append(
+                {
+                    "shape": tuple(frame.shape),
+                    "imgsz": kwargs["imgsz"],
+                    "device": kwargs["device"],
+                    "half": kwargs["half"],
+                    "verbose": kwargs["verbose"],
+                }
+            )
+            return [result]
+
+    fake_model = FakeModel()
+    adapter = YoloPoseAdapter(
+        model_path="fake.pt",
+        imgsz=512,
+        device="cuda",
+        half=True,
+        warmup=True,
+        warmup_shape=(32, 48),
+    )
+    monkeypatch.setattr(adapter, "_load", lambda: fake_model)
+
+    frame = np.zeros((80, 96, 3), dtype=np.uint8)
+    adapter.infer_frame(frame)
+    adapter.infer_frame(frame)
+
+    assert len(fake_model.calls) == 3
+    assert fake_model.calls[0] == {
+        "shape": (32, 48, 3),
+        "imgsz": 512,
+        "device": "cuda",
+        "half": True,
+        "verbose": False,
+    }
+    assert fake_model.calls[1]["shape"] == (80, 96, 3)
+    assert fake_model.calls[2]["shape"] == (80, 96, 3)
+    assert all(call["half"] is True for call in fake_model.calls)
+    assert adapter._warmup_done is True
+
+
+def test_extract_yolo_landmark_series_passes_adapter_options(monkeypatch):
+    created: list[YoloPoseAdapter] = []
+    original_init = YoloPoseAdapter.__init__
+
+    def tracking_init(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        created.append(self)
+
+    monkeypatch.setattr(YoloPoseAdapter, "__init__", tracking_init)
+
+    xy, conf = make_coco17(conf_value=0.9)
+    result = FakeYoloResult.single(xy, conf)
+
+    class FakeModel:
+        def predict(self, frame, **kwargs):
+            return [result]
+
+    monkeypatch.setattr(YoloPoseAdapter, "_load", lambda self: FakeModel())
+
+    with patch_cv2_capture(n_frames=1, fps=30.0):
+        _landmarks, _valid_mask, meta = extract_yolo_landmark_series(
+            "fake://options.mp4",
+            yolo_model="fake.pt",
+            imgsz=512,
+            device="cuda",
+            half=True,
+            warmup=True,
+            warmup_shape=(32, 48),
+        )
+
+    assert len(created) == 1
+    adapter = created[0]
+    assert adapter.imgsz == 512
+    assert adapter.device == "cuda"
+    assert adapter.requested_half is True
+    assert adapter.half is True
+    assert adapter.warmup is True
+    assert adapter._warmup_done is True
+    assert meta["imgsz"] == 512
+    assert meta["device"] == "cuda"
+    assert meta["requested_half"] is True
+    assert meta["half"] is True
+    assert meta["warmup"] is True
+    assert meta["warmup_shape"] == (32, 48, 3)

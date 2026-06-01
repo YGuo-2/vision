@@ -1,3 +1,43 @@
+## 2026-06-01: 推进 #39 YOLO FP16 / imgsz / warmup opt-in
+
+### 问题描述
+
+Issue #39 要求在 #38 benchmark 口径修正后，继续验证 YOLO PyTorch FP16、不同 `imgsz`
+与 adapter 内部 warmup 的真实性能上限，同时保持默认 FP32 / 640 / 无 warmup 行为不变，
+并确保优化参数不仅作用于 benchmark，也能透传到 `extract_yolo_landmark_series`。
+
+### 修改内容
+
+- `core/yolo_adapter.py`：
+  - `YoloPoseAdapter` 增加 `half=False`、`warmup=False`、`warmup_shape=None` 显式 opt-in
+    参数；默认构造仍不加载 ultralytics、不推理。
+  - `_predict()` 向 ultralytics `model.predict()` 透传 `half=self.half`；CPU / MPS 请求
+    half 时自动降级为 `False`，CUDA / 数字设备才启用 FP16。
+  - adapter warmup 只在显式 `warmup=True` 且首次真实推理前执行一次，随后复用现有
+    `yolo_result_to_arrays` / `map_coco17_person` / 多人闸门链路。
+  - `extract_yolo_landmark_series` 透传 `imgsz`、`device`、`half`、`warmup`、
+    `warmup_shape`，并在 meta 中记录实验参数。
+- `analysis/bench_annotate_fps.py`：
+  - `BenchCase` 增加 `imgsz`、`half`、`adapter_warmup` 字段。
+  - `--device cuda` 时保留 #38 FP32 baseline，并新增 FP16 640 / FP16 512 的 body-only
+    与 body+hands case。
+  - CSV/JSON 输出新增 `imgsz`、`half`、`adapter_warmup`、`warmup_shape`、`max_persons`、
+    `multi_person_frames`、`review_required`、`gate_status`，同时观察性能与多人质量守卫。
+- `tests/test_yolo_backend_contract.py`：补充 half 参数透传、CPU fallback、warmup 只执行一次、
+  序列提取参数透传与 meta 字段测试。
+- `tests/test_s5_gpu_recheck.py`：补充 benchmark FP16/imgsz case、CSV schema 与质量守卫字段测试。
+- `docs/yolo_gpu_recheck_report.md`：补充 #39 PyTorch FP16 / imgsz / adapter warmup 实验口径说明。
+
+### 验证方法
+
+```powershell
+.\.venv\Scripts\python.exe -m py_compile .\core\yolo_adapter.py .\analysis\bench_annotate_fps.py .\tests\test_yolo_backend_contract.py .\tests\test_s5_gpu_recheck.py
+.\.venv\Scripts\python.exe -m pytest tests\test_yolo_backend_contract.py -q
+.\.venv\Scripts\python.exe -m pytest tests\test_s5_gpu_recheck.py -q
+```
+
+---
+
 ## 2026-06-01: 完成 #38 benchmark warmup 与稳定态延迟口径
 
 ### 问题描述

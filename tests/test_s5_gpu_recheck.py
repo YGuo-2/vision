@@ -99,6 +99,10 @@ def test_csv_schema_contains_gpu_recheck_metric_fields(tmp_path):
                 "backend": "yolo",
                 "device": "cuda",
                 "delegate": "pytorch",
+                "imgsz": 640,
+                "half": True,
+                "adapter_warmup": True,
+                "warmup_shape": "640x640x3",
                 "status": "ok",
                 "frames": 1,
                 "warmup_frames": 10,
@@ -112,6 +116,10 @@ def test_csv_schema_contains_gpu_recheck_metric_fields(tmp_path):
                 "yolo_raw_infer_fps": 99.0,
                 "yolo_miss_rate": 0.0,
                 "yolo_body_core_jitter_median": 0.01,
+                "max_persons": 1,
+                "multi_person_frames": 0,
+                "review_required": False,
+                "gate_status": "ok",
             }
         ],
     )
@@ -120,9 +128,14 @@ def test_csv_schema_contains_gpu_recheck_metric_fields(tmp_path):
     assert "yolo_raw_infer_fps" in text
     assert "yolo_miss_rate" in text
     assert "warmup_frames" in text
+    assert "imgsz" in text
+    assert "adapter_warmup" in text
+    assert "warmup_shape" in text
     assert "timed_frames" in text
     assert "timed_latency_ms_p50" in text
     assert "yolo_raw_infer_latency_ms_p99" in text
+    assert "max_persons" in text
+    assert "review_required" in text
     assert "yolo_body_core_jitter_median" in text
 
 
@@ -141,6 +154,20 @@ def test_default_cases_keep_cpu_baseline_when_cuda_is_requested():
 
     assert cases["yolo_body_only"].device == "cuda"
     assert cases["yolo_body_only"].requires_cuda
+    assert cases["yolo_body_only"].imgsz == 640
+    assert not cases["yolo_body_only"].half
+    assert not cases["yolo_body_only"].adapter_warmup
+
+    assert cases["yolo_body_only_fp16_640"].device == "cuda"
+    assert cases["yolo_body_only_fp16_640"].requires_cuda
+    assert cases["yolo_body_only_fp16_640"].imgsz == 640
+    assert cases["yolo_body_only_fp16_640"].half
+    assert cases["yolo_body_only_fp16_640"].adapter_warmup
+    assert cases["yolo_body_only_fp16_640"].warmup_shape == (640, 640, 3)
+
+    assert cases["yolo_body_only_fp16_512"].imgsz == 512
+    assert cases["yolo_body_only_fp16_512"].half
+    assert cases["yolo_body_only_fp16_512"].warmup_shape == (512, 512, 3)
 
 
 def test_timing_metrics_separate_warmup_and_timed_latency():
@@ -233,6 +260,10 @@ def test_bench_sample_yolo_warmup_is_reset_before_timed_metrics(tmp_path, monkey
                 "yolo_body_core_full_valid_rate": 1.0,
                 "yolo_body_core_missing_rate": 0.0,
                 "yolo_body_core_jitter_median": 0.0,
+                "max_persons": 1,
+                "multi_person_frames": 0,
+                "review_required": False,
+                "gate_status": "ok",
             }
 
         def close(self) -> None:
@@ -265,6 +296,10 @@ def test_bench_sample_yolo_warmup_is_reset_before_timed_metrics(tmp_path, monkey
     assert record["yolo_raw_infer_sec"] == 0.01
     assert record["yolo_raw_infer_fps"] == 100.0
     assert record["yolo_raw_infer_latency_ms_p50"] == 10.0
+    assert record["max_persons"] == 1
+    assert record["multi_person_frames"] == 0
+    assert record["review_required"] is False
+    assert record["gate_status"] == "ok"
 
     json.dumps(
         {
@@ -277,6 +312,10 @@ def test_bench_sample_yolo_warmup_is_reset_before_timed_metrics(tmp_path, monkey
         "backend",
         "device",
         "delegate",
+        "imgsz",
+        "half",
+        "adapter_warmup",
+        "warmup_shape",
         "warmup_frames",
         "timed_frames",
         "init_sec",
@@ -289,6 +328,10 @@ def test_bench_sample_yolo_warmup_is_reset_before_timed_metrics(tmp_path, monkey
         "yolo_raw_infer_latency_ms_p99",
         "yolo_raw_infer_fps",
         "yolo_miss_rate",
+        "max_persons",
+        "multi_person_frames",
+        "review_required",
+        "gate_status",
         "yolo_body_core_jitter_median",
     ):
         assert field in record

@@ -35,6 +35,7 @@ from core.yolo_adapter import (  # noqa: E402
     DEFAULT_YOLO_VALID_CONF_THR,
     FrameResult,
     YoloPoseAdapter,
+    evaluate_multi_person_gate,
 )
 
 
@@ -69,6 +70,10 @@ class BenchCase:
     device: str
     delegate: str = "cpu"
     requires_cuda: bool = False
+    imgsz: int = 640
+    half: bool = False
+    adapter_warmup: bool = False
+    warmup_shape: tuple[int, int, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -201,6 +206,59 @@ def _default_cases(device: str) -> list[BenchCase]:
             ),
         ]
     )
+    if cuda_requested:
+        yolo_cases.extend(
+            [
+                BenchCase(
+                    "yolo_body_only_fp16_640",
+                    "yolo",
+                    False,
+                    device,
+                    "pytorch",
+                    requires_cuda=True,
+                    imgsz=640,
+                    half=True,
+                    adapter_warmup=True,
+                    warmup_shape=(640, 640, 3),
+                ),
+                BenchCase(
+                    "yolo_body_mp_hands_fp16_640",
+                    "yolo",
+                    True,
+                    device,
+                    "pytorch",
+                    requires_cuda=True,
+                    imgsz=640,
+                    half=True,
+                    adapter_warmup=True,
+                    warmup_shape=(640, 640, 3),
+                ),
+                BenchCase(
+                    "yolo_body_only_fp16_512",
+                    "yolo",
+                    False,
+                    device,
+                    "pytorch",
+                    requires_cuda=True,
+                    imgsz=512,
+                    half=True,
+                    adapter_warmup=True,
+                    warmup_shape=(512, 512, 3),
+                ),
+                BenchCase(
+                    "yolo_body_mp_hands_fp16_512",
+                    "yolo",
+                    True,
+                    device,
+                    "pytorch",
+                    requires_cuda=True,
+                    imgsz=512,
+                    half=True,
+                    adapter_warmup=True,
+                    warmup_shape=(512, 512, 3),
+                ),
+            ]
+        )
     return [
         BenchCase("mediapipe_pose_only", "mediapipe", False, "cpu", "cpu"),
         BenchCase("mediapipe_pose_hands", "mediapipe", True, "cpu", "cpu"),
@@ -216,12 +274,20 @@ class YoloPreviewAnnotator:
         models_dir: Path,
         device: str,
         enable_hands: bool,
+        imgsz: int,
+        half: bool,
+        adapter_warmup: bool,
+        warmup_shape: tuple[int, int, int] | None,
         valid_conf_thr: float,
     ) -> None:
         self.adapter = YoloPoseAdapter(
             model_path=model_path,
             valid_conf_thr=valid_conf_thr,
             device=device,
+            imgsz=imgsz,
+            half=half,
+            warmup=adapter_warmup,
+            warmup_shape=warmup_shape,
         )
         self.enable_hands = bool(enable_hands)
         self.hand_landmarker: Any = None
@@ -232,6 +298,7 @@ class YoloPreviewAnnotator:
         self.detected_frames = 0
         self.body_core_full_valid_frames = 0
         self._body_core_rows: list[np.ndarray | None] = []
+        self.num_persons_per_frame: list[int] = []
         if self.enable_hands:
             import mediapipe as mp
 
@@ -257,7 +324,9 @@ class YoloPreviewAnnotator:
         self.yolo_raw_infer_latencies_sec.append(raw_sec)
         self.frames += 1
         meta = frame_result.meta or {}
-        if frame_result.pose33 is not None and int(meta.get("num_persons") or 0) > 0:
+        num_persons = int(meta.get("num_persons") or 0)
+        self.num_persons_per_frame.append(num_persons)
+        if frame_result.pose33 is not None and num_persons > 0:
             self.detected_frames += 1
         body_core = _body_core_xy_from_frame(frame_result, self.adapter.valid_conf_thr)
         if body_core is not None:
@@ -281,6 +350,7 @@ class YoloPreviewAnnotator:
         self.detected_frames = 0
         self.body_core_full_valid_frames = 0
         self._body_core_rows = []
+        self.num_persons_per_frame = []
         self.adapter.reset_tracker()
 
     def warmup_raw_infer(self, frame_bgr: np.ndarray) -> float:
@@ -302,6 +372,7 @@ class YoloPreviewAnnotator:
         full_valid_rate = (
             self.body_core_full_valid_frames / self.frames if self.frames > 0 else None
         )
+        gate = evaluate_multi_person_gate(self.num_persons_per_frame)
         return {
             "yolo_raw_infer_sec": round(self.yolo_raw_infer_sec, 4),
             "yolo_raw_infer_fps": (
@@ -316,11 +387,21 @@ class YoloPreviewAnnotator:
             "yolo_body_core_jitter_median": _round_or_none(
                 _body_core_jitter_median(self._body_core_rows)
             ),
+            "max_persons": max(self.num_persons_per_frame) if self.num_persons_per_frame else 0,
+            "multi_person_frames": int(sum(1 for n in self.num_persons_per_frame if n > 1)),
+            "review_required": bool(gate["review_required"]),
+            "gate_status": gate["gate_status"],
         }
 
 
 def _round_or_none(value: float | None, digits: int = 4) -> float | None:
     return None if value is None else round(float(value), digits)
+
+
+def _format_warmup_shape(shape: tuple[int, int, int] | None) -> str | None:
+    if shape is None:
+        return None
+    return "x".join(str(int(v)) for v in shape)
 
 
 def _percentile_ms(values_sec: tuple[float, ...] | list[float], pct: float) -> float | None:
@@ -400,6 +481,10 @@ def _empty_yolo_metrics() -> dict[str, Any]:
         "yolo_body_core_full_valid_rate": None,
         "yolo_body_core_missing_rate": None,
         "yolo_body_core_jitter_median": None,
+        "max_persons": None,
+        "multi_person_frames": None,
+        "review_required": None,
+        "gate_status": None,
     }
 
 
@@ -455,6 +540,10 @@ def _make_runner(
             models_dir=models_dir,
             device=case.device,
             enable_hands=case.enable_hands,
+            imgsz=case.imgsz,
+            half=case.half,
+            adapter_warmup=case.adapter_warmup,
+            warmup_shape=case.warmup_shape,
             valid_conf_thr=valid_conf_thr,
         )
     raise ValueError(f"Unsupported backend: {case.backend}")
@@ -524,6 +613,10 @@ def _skip_record(sample: Sample, case: BenchCase, reason: str) -> dict[str, Any]
         "hands": case.enable_hands,
         "device": case.device,
         "delegate": case.delegate,
+        "imgsz": case.imgsz,
+        "half": case.half,
+        "adapter_warmup": case.adapter_warmup,
+        "warmup_shape": _format_warmup_shape(case.warmup_shape),
         "status": "skipped",
         "error": reason,
     }
@@ -550,6 +643,10 @@ def bench_sample(
             "hands": case.enable_hands,
             "device": case.device,
             "delegate": case.delegate,
+            "imgsz": case.imgsz,
+            "half": case.half,
+            "adapter_warmup": case.adapter_warmup,
+            "warmup_shape": _format_warmup_shape(case.warmup_shape),
             "status": "error",
             "error": f"Cannot open video: {sample.path}",
         }
@@ -640,6 +737,10 @@ def bench_sample(
         "hands": case.enable_hands,
         "device": case.device,
         "delegate": case.delegate,
+        "imgsz": case.imgsz,
+        "half": case.half,
+        "adapter_warmup": case.adapter_warmup,
+        "warmup_shape": _format_warmup_shape(case.warmup_shape),
         "status": "ok",
         "expected_frames": sample.expected_frames,
         "init_sec": round(init_sec, 4),
@@ -656,6 +757,10 @@ def _write_csv(path: Path, records: list[dict[str, Any]]) -> None:
         "hands",
         "device",
         "delegate",
+        "imgsz",
+        "half",
+        "adapter_warmup",
+        "warmup_shape",
         "status",
         "frames",
         "warmup_frames",
@@ -678,6 +783,10 @@ def _write_csv(path: Path, records: list[dict[str, Any]]) -> None:
         "yolo_body_core_full_valid_rate",
         "yolo_body_core_missing_rate",
         "yolo_body_core_jitter_median",
+        "max_persons",
+        "multi_person_frames",
+        "review_required",
+        "gate_status",
         "error",
         "video",
     ]
@@ -732,6 +841,10 @@ def main(argv: list[str] | None = None) -> int:
                         "hands": case.enable_hands,
                         "device": case.device,
                         "delegate": case.delegate,
+                        "imgsz": case.imgsz,
+                        "half": case.half,
+                        "adapter_warmup": case.adapter_warmup,
+                        "warmup_shape": _format_warmup_shape(case.warmup_shape),
                         "status": "error",
                         "error": "video_missing",
                     }
@@ -765,6 +878,10 @@ def main(argv: list[str] | None = None) -> int:
                         "hands": case.enable_hands,
                         "device": case.device,
                         "delegate": case.delegate,
+                        "imgsz": case.imgsz,
+                        "half": case.half,
+                        "adapter_warmup": case.adapter_warmup,
+                        "warmup_shape": _format_warmup_shape(case.warmup_shape),
                         "status": "error",
                         "error": repr(exc),
                     }
