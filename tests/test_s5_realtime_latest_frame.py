@@ -173,6 +173,45 @@ def test_latest_frame_smoke_runs_with_fake_capture_and_pipeline(monkeypatch):
     assert pipeline_cfgs[0].running_mode == "video"
 
 
+def test_latest_frame_smoke_reraises_worker_failures(monkeypatch):
+    class FakeCap:
+        def isOpened(self) -> bool:
+            return True
+
+        def set(self, prop: int, value: float) -> None:
+            pass
+
+        def get(self, prop: int) -> float:
+            return 30.0
+
+        def read(self):
+            return True, np.zeros((8, 8, 3), dtype=np.uint8)
+
+        def release(self) -> None:
+            pass
+
+    class BrokenPipeline:
+        def __init__(self, *, models_dir, cfg) -> None:
+            raise ValueError("pipeline init failed")
+
+    monkeypatch.setattr(app_main, "_open_capture", lambda source: FakeCap())
+    monkeypatch.setattr(app_main, "models_dir", lambda: Path("models"))
+    monkeypatch.setattr(app_main, "MediaPipePipeline", BrokenPipeline)
+    monkeypatch.setattr(app_main.cv2, "destroyAllWindows", lambda: None)
+
+    try:
+        app_main.run_realtime_latest_frame_smoke(
+            "sample.mp4",
+            show=False,
+            limit_frames=1,
+        )
+    except RuntimeError as exc:
+        assert isinstance(exc.__cause__, ValueError)
+        assert str(exc.__cause__) == "pipeline init failed"
+    else:
+        raise AssertionError("worker failure should be re-raised")
+
+
 def test_default_run_and_ui_worker_are_not_replaced_by_latest_frame_path():
     main_tree = ast.parse(Path(app_main.__file__).read_text(encoding="utf-8"))
     run_func = next(

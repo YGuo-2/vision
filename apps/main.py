@@ -303,6 +303,7 @@ def run_realtime_latest_frame_smoke(
 
     frame_q = LatestFrameQueue()
     result_q: "Queue[tuple[int, object, list[str], float, float]]" = Queue(maxsize=1)
+    error_q: "Queue[BaseException]" = Queue()
     stop_evt = threading.Event()
     limit = None if limit_frames is None else max(0, int(limit_frames))
 
@@ -330,36 +331,44 @@ def run_realtime_latest_frame_smoke(
                 frame_q.put(LatestFrameItem(index=idx, frame=frame, captured_at=captured_at, timestamp_ms=ts))
                 counts["captured"] += 1
                 idx += 1
+        except BaseException as exc:  # noqa: BLE001
+            error_q.put(exc)
+            stop_evt.set()
         finally:
             capture_ended = time.monotonic()
             frame_q.close()
 
     def infer_loop() -> None:
         nonlocal infer_started, infer_ended
-        pipe = MediaPipePipeline(
-            models_dir=models_dir(),
-            cfg=PipelineConfig(
-                pose_variant=pose_variant,
-                running_mode="video",
-                enable_hands=enable_hands,
-            ),
-        )
-        infer_started = time.monotonic()
-        while not stop_evt.is_set():
-            item = frame_q.get_latest()
-            if item is None:
-                if frame_q.is_closed():
-                    break
-                time.sleep(0.001)
-                continue
-            annotated, actions = pipe.annotate(item.frame, timestamp_ms=item.timestamp_ms)
-            inferred_at = time.monotonic()
-            counts["processed"] += 1
-            try:
-                result_q.put((item.index, annotated, actions, item.captured_at, inferred_at), timeout=0.1)
-            except Exception:
-                pass
-        infer_ended = time.monotonic()
+        try:
+            pipe = MediaPipePipeline(
+                models_dir=models_dir(),
+                cfg=PipelineConfig(
+                    pose_variant=pose_variant,
+                    running_mode="video",
+                    enable_hands=enable_hands,
+                ),
+            )
+            infer_started = time.monotonic()
+            while not stop_evt.is_set():
+                item = frame_q.get_latest()
+                if item is None:
+                    if frame_q.is_closed():
+                        break
+                    time.sleep(0.001)
+                    continue
+                annotated, actions = pipe.annotate(item.frame, timestamp_ms=item.timestamp_ms)
+                inferred_at = time.monotonic()
+                counts["processed"] += 1
+                try:
+                    result_q.put((item.index, annotated, actions, item.captured_at, inferred_at), timeout=0.1)
+                except Exception:
+                    pass
+        except BaseException as exc:  # noqa: BLE001
+            error_q.put(exc)
+            stop_evt.set()
+        finally:
+            infer_ended = time.monotonic()
 
     t_capture = threading.Thread(target=capture_loop, daemon=True)
     t_infer = threading.Thread(target=infer_loop, daemon=True)
@@ -406,6 +415,9 @@ def run_realtime_latest_frame_smoke(
         t_infer.join(timeout=2.0)
         cap.release()
         cv2.destroyAllWindows()
+
+    if not error_q.empty():
+        raise RuntimeError("Latest-frame smoke worker failed") from error_q.get()
 
     infer_duration = 0.0 if infer_started is None or infer_ended is None else infer_ended - infer_started
     render_duration = 0.0 if render_started is None or render_ended is None else render_ended - render_started
