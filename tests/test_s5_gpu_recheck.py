@@ -97,8 +97,18 @@ def test_csv_schema_contains_gpu_recheck_metric_fields(tmp_path):
                 "sample_id": "s",
                 "case": "yolo_body_only",
                 "backend": "yolo",
+                "device": "cuda",
+                "delegate": "pytorch",
                 "status": "ok",
                 "frames": 1,
+                "warmup_frames": 10,
+                "timed_frames": 1,
+                "timed_latency_ms_p50": 10.0,
+                "timed_latency_ms_p90": 10.0,
+                "timed_latency_ms_p99": 10.0,
+                "yolo_raw_infer_latency_ms_p50": 8.0,
+                "yolo_raw_infer_latency_ms_p90": 8.0,
+                "yolo_raw_infer_latency_ms_p99": 8.0,
                 "yolo_raw_infer_fps": 99.0,
                 "yolo_miss_rate": 0.0,
                 "yolo_body_core_jitter_median": 0.01,
@@ -109,7 +119,191 @@ def test_csv_schema_contains_gpu_recheck_metric_fields(tmp_path):
     text = csv_path.read_text(encoding="utf-8-sig")
     assert "yolo_raw_infer_fps" in text
     assert "yolo_miss_rate" in text
+    assert "warmup_frames" in text
+    assert "timed_frames" in text
+    assert "timed_latency_ms_p50" in text
+    assert "yolo_raw_infer_latency_ms_p99" in text
     assert "yolo_body_core_jitter_median" in text
+
+
+def test_default_cases_keep_cpu_baseline_when_cuda_is_requested():
+    cases = {case.name: case for case in bench_annotate_fps._default_cases("cuda")}
+
+    assert cases["mediapipe_pose_only"].backend == "mediapipe"
+    assert cases["mediapipe_pose_only"].device == "cpu"
+    assert cases["mediapipe_pose_only"].delegate == "cpu"
+    assert not cases["mediapipe_pose_only"].requires_cuda
+
+    assert cases["yolo_cpu_body_only"].backend == "yolo"
+    assert cases["yolo_cpu_body_only"].device == "cpu"
+    assert cases["yolo_cpu_body_only"].delegate == "pytorch"
+    assert not cases["yolo_cpu_body_only"].requires_cuda
+
+    assert cases["yolo_body_only"].device == "cuda"
+    assert cases["yolo_body_only"].requires_cuda
+
+
+def test_timing_metrics_separate_warmup_and_timed_latency():
+    warmup = bench_annotate_fps.FrameLoopStats(
+        frames=2,
+        wall_sec=0.9,
+        wall_latencies_sec=(0.5, 0.4),
+        infer_latencies_sec=(0.3, 0.2),
+    )
+    timed = bench_annotate_fps.FrameLoopStats(
+        frames=3,
+        wall_sec=0.06,
+        wall_latencies_sec=(0.01, 0.02, 0.03),
+        infer_latencies_sec=(0.004, 0.006, 0.008),
+    )
+
+    metrics = bench_annotate_fps._timing_metrics(timed=timed, warmup=warmup)
+
+    assert metrics["frames"] == 3
+    assert metrics["timed_frames"] == 3
+    assert metrics["warmup_frames"] == 2
+    assert metrics["cold_first_infer_sec"] == 0.3
+    assert metrics["cold_first_annotate_sec"] == 0.5
+    assert metrics["annotate_fps"] == 50.0
+    assert metrics["timed_latency_ms_p50"] == 20.0
+    assert metrics["timed_latency_ms_p90"] == 28.0
+    assert metrics["yolo_raw_infer_latency_ms_p50"] == 6.0
+
+
+def test_bench_sample_yolo_warmup_is_reset_before_timed_metrics(tmp_path, monkeypatch):
+    video_path = tmp_path / "sample.mp4"
+    video_path.write_bytes(b"fake video")
+    sample = bench_annotate_fps.Sample("s", video_path, expected_frames=2)
+    calls: list[str] = []
+
+    class FakeCap:
+        def __init__(self, path: str) -> None:
+            self.path = path
+            self.index = 0
+
+        def isOpened(self) -> bool:
+            return True
+
+        def get(self, prop: int) -> float:
+            return 30.0
+
+        def read(self):
+            if self.index >= 2:
+                return False, None
+            self.index += 1
+            return True, object()
+
+        def release(self) -> None:
+            pass
+
+    class FakeYoloRunner:
+        last_yolo_raw_infer_sec: float | None = None
+
+        def __init__(self) -> None:
+            self.frames = 0
+            self.yolo_raw_infer_sec = 0.0
+            self.closed = False
+
+        def warmup_raw_infer(self, frame) -> float:
+            calls.append("warmup")
+            self.frames += 1
+            self.yolo_raw_infer_sec += 0.5
+            self.last_yolo_raw_infer_sec = 0.5
+            return 0.5
+
+        def reset_metrics(self) -> None:
+            calls.append("reset")
+            self.frames = 0
+            self.yolo_raw_infer_sec = 0.0
+            self.last_yolo_raw_infer_sec = None
+
+        def annotate(self, frame, *, timestamp_ms: int):
+            calls.append(f"timed:{timestamp_ms}")
+            self.frames += 1
+            self.yolo_raw_infer_sec += 0.01
+            self.last_yolo_raw_infer_sec = 0.01
+            return frame
+
+        def metrics(self) -> dict[str, float | None]:
+            calls.append("metrics")
+            return {
+                "yolo_raw_infer_sec": round(self.yolo_raw_infer_sec, 4),
+                "yolo_raw_infer_fps": round(self.frames / self.yolo_raw_infer_sec, 3),
+                "yolo_miss_rate": 0.0,
+                "yolo_body_core_full_valid_rate": 1.0,
+                "yolo_body_core_missing_rate": 0.0,
+                "yolo_body_core_jitter_median": 0.0,
+            }
+
+        def close(self) -> None:
+            self.closed = True
+
+    monkeypatch.setattr(bench_annotate_fps.cv2, "VideoCapture", FakeCap)
+    monkeypatch.setattr(bench_annotate_fps, "time", _FakeTime())
+    monkeypatch.setattr(
+        bench_annotate_fps,
+        "_make_runner",
+        lambda *args, **kwargs: FakeYoloRunner(),
+    )
+
+    record = bench_annotate_fps.bench_sample(
+        sample,
+        bench_annotate_fps.BenchCase("yolo_body_only", "yolo", False, "cuda", "pytorch"),
+        models_dir=tmp_path,
+        pose_variant="full",
+        yolo_model=tmp_path / "model.pt",
+        limit_frames=1,
+        warmup_frames=1,
+        valid_conf_thr=0.6,
+    )
+
+    assert calls == ["warmup", "reset", "timed:0", "metrics"]
+    assert record["status"] == "ok"
+    assert record["warmup_frames"] == 1
+    assert record["timed_frames"] == 1
+    assert record["cold_first_infer_sec"] == 0.5
+    assert record["yolo_raw_infer_sec"] == 0.01
+    assert record["yolo_raw_infer_fps"] == 100.0
+    assert record["yolo_raw_infer_latency_ms_p50"] == 10.0
+
+    json.dumps(
+        {
+            "status": "ok",
+            "records": [record],
+        },
+        ensure_ascii=False,
+    )
+    for field in (
+        "backend",
+        "device",
+        "delegate",
+        "warmup_frames",
+        "timed_frames",
+        "init_sec",
+        "cold_first_infer_sec",
+        "timed_latency_ms_p50",
+        "timed_latency_ms_p90",
+        "timed_latency_ms_p99",
+        "yolo_raw_infer_latency_ms_p50",
+        "yolo_raw_infer_latency_ms_p90",
+        "yolo_raw_infer_latency_ms_p99",
+        "yolo_raw_infer_fps",
+        "yolo_miss_rate",
+        "yolo_body_core_jitter_median",
+    ):
+        assert field in record
+
+
+class _FakeTime:
+    def __init__(self) -> None:
+        self.value = 0.0
+
+    def perf_counter(self) -> float:
+        self.value += 0.01
+        return self.value
+
+    def strftime(self, fmt: str) -> str:
+        return "2026-06-01 00:00:00"
 
 
 def _frame_with_shift(shift: float) -> FrameResult:

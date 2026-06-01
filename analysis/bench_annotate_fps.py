@@ -67,6 +67,16 @@ class BenchCase:
     backend: str
     enable_hands: bool
     device: str
+    delegate: str = "cpu"
+    requires_cuda: bool = False
+
+
+@dataclass(frozen=True)
+class FrameLoopStats:
+    frames: int
+    wall_sec: float
+    wall_latencies_sec: tuple[float, ...]
+    infer_latencies_sec: tuple[float, ...] = ()
 
 
 def collect_env() -> dict[str, Any]:
@@ -161,11 +171,40 @@ def load_samples(samples_json: Path, *, asset_root: Path | None = None) -> list[
 
 
 def _default_cases(device: str) -> list[BenchCase]:
+    device_norm = str(device).lower()
+    cuda_requested = device_norm.startswith("cuda") or device_norm.isdigit()
+    yolo_cases: list[BenchCase] = []
+    if cuda_requested:
+        yolo_cases.extend(
+            [
+                BenchCase("yolo_cpu_body_only", "yolo", False, "cpu", "pytorch"),
+                BenchCase("yolo_cpu_body_mp_hands", "yolo", True, "cpu", "pytorch"),
+            ]
+        )
+    yolo_cases.extend(
+        [
+            BenchCase(
+                "yolo_body_only",
+                "yolo",
+                False,
+                device,
+                "pytorch",
+                requires_cuda=cuda_requested,
+            ),
+            BenchCase(
+                "yolo_body_mp_hands",
+                "yolo",
+                True,
+                device,
+                "pytorch",
+                requires_cuda=cuda_requested,
+            ),
+        ]
+    )
     return [
-        BenchCase("mediapipe_pose_only", "mediapipe", False, "cpu"),
-        BenchCase("mediapipe_pose_hands", "mediapipe", True, "cpu"),
-        BenchCase("yolo_body_only", "yolo", False, device),
-        BenchCase("yolo_body_mp_hands", "yolo", True, device),
+        BenchCase("mediapipe_pose_only", "mediapipe", False, "cpu", "cpu"),
+        BenchCase("mediapipe_pose_hands", "mediapipe", True, "cpu", "cpu"),
+        *yolo_cases,
     ]
 
 
@@ -188,6 +227,8 @@ class YoloPreviewAnnotator:
         self.hand_landmarker: Any = None
         self.frames = 0
         self.yolo_raw_infer_sec = 0.0
+        self.yolo_raw_infer_latencies_sec: list[float] = []
+        self.last_yolo_raw_infer_sec: float | None = None
         self.detected_frames = 0
         self.body_core_full_valid_frames = 0
         self._body_core_rows: list[np.ndarray | None] = []
@@ -210,7 +251,10 @@ class YoloPreviewAnnotator:
         out = frame_bgr.copy()
         t_infer = time.perf_counter()
         frame_result = self.adapter.infer_frame(frame_bgr)
-        self.yolo_raw_infer_sec += time.perf_counter() - t_infer
+        raw_sec = time.perf_counter() - t_infer
+        self.last_yolo_raw_infer_sec = raw_sec
+        self.yolo_raw_infer_sec += raw_sec
+        self.yolo_raw_infer_latencies_sec.append(raw_sec)
         self.frames += 1
         meta = frame_result.meta or {}
         if frame_result.pose33 is not None and int(meta.get("num_persons") or 0) > 0:
@@ -228,6 +272,26 @@ class YoloPreviewAnnotator:
             hands = hand_res.hand_landmarks if getattr(hand_res, "hand_landmarks", None) else []
             MediaPipePipeline._draw_hands(out, hands, out.shape[1], out.shape[0])
         return out
+
+    def reset_metrics(self) -> None:
+        self.frames = 0
+        self.yolo_raw_infer_sec = 0.0
+        self.yolo_raw_infer_latencies_sec = []
+        self.last_yolo_raw_infer_sec = None
+        self.detected_frames = 0
+        self.body_core_full_valid_frames = 0
+        self._body_core_rows = []
+        self.adapter.reset_tracker()
+
+    def warmup_raw_infer(self, frame_bgr: np.ndarray) -> float:
+        t_infer = time.perf_counter()
+        self.adapter.infer_frame(frame_bgr)
+        raw_sec = time.perf_counter() - t_infer
+        self.last_yolo_raw_infer_sec = raw_sec
+        self.yolo_raw_infer_sec += raw_sec
+        self.yolo_raw_infer_latencies_sec.append(raw_sec)
+        self.frames += 1
+        return raw_sec
 
     def close(self) -> None:
         if self.hand_landmarker is not None:
@@ -257,6 +321,45 @@ class YoloPreviewAnnotator:
 
 def _round_or_none(value: float | None, digits: int = 4) -> float | None:
     return None if value is None else round(float(value), digits)
+
+
+def _percentile_ms(values_sec: tuple[float, ...] | list[float], pct: float) -> float | None:
+    if not values_sec:
+        return None
+    arr_ms = np.asarray(values_sec, dtype=np.float64) * 1000.0
+    return round(float(np.percentile(arr_ms, pct)), 3)
+
+
+def _latency_stats(prefix: str, values_sec: tuple[float, ...] | list[float]) -> dict[str, float | None]:
+    return {
+        f"{prefix}_p50": _percentile_ms(values_sec, 50),
+        f"{prefix}_p90": _percentile_ms(values_sec, 90),
+        f"{prefix}_p99": _percentile_ms(values_sec, 99),
+    }
+
+
+def _timing_metrics(
+    *,
+    timed: FrameLoopStats,
+    warmup: FrameLoopStats,
+) -> dict[str, Any]:
+    cold_first_infer = (
+        warmup.infer_latencies_sec[0]
+        if warmup.infer_latencies_sec
+        else (warmup.wall_latencies_sec[0] if warmup.wall_latencies_sec else None)
+    )
+    cold_first_annotate = warmup.wall_latencies_sec[0] if warmup.wall_latencies_sec else None
+    return {
+        "frames": timed.frames,
+        "warmup_frames": warmup.frames,
+        "timed_frames": timed.frames,
+        "cold_first_infer_sec": _round_or_none(cold_first_infer),
+        "cold_first_annotate_sec": _round_or_none(cold_first_annotate),
+        "annotate_wall_sec": round(timed.wall_sec, 4),
+        "annotate_fps": round(timed.frames / timed.wall_sec, 3) if timed.wall_sec > 0 else 0.0,
+        **_latency_stats("timed_latency_ms", timed.wall_latencies_sec),
+        **_latency_stats("yolo_raw_infer_latency_ms", timed.infer_latencies_sec),
+    }
 
 
 def _body_core_xy_from_frame(frame_result: FrameResult, valid_conf_thr: float) -> np.ndarray | None:
@@ -329,6 +432,103 @@ def _draw_yolo_body(out_bgr: np.ndarray, frame_result: FrameResult, valid_conf_t
         cv2.circle(out_bgr, (int(lm.x * w), int(lm.y * h)), 3, (0, 255, 0), -1, cv2.LINE_AA)
 
 
+def _make_runner(
+    case: BenchCase,
+    *,
+    models_dir: Path,
+    pose_variant: str,
+    yolo_model: Path,
+    valid_conf_thr: float,
+) -> Any:
+    if case.backend == "mediapipe":
+        return MediaPipePipeline(
+            models_dir=models_dir,
+            cfg=PipelineConfig(
+                pose_variant=pose_variant,
+                running_mode="video",
+                enable_hands=case.enable_hands,
+            ),
+        )
+    if case.backend == "yolo":
+        return YoloPreviewAnnotator(
+            model_path=yolo_model,
+            models_dir=models_dir,
+            device=case.device,
+            enable_hands=case.enable_hands,
+            valid_conf_thr=valid_conf_thr,
+        )
+    raise ValueError(f"Unsupported backend: {case.backend}")
+
+
+def _run_frame_loop(
+    *,
+    cap: cv2.VideoCapture,
+    runner: Any,
+    fps_for_ts: float,
+    frame_limit: int | None,
+) -> FrameLoopStats:
+    frames = 0
+    wall_latencies: list[float] = []
+    infer_latencies: list[float] = []
+    while True:
+        if frame_limit is not None and frames >= frame_limit:
+            break
+        ok, frame = cap.read()
+        if not ok:
+            break
+        timestamp_ms = int(frames * 1000.0 / max(1e-6, fps_for_ts))
+        start = time.perf_counter()
+        runner.annotate(frame, timestamp_ms=timestamp_ms)
+        wall_sec = time.perf_counter() - start
+        wall_latencies.append(wall_sec)
+        infer_sec = getattr(runner, "last_yolo_raw_infer_sec", None)
+        if infer_sec is not None:
+            infer_latencies.append(float(infer_sec))
+        frames += 1
+    return FrameLoopStats(
+        frames=frames,
+        wall_sec=float(sum(wall_latencies)),
+        wall_latencies_sec=tuple(wall_latencies),
+        infer_latencies_sec=tuple(infer_latencies),
+    )
+
+
+def _run_yolo_raw_warmup(
+    *,
+    cap: cv2.VideoCapture,
+    runner: YoloPreviewAnnotator,
+    frame_limit: int,
+) -> FrameLoopStats:
+    frames = 0
+    infer_latencies: list[float] = []
+    while frames < frame_limit:
+        ok, frame = cap.read()
+        if not ok:
+            break
+        infer_latencies.append(runner.warmup_raw_infer(frame))
+        frames += 1
+    return FrameLoopStats(
+        frames=frames,
+        wall_sec=float(sum(infer_latencies)),
+        wall_latencies_sec=(),
+        infer_latencies_sec=tuple(infer_latencies),
+    )
+
+
+def _skip_record(sample: Sample, case: BenchCase, reason: str) -> dict[str, Any]:
+    return {
+        "sample_id": sample.sample_id,
+        "video": str(sample.path),
+        "case": case.name,
+        "backend": case.backend,
+        "hands": case.enable_hands,
+        "device": case.device,
+        "delegate": case.delegate,
+        "status": "skipped",
+        "error": reason,
+    }
+
+
 def bench_sample(
     sample: Sample,
     case: BenchCase,
@@ -337,6 +537,7 @@ def bench_sample(
     pose_variant: str,
     yolo_model: Path,
     limit_frames: int | None,
+    warmup_frames: int,
     valid_conf_thr: float,
 ) -> dict[str, Any]:
     cap = cv2.VideoCapture(str(sample.path))
@@ -345,60 +546,91 @@ def bench_sample(
             "sample_id": sample.sample_id,
             "video": str(sample.path),
             "case": case.name,
+            "backend": case.backend,
+            "hands": case.enable_hands,
+            "device": case.device,
+            "delegate": case.delegate,
             "status": "error",
             "error": f"Cannot open video: {sample.path}",
         }
 
     src_fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
     fps_for_ts = src_fps if src_fps > 1e-3 else 30.0
+    cap.release()
 
-    init_start = time.perf_counter()
-    runner: Any
-    if case.backend == "mediapipe":
-        runner = MediaPipePipeline(
+    warmup_stats = FrameLoopStats(0, 0.0, ())
+    if warmup_frames > 0 and case.backend == "mediapipe":
+        warmup_cap = cv2.VideoCapture(str(sample.path))
+        if not warmup_cap.isOpened():
+            return _skip_record(sample, case, "warmup_video_open_failed")
+        warmup_runner = _make_runner(
+            case,
             models_dir=models_dir,
-            cfg=PipelineConfig(
-                pose_variant=pose_variant,
-                running_mode="video",
-                enable_hands=case.enable_hands,
-            ),
-        )
-    elif case.backend == "yolo":
-        runner = YoloPreviewAnnotator(
-            model_path=yolo_model,
-            models_dir=models_dir,
-            device=case.device,
-            enable_hands=case.enable_hands,
+            pose_variant=pose_variant,
+            yolo_model=yolo_model,
             valid_conf_thr=valid_conf_thr,
         )
-    else:
-        cap.release()
-        raise ValueError(f"Unsupported backend: {case.backend}")
+        try:
+            warmup_stats = _run_frame_loop(
+                cap=warmup_cap,
+                runner=warmup_runner,
+                fps_for_ts=fps_for_ts,
+                frame_limit=max(0, int(warmup_frames)),
+            )
+        finally:
+            warmup_cap.release()
+            if hasattr(warmup_runner, "close"):
+                warmup_runner.close()
+
+    init_start = time.perf_counter()
+    runner = _make_runner(
+        case,
+        models_dir=models_dir,
+        pose_variant=pose_variant,
+        yolo_model=yolo_model,
+        valid_conf_thr=valid_conf_thr,
+    )
     init_sec = time.perf_counter() - init_start
 
-    frames = 0
-    loop_sec = 0.0
+    if warmup_frames > 0 and case.backend == "yolo":
+        # Warm only YOLO inference on the same adapter so CUDA/model cold-start
+        # stays outside timed metrics, while MediaPipe Hands timestamps remain
+        # untouched before the formal VIDEO pass starts from 0.
+        warmup_cap = cv2.VideoCapture(str(sample.path))
+        if not warmup_cap.isOpened():
+            if hasattr(runner, "close"):
+                runner.close()
+            return _skip_record(sample, case, "warmup_video_open_failed")
+        try:
+            warmup_stats = _run_yolo_raw_warmup(
+                cap=warmup_cap,
+                runner=runner,
+                frame_limit=max(0, int(warmup_frames)),
+            )
+            runner.reset_metrics()
+        finally:
+            warmup_cap.release()
+
+    timed_cap = cv2.VideoCapture(str(sample.path))
+    if not timed_cap.isOpened():
+        if hasattr(runner, "close"):
+            runner.close()
+        return _skip_record(sample, case, "timed_video_open_failed")
+
     try:
-        while True:
-            if limit_frames is not None and frames >= limit_frames:
-                break
-            start = time.perf_counter()
-            ok, frame = cap.read()
-            if not ok:
-                break
-            timestamp_ms = int(frames * 1000.0 / max(1e-6, fps_for_ts))
-            if case.backend == "mediapipe":
-                runner.annotate(frame, timestamp_ms=timestamp_ms)
-            else:
-                runner.annotate(frame, timestamp_ms=timestamp_ms)
-            loop_sec += time.perf_counter() - start
-            frames += 1
+        timed_stats = _run_frame_loop(
+            cap=timed_cap,
+            runner=runner,
+            fps_for_ts=fps_for_ts,
+            frame_limit=limit_frames,
+        )
+        yolo_metrics = runner.metrics() if case.backend == "yolo" else _empty_yolo_metrics()
     finally:
-        cap.release()
+        timed_cap.release()
         if hasattr(runner, "close"):
             runner.close()
 
-    yolo_metrics = runner.metrics() if case.backend == "yolo" else _empty_yolo_metrics()
+    timing = _timing_metrics(timed=timed_stats, warmup=warmup_stats)
 
     return {
         "sample_id": sample.sample_id,
@@ -407,12 +639,11 @@ def bench_sample(
         "backend": case.backend,
         "hands": case.enable_hands,
         "device": case.device,
+        "delegate": case.delegate,
         "status": "ok",
-        "frames": frames,
         "expected_frames": sample.expected_frames,
         "init_sec": round(init_sec, 4),
-        "annotate_wall_sec": round(loop_sec, 4),
-        "annotate_fps": round(frames / loop_sec, 3) if loop_sec > 0 else 0.0,
+        **timing,
         **yolo_metrics,
     }
 
@@ -424,14 +655,25 @@ def _write_csv(path: Path, records: list[dict[str, Any]]) -> None:
         "backend",
         "hands",
         "device",
+        "delegate",
         "status",
         "frames",
+        "warmup_frames",
+        "timed_frames",
         "expected_frames",
         "init_sec",
+        "cold_first_infer_sec",
+        "cold_first_annotate_sec",
         "annotate_wall_sec",
         "annotate_fps",
+        "timed_latency_ms_p50",
+        "timed_latency_ms_p90",
+        "timed_latency_ms_p99",
         "yolo_raw_infer_sec",
         "yolo_raw_infer_fps",
+        "yolo_raw_infer_latency_ms_p50",
+        "yolo_raw_infer_latency_ms_p90",
+        "yolo_raw_infer_latency_ms_p99",
         "yolo_miss_rate",
         "yolo_body_core_full_valid_rate",
         "yolo_body_core_missing_rate",
@@ -456,6 +698,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--device", default="cuda", help="YOLO device, e.g. cuda, 0, cpu")
     parser.add_argument("--valid-conf-thr", type=float, default=DEFAULT_YOLO_VALID_CONF_THR)
     parser.add_argument("--limit-frames", type=int, default=None, help="Optional smoke-test frame cap per sample/case")
+    parser.add_argument("--warmup-frames", type=int, default=10, help="Warmup frames per sample/case, excluded from timed metrics")
     parser.add_argument("--out", default="outputs/gpu_recheck")
     parser.add_argument("--env-only", action="store_true", help="Write environment JSON and exit")
     args = parser.parse_args(argv)
@@ -476,25 +719,6 @@ def main(argv: list[str] | None = None) -> int:
     models_dir = Path(args.models_dir).resolve() if args.models_dir else repo_models_dir()
     yolo_model = Path(args.yolo_model).resolve() if args.yolo_model else models_dir / "yolo11n-pose.pt"
 
-    cuda_requested = str(args.device).lower().startswith("cuda") or str(args.device).isdigit()
-    if cuda_requested and not env.get("torch_cuda_available", False):
-        payload = {
-            "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "environment": env,
-            "status": "skipped",
-            "skip_reason": "torch_cuda_unavailable",
-            "requested_device": args.device,
-            "samples_total": len(samples),
-            "records": [],
-        }
-        json_path = out_dir / "annotate_fps_gpu_recheck.json"
-        csv_path = out_dir / "annotate_fps_gpu_recheck.csv"
-        json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        _write_csv(csv_path, [])
-        print("[bench] skipped: requested CUDA device but torch.cuda.is_available() is false")
-        print(f"[bench] written: {json_path}")
-        return 0
-
     records: list[dict[str, Any]] = []
     for sample in samples:
         if not sample.path.exists():
@@ -507,12 +731,16 @@ def main(argv: list[str] | None = None) -> int:
                         "backend": case.backend,
                         "hands": case.enable_hands,
                         "device": case.device,
+                        "delegate": case.delegate,
                         "status": "error",
                         "error": "video_missing",
                     }
                 )
             continue
         for case in _default_cases(args.device):
+            if case.requires_cuda and not env.get("torch_cuda_available", False):
+                records.append(_skip_record(sample, case, "torch_cuda_unavailable"))
+                continue
             print(f"[bench] {sample.sample_id} / {case.name}", flush=True)
             try:
                 records.append(
@@ -523,6 +751,7 @@ def main(argv: list[str] | None = None) -> int:
                         pose_variant=args.pose_variant,
                         yolo_model=yolo_model,
                         limit_frames=args.limit_frames,
+                        warmup_frames=max(0, int(args.warmup_frames)),
                         valid_conf_thr=args.valid_conf_thr,
                     )
                 )
@@ -535,6 +764,7 @@ def main(argv: list[str] | None = None) -> int:
                         "backend": case.backend,
                         "hands": case.enable_hands,
                         "device": case.device,
+                        "delegate": case.delegate,
                         "status": "error",
                         "error": repr(exc),
                     }
@@ -545,6 +775,7 @@ def main(argv: list[str] | None = None) -> int:
         "environment": env,
         "status": "ok",
         "requested_device": args.device,
+        "warmup_frames": int(args.warmup_frames),
         "samples_total": len(samples),
         "records": records,
     }

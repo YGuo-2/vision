@@ -121,6 +121,27 @@ E:\CodeProject\vision\.venv\Scripts\python.exe -m analysis.bench_annotate_fps `
 - `samples_total = 6`
 - 有效 GPU benchmark 样本覆盖 = 6/6
 
+### Issue #38 benchmark 口径修正
+
+Issue #38 对 benchmark harness 做的是**测量口径修正**，不是改变 #23 的历史 no-go 判定。
+修正后必须用新的 CSV/JSON 重新形成二次决策基线，旧的逐样本表继续作为 2026-06-01 CUDA
+修正版历史记录保留。
+
+新口径：
+
+- `--warmup-frames` 默认 10；warmup 帧不计入 `annotate_fps`、`timed_latency_ms_p50/p90/p99`
+  和 `yolo_raw_infer_latency_ms_p50/p90/p99`。
+- YOLO warmup 只调用同一个 `YoloPoseAdapter` 的原始推理，再重置 benchmark 指标与 tracker，
+  使 CUDA/model cold-start 留在 `cold_first_infer_sec`，不污染正式计时；Hands 的 VIDEO
+  时间戳仍在正式段从 0 开始。
+- MediaPipe warmup 使用独立 VIDEO runner 与独立 capture，正式段重新从 0 开始，避免
+  `detect_for_video()` 时间戳倒退。
+- `--device cuda` 时不再因 CUDA 不可用跳过整个任务；只跳过需要 CUDA 的 YOLO case，同时保留
+  `mediapipe_cpu` 和 `yolo_cpu` 基线行。
+- CSV/JSON 新增或固定字段：`backend`、`device`、`delegate`、`warmup_frames`、`timed_frames`、
+  `init_sec`、`cold_first_infer_sec`、`cold_first_annotate_sec`、
+  `timed_latency_ms_p50/p90/p99`、`yolo_raw_infer_latency_ms_p50/p90/p99`。
+
 ---
 
 ## 四、逐样本结果
