@@ -550,6 +550,28 @@ class SingleTargetTracker:
         return None
 
 
+def _device_supports_half(device: str) -> bool:
+    value = str(device).strip().lower()
+    if value in {"cpu", "mps"}:
+        return False
+    return value.startswith("cuda") or value.isdigit()
+
+
+def _normalize_warmup_shape(
+    warmup_shape: tuple[int, int] | tuple[int, int, int] | None,
+) -> tuple[int, int, int] | None:
+    if warmup_shape is None:
+        return None
+    shape = tuple(int(v) for v in warmup_shape)
+    if len(shape) == 2:
+        h, w = shape
+        return (max(1, h), max(1, w), 3)
+    if len(shape) == 3:
+        h, w, c = shape
+        return (max(1, h), max(1, w), max(1, c))
+    raise ValueError("warmup_shape must be (height, width) or (height, width, channels)")
+
+
 # --------------------------------------------------------------------------- #
 # YOLO adapter（懒加载 ultralytics）
 # --------------------------------------------------------------------------- #
@@ -576,6 +598,9 @@ class YoloPoseAdapter:
         confidence_kind: str = YOLO_CONFIDENCE_KIND,
         imgsz: int = 640,
         device: str = "cpu",
+        half: bool = False,
+        warmup: bool = False,
+        warmup_shape: tuple[int, int] | tuple[int, int, int] | None = None,
         max_missed: int = 5,
     ) -> None:
         if model_path is None:
@@ -587,6 +612,11 @@ class YoloPoseAdapter:
         self.confidence_kind = str(confidence_kind)
         self.imgsz = int(imgsz)
         self.device = str(device)
+        self.requested_half = bool(half)
+        self.half = bool(half) and _device_supports_half(self.device)
+        self.warmup = bool(warmup)
+        self.warmup_shape = _normalize_warmup_shape(warmup_shape)
+        self._warmup_done = False
         self._model: Any = None
         self._tracker = SingleTargetTracker(max_missed=max_missed)
         # 最近一帧检出人数（供调试 / Issue #9 闸门读取）。
@@ -608,10 +638,31 @@ class YoloPoseAdapter:
         self.last_num_persons = 0
 
     # -- 推理 -----------------------------------------------------------------
-    def _predict(self, frame: np.ndarray) -> Any:
+    def _predict_raw(self, frame: np.ndarray) -> Any:
         model = self._load()
-        results = model.predict(frame, imgsz=self.imgsz, device=self.device, verbose=False)
+        results = model.predict(
+            frame,
+            imgsz=self.imgsz,
+            device=self.device,
+            half=self.half,
+            verbose=False,
+        )
         return results[0] if results else None
+
+    def _ensure_warmup(self, frame: np.ndarray) -> None:
+        if not self.warmup or self._warmup_done:
+            return
+        if self.warmup_shape is None:
+            shape = tuple(int(v) for v in frame.shape[:3])
+        else:
+            shape = self.warmup_shape
+        dummy = np.zeros(shape, dtype=frame.dtype if hasattr(frame, "dtype") else np.uint8)
+        self._predict_raw(dummy)
+        self._warmup_done = True
+
+    def _predict(self, frame: np.ndarray) -> Any:
+        self._ensure_warmup(frame)
+        return self._predict_raw(frame)
 
     def infer_arrays(self, frame: np.ndarray) -> tuple[np.ndarray, np.ndarray, int, int | None]:
         """序列热路径：返回 numpy ``(row[33,4], valid[33], num_persons, track_id)``。
@@ -661,6 +712,9 @@ def extract_yolo_landmark_series(
     end_frame: int | None = None,
     imgsz: int = 640,
     device: str = "cpu",
+    half: bool = False,
+    warmup: bool = False,
+    warmup_shape: tuple[int, int] | tuple[int, int, int] | None = None,
     running_mode: str = "video",
 ) -> tuple[np.ndarray, np.ndarray, dict]:
     """提取 YOLO body-only 关键点序列。
@@ -690,6 +744,9 @@ def extract_yolo_landmark_series(
             valid_conf_thr=valid_conf_thr,
             imgsz=imgsz,
             device=device,
+            half=half,
+            warmup=warmup,
+            warmup_shape=warmup_shape,
         )
 
     # 段边界：tracker 状态不跨任务/段复用，每段开始处显式重置。
@@ -752,6 +809,12 @@ def extract_yolo_landmark_series(
         "backend": "yolo",
         "model_name": adapter.model_name,
         "running_mode": str(running_mode),
+        "imgsz": int(getattr(adapter, "imgsz", imgsz)),
+        "device": str(getattr(adapter, "device", device)),
+        "half": bool(getattr(adapter, "half", False)),
+        "requested_half": bool(getattr(adapter, "requested_half", False)),
+        "warmup": bool(getattr(adapter, "warmup", False)),
+        "warmup_shape": getattr(adapter, "warmup_shape", None),
         "confidence_kind": adapter.confidence_kind,
         "validity_policy": YOLO_VALIDITY_POLICY,
         # S3（#10）落库 valid_conf_thr=0.6，但未授权对外评分。

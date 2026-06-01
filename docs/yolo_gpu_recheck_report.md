@@ -142,6 +142,22 @@ Issue #38 对 benchmark harness 做的是**测量口径修正**，不是改变 #
   `init_sec`、`cold_first_infer_sec`、`cold_first_annotate_sec`、
   `timed_latency_ms_p50/p90/p99`、`yolo_raw_infer_latency_ms_p50/p90/p99`。
 
+### Issue #39 PyTorch FP16 / imgsz / adapter warmup 实验口径
+
+Issue #39 在 #38 口径上继续增加**显式 opt-in** 的 YOLO PyTorch 实验维度：
+
+- `YoloPoseAdapter` 默认仍为 `imgsz=640`、`device="cpu"`、`half=False`、`warmup=False`，
+  构造与 import 不触发 ultralytics 加载或推理。
+- GPU case 可显式开启 `half=True` 与 adapter 内部 warmup；CPU / MPS 请求 half 时自动降级为
+  `half=False`，避免误用 FP16。
+- `extract_yolo_landmark_series` 透传并记录 `imgsz`、`device`、`half`、`warmup`、
+  `warmup_shape`，避免只优化 benchmark。
+- benchmark 新增 `imgsz`、`half`、`adapter_warmup`、`max_persons`、
+  `warmup_shape`、`multi_person_frames`、`review_required`、`gate_status` 字段，用同一
+  CSV/JSON 同时观察性能、实验 warmup 尺寸与多人质量守卫。
+- `--device cuda` 时除 #38 的 FP32 baseline 外，额外跑 FP16 640 与 FP16 512 的 body-only /
+  body+hands case；这些 case 只用于二次决策，不打开 CLI/UI YOLO 实时入口，也不授权评分。
+
 ---
 
 ## 四、逐样本结果
