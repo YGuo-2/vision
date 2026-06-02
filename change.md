@@ -1,3 +1,53 @@
+## 2026-06-02: 完成 #44 离线 DTW / 序列提取 profile 与优化决策
+
+### 问题描述
+
+Issue #44 要求对 batch/offline 匹配链路做 profile，区分模型推理、特征归一化、DTW、
+多段匹配和视频 I/O 的耗时占比，再决定是否优化 DTW 或缓存。本 issue 明确要求先 profile
+后优化；若没有证据，不得修改 `subsequence_dtw`、baseline、阈值或评分输出。
+
+### 修改内容
+
+- `analysis/offline_matching_profile.py`：
+  - 新增独立 profile harness，不接入默认 CLI/UI 或生产评分路径。
+  - 支持 `--fixture-smoke` 使用 `tests/fixtures/pose33_v3` 与 golden harness 做无模型回放。
+  - 支持传入 `--front-template/--side-template/--video` 对真实本地视频做 staged profile。
+  - staged profile 会按双模板 metadata 选择与生产入口一致的 normalizer；本地
+    `templates/standard_front_full.npz` / `standard_side_full.npz` 为旧 v2 模板，因此真实视频
+    profile 明确记录 `normalizer_version=v2`。
+  - 对视频读取和 MediaPipe pipeline 初始化失败路径补齐资源释放，避免 profile 异常时遗留句柄。
+  - 输出 JSON/CSV，记录 `compare_video_to_dual_templates` 与 `match_body_core_template`
+    的分段耗时、summary 与决策表。
+- `docs/offline_matching_perf_profile.md`：
+  - 记录 fixture profile、本地 90 帧视频 profile、DTW/序列提取占比和决策表。
+  - 本地真实视频前 90 帧记录显示 MediaPipe Pose 推理 86.98%、视频读取 11.16%、
+    特征归一化 1.34%、view score 0.15%，DTW / fallback DTW 合计约 0.27%；全局
+    5 条 records 汇总的 `sequence_percent` 为 94.52%。
+  - 结论为本 PR 不改 DTW；若后续优化，优先另开 raw/feature cache issue。
+- `tests/test_s5_offline_profile.py`：
+  - 覆盖 fixture profile 写出 JSON/CSV、schema、stage 字段。
+  - 校验 staged profile 与生产函数 fixture 输出一致：`pose33_v3 combined_percent=38`、
+    `combined_score`、双视角分、匹配区间、match 数量，以及 `body_core_v1 score=0.8383146162`、
+    `avg_cost`、`start_frame`、`end_frame`。
+  - 覆盖双模板 metadata normalizer 选择，避免 staged profile 与生产入口使用不同归一化版本。
+  - 覆盖决策表对 FastDTW / cache 的方向判断。
+
+### 验证方法
+
+```powershell
+.\.venv\Scripts\python.exe -m py_compile .\analysis\offline_matching_profile.py .\tests\test_s5_offline_profile.py
+.\.venv\Scripts\python.exe -m pytest tests\test_s5_offline_profile.py -q
+.\.venv\Scripts\python.exe -m pytest tests\test_pose33_v3_golden.py tests\test_body_core_layout.py -q
+.\.venv\Scripts\python.exe -m pytest tests -q
+.\.venv\Scripts\python.exe -m analysis.offline_matching_profile --fixture-smoke --front-template templates\standard_front_full.npz --side-template templates\standard_side_full.npz --video "学员样本\1.mp4" --pose-variant full --limit-frames 90 --out outputs/offline_matching_profile_issue44
+git diff --check
+```
+
+结果：专项测试 4 passed，`pose33_v3` golden + body_core 回归 37 passed，全量 `tests` 196 passed；
+profile 命令写出 JSON/CSV，`git diff --check` 通过（仅 Windows 行尾提示）。
+
+---
+
 ## 2026-06-02: 完成 #43 MediaPipe GPU delegate opt-in 可行性 spike
 
 ### 问题描述
