@@ -170,6 +170,50 @@ def test_default_cases_keep_cpu_baseline_when_cuda_is_requested():
     assert cases["yolo_body_only_fp16_512"].warmup_shape == (512, 512, 3)
 
 
+def test_mediapipe_gpu_cases_are_explicit_opt_in():
+    default_cases = {case.name: case for case in bench_annotate_fps._default_cases("cuda")}
+    assert "mediapipe_gpu_pose_only" not in default_cases
+    assert "mediapipe_gpu_pose_hands" not in default_cases
+
+    gpu_cases = {
+        case.name: case
+        for case in bench_annotate_fps._default_cases("cuda", include_mediapipe_gpu=True)
+    }
+
+    assert gpu_cases["mediapipe_pose_only"].delegate == "cpu"
+    assert gpu_cases["mediapipe_pose_hands"].delegate == "cpu"
+    assert gpu_cases["mediapipe_gpu_pose_only"].backend == "mediapipe"
+    assert gpu_cases["mediapipe_gpu_pose_only"].device == "gpu"
+    assert gpu_cases["mediapipe_gpu_pose_only"].delegate == "gpu"
+    assert gpu_cases["mediapipe_gpu_pose_only"].enable_hands is False
+    assert gpu_cases["mediapipe_gpu_pose_hands"].delegate == "gpu"
+    assert gpu_cases["mediapipe_gpu_pose_hands"].enable_hands is True
+    assert not gpu_cases["mediapipe_gpu_pose_hands"].requires_cuda
+
+
+def test_mediapipe_runner_passes_delegate_to_pipeline(tmp_path, monkeypatch):
+    captured_cfgs = []
+
+    class FakePipeline:
+        def __init__(self, *, models_dir, cfg) -> None:
+            captured_cfgs.append(cfg)
+
+    monkeypatch.setattr(bench_annotate_fps, "MediaPipePipeline", FakePipeline)
+
+    runner = bench_annotate_fps._make_runner(
+        bench_annotate_fps.BenchCase("mediapipe_gpu_pose_only", "mediapipe", False, "gpu", "gpu"),
+        models_dir=tmp_path,
+        pose_variant="full",
+        yolo_model=tmp_path / "model.pt",
+        valid_conf_thr=0.6,
+    )
+
+    assert isinstance(runner, FakePipeline)
+    assert captured_cfgs
+    assert captured_cfgs[0].delegate == "gpu"
+    assert captured_cfgs[0].enable_hands is False
+
+
 def test_exported_yolo_model_delegate_is_inferred_from_suffix():
     assert bench_annotate_fps._infer_yolo_delegate(Path("yolo11n-pose.pt")) == "pytorch"
     assert bench_annotate_fps._infer_yolo_delegate(Path("yolo11n-pose.onnx")) == "onnxruntime"

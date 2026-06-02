@@ -174,6 +174,19 @@ def _ensure_file(url: str, path: Path) -> None:
     urllib.request.urlretrieve(url, path)  # nosec - official model asset
 
 
+def _base_options(model_path: Path, *, delegate: str) -> mp.tasks.BaseOptions:
+    delegate_norm = (delegate or "cpu").strip().lower()
+    if delegate_norm == "cpu":
+        return mp.tasks.BaseOptions(model_asset_path=str(model_path))
+    if delegate_norm == "gpu":
+        delegate_enum = getattr(mp.tasks.BaseOptions, "Delegate", None)
+        gpu_delegate = getattr(delegate_enum, "GPU", None) if delegate_enum is not None else None
+        if gpu_delegate is None:
+            raise RuntimeError("MediaPipe BaseOptions.Delegate.GPU is not available in this mediapipe build")
+        return mp.tasks.BaseOptions(model_asset_path=str(model_path), delegate=gpu_delegate)
+    raise ValueError(f"Unsupported MediaPipe delegate: {delegate!r} (use 'cpu' or 'gpu')")
+
+
 @dataclass(frozen=True)
 class PipelineConfig:
     pose_variant: str = "full"  # lite/full/heavy
@@ -182,6 +195,7 @@ class PipelineConfig:
     running_mode: str = "video"  # "video" (tracking) or "image" (per-frame, parallel-friendly)
     draw_pose_face: bool = False  # Disable by default to avoid visual confusion when hands are near the face.
     enable_hands: bool = True  # Set False for pose-only extraction (faster), e.g. template matching.
+    delegate: str = "cpu"  # Explicit opt-in only: "cpu" keeps the legacy BaseOptions path, "gpu" probes GPU delegate.
     min_pose_detection_confidence: float = 0.5
     min_pose_presence_confidence: float = 0.5
     min_pose_tracking_confidence: float = 0.5
@@ -212,29 +226,33 @@ class MediaPipePipeline:
         self.running_mode = mode
         mp_mode = mp.tasks.vision.RunningMode.VIDEO if mode == "video" else mp.tasks.vision.RunningMode.IMAGE
 
-        self.pose_landmarker = mp.tasks.vision.PoseLandmarker.create_from_options(
-            mp.tasks.vision.PoseLandmarkerOptions(
-                base_options=mp.tasks.BaseOptions(model_asset_path=str(pose_path)),
-                running_mode=mp_mode,
-                num_poses=cfg.num_poses,
-                min_pose_detection_confidence=cfg.min_pose_detection_confidence,
-                min_pose_presence_confidence=cfg.min_pose_presence_confidence,
-                min_tracking_confidence=cfg.min_pose_tracking_confidence,
-            )
-        )
-
+        self.pose_landmarker = None
         self.hand_landmarker = None
-        if cfg.enable_hands and hand_path is not None:
-            self.hand_landmarker = mp.tasks.vision.HandLandmarker.create_from_options(
-                mp.tasks.vision.HandLandmarkerOptions(
-                    base_options=mp.tasks.BaseOptions(model_asset_path=str(hand_path)),
+        try:
+            self.pose_landmarker = mp.tasks.vision.PoseLandmarker.create_from_options(
+                mp.tasks.vision.PoseLandmarkerOptions(
+                    base_options=_base_options(pose_path, delegate=cfg.delegate),
                     running_mode=mp_mode,
-                    num_hands=cfg.num_hands,
-                    min_hand_detection_confidence=cfg.min_hand_detection_confidence,
-                    min_hand_presence_confidence=cfg.min_hand_presence_confidence,
-                    min_tracking_confidence=cfg.min_hand_tracking_confidence,
+                    num_poses=cfg.num_poses,
+                    min_pose_detection_confidence=cfg.min_pose_detection_confidence,
+                    min_pose_presence_confidence=cfg.min_pose_presence_confidence,
+                    min_tracking_confidence=cfg.min_pose_tracking_confidence,
                 )
             )
+            if cfg.enable_hands and hand_path is not None:
+                self.hand_landmarker = mp.tasks.vision.HandLandmarker.create_from_options(
+                    mp.tasks.vision.HandLandmarkerOptions(
+                        base_options=_base_options(hand_path, delegate=cfg.delegate),
+                        running_mode=mp_mode,
+                        num_hands=cfg.num_hands,
+                        min_hand_detection_confidence=cfg.min_hand_detection_confidence,
+                        min_hand_presence_confidence=cfg.min_hand_presence_confidence,
+                        min_tracking_confidence=cfg.min_hand_tracking_confidence,
+                    )
+                )
+        except Exception:
+            self.close()
+            raise
 
         self._t0 = time.monotonic()
         self._frame_index = 0
@@ -278,6 +296,12 @@ class MediaPipePipeline:
         pose_landmarks = pose_res.pose_landmarks[0] if getattr(pose_res, "pose_landmarks", None) else None
         hands = hand_res.hand_landmarks if (hand_res is not None and getattr(hand_res, "hand_landmarks", None)) else []
         return pose_landmarks, hands
+
+    def close(self) -> None:
+        if self.pose_landmarker is not None:
+            self.pose_landmarker.close()
+        if self.hand_landmarker is not None:
+            self.hand_landmarker.close()
 
     @staticmethod
     def _draw_pose(out_bgr: np.ndarray, landmarks, w: int, h: int, *, draw_face: bool) -> None:
