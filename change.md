@@ -1,3 +1,56 @@
+## 2026-06-02: 完成 #43 MediaPipe GPU delegate opt-in 可行性 spike
+
+### 问题描述
+
+Issue #43 要求验证当前 Windows + MediaPipe Tasks 环境是否能启用 GPU delegate，并比较
+pose-only / pose+hands 的端到端表现。该阶段必须保持 MediaPipe 默认 CPU 路径不变，GPU delegate
+只能显式 opt-in；若不可用，需要记录实际异常和 fallback 口径。
+
+### 修改内容
+
+- `core/vision_pipeline.py`：
+  - `PipelineConfig` 新增 `delegate="cpu"` 字段，默认 CPU 保持旧 `BaseOptions(model_asset_path=...)`
+    构造方式。
+  - 新增 `_base_options()`，仅在显式 `delegate="gpu"` 时传入
+    `BaseOptions.Delegate.GPU`，并对未知 delegate / 缺失 GPU API 给出明确异常。
+  - `MediaPipePipeline` 新增 `close()`，便于 benchmark 多 case 释放 Pose / Hand landmarker。
+- `analysis/bench_annotate_fps.py`：
+  - 新增 `--include-mediapipe-gpu` 显式开关。
+  - benchmark 默认 case 不变；仅 opt-in 时增加 `mediapipe_gpu_pose_only` 与
+    `mediapipe_gpu_pose_hands`，并透传到 `PipelineConfig(delegate=...)`。
+- `docs/mediapipe_gpu_delegate_report.md`：
+  - 记录 MediaPipe API 探针、Pose / Hand GPU 初始化 smoke、短帧 CPU/GPU benchmark、fallback
+    语义与 go/no-go 结论。
+  - 本机 `mediapipe==0.10.31` 可初始化 GPU delegate，但 30 帧短测未证明 FPS 优于 CPU；
+    因此保留 opt-in，不切默认。
+- `tests/test_mediapipe_delegate_config.py` / `tests/test_s5_gpu_recheck.py`：
+  - 覆盖 CPU 默认不显式传 delegate、GPU opt-in 才传 `Delegate.GPU`。
+  - 覆盖 benchmark 默认不含 MediaPipe GPU case，显式开关才加入并透传。
+
+### 验证方法
+
+```powershell
+.\.venv\Scripts\python.exe -m py_compile .\core\vision_pipeline.py .\analysis\bench_annotate_fps.py .\tests\test_mediapipe_delegate_config.py .\tests\test_s5_gpu_recheck.py
+.\.venv\Scripts\python.exe -m pytest tests\test_mediapipe_delegate_config.py tests\test_s5_gpu_recheck.py -q
+$sample = @'
+{
+  "schema_version": 1,
+  "samples": [
+    {
+      "id": "std_front_short",
+      "path": "标准样本/正面.mp4",
+      "frames": 250
+    }
+  ]
+}
+'@
+$tmp = Join-Path $env:TEMP "vision_issue43_sample.json"
+Set-Content -Path $tmp -Value $sample -Encoding UTF8
+.\.venv\Scripts\python.exe -m analysis.bench_annotate_fps --samples $tmp --asset-root E:\CodeProject\vision --device cpu --include-mediapipe-gpu --limit-frames 30 --warmup-frames 5 --out outputs/mediapipe_gpu_delegate_issue43_smoke
+```
+
+---
+
 ## 2026-06-01: 完成 #42 latest-frame 实时解耦 smoke
 
 ### 问题描述

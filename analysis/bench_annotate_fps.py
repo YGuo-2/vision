@@ -197,7 +197,12 @@ def _infer_yolo_delegate(model_path: Path) -> str:
     return "pytorch"
 
 
-def _default_cases(device: str, *, yolo_delegate: str = "pytorch") -> list[BenchCase]:
+def _default_cases(
+    device: str,
+    *,
+    yolo_delegate: str = "pytorch",
+    include_mediapipe_gpu: bool = False,
+) -> list[BenchCase]:
     device_norm = str(device).lower()
     cuda_requested = device_norm.startswith("cuda") or device_norm.isdigit()
     delegate = str(yolo_delegate)
@@ -283,11 +288,18 @@ def _default_cases(device: str, *, yolo_delegate: str = "pytorch") -> list[Bench
                 ),
             ]
         )
-    return [
+    mediapipe_cases = [
         BenchCase("mediapipe_pose_only", "mediapipe", False, "cpu", "cpu"),
         BenchCase("mediapipe_pose_hands", "mediapipe", True, "cpu", "cpu"),
-        *yolo_cases,
     ]
+    if include_mediapipe_gpu:
+        mediapipe_cases.extend(
+            [
+                BenchCase("mediapipe_gpu_pose_only", "mediapipe", False, "gpu", "gpu"),
+                BenchCase("mediapipe_gpu_pose_hands", "mediapipe", True, "gpu", "gpu"),
+            ]
+        )
+    return [*mediapipe_cases, *yolo_cases]
 
 
 class YoloPreviewAnnotator:
@@ -556,6 +568,7 @@ def _make_runner(
                 pose_variant=pose_variant,
                 running_mode="video",
                 enable_hands=case.enable_hands,
+                delegate=case.delegate,
             ),
         )
     if case.backend == "yolo":
@@ -833,6 +846,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--valid-conf-thr", type=float, default=DEFAULT_YOLO_VALID_CONF_THR)
     parser.add_argument("--limit-frames", type=int, default=None, help="Optional smoke-test frame cap per sample/case")
     parser.add_argument("--warmup-frames", type=int, default=10, help="Warmup frames per sample/case, excluded from timed metrics")
+    parser.add_argument(
+        "--include-mediapipe-gpu",
+        action="store_true",
+        help="Opt-in MediaPipe BaseOptions.Delegate.GPU cases for P4 feasibility spikes",
+    )
     parser.add_argument("--out", default="outputs/gpu_recheck")
     parser.add_argument("--env-only", action="store_true", help="Write environment JSON and exit")
     args = parser.parse_args(argv)
@@ -853,11 +871,16 @@ def main(argv: list[str] | None = None) -> int:
     models_dir = Path(args.models_dir).resolve() if args.models_dir else repo_models_dir()
     yolo_model = Path(args.yolo_model).resolve() if args.yolo_model else models_dir / "yolo11n-pose.pt"
     yolo_delegate = str(args.yolo_delegate) if args.yolo_delegate else _infer_yolo_delegate(yolo_model)
+    bench_cases = _default_cases(
+        args.device,
+        yolo_delegate=yolo_delegate,
+        include_mediapipe_gpu=bool(args.include_mediapipe_gpu),
+    )
 
     records: list[dict[str, Any]] = []
     for sample in samples:
         if not sample.path.exists():
-            for case in _default_cases(args.device, yolo_delegate=yolo_delegate):
+            for case in bench_cases:
                 records.append(
                     {
                         "sample_id": sample.sample_id,
@@ -876,7 +899,7 @@ def main(argv: list[str] | None = None) -> int:
                     }
                 )
             continue
-        for case in _default_cases(args.device, yolo_delegate=yolo_delegate):
+        for case in bench_cases:
             if case.requires_cuda and not env.get("torch_cuda_available", False):
                 records.append(_skip_record(sample, case, "torch_cuda_unavailable"))
                 continue
@@ -918,6 +941,7 @@ def main(argv: list[str] | None = None) -> int:
         "environment": env,
         "status": "ok",
         "requested_device": args.device,
+        "include_mediapipe_gpu": bool(args.include_mediapipe_gpu),
         "warmup_frames": int(args.warmup_frames),
         "samples_total": len(samples),
         "records": records,
