@@ -27,6 +27,8 @@ import cv2
 
 from core.vision_pipeline import MediaPipePipeline, PipelineConfig
 from core.paths import models_dir
+from apps.camera_enum import open_camera
+from core.parallel_pose_engine import ParallelPoseEngine, default_pipeline_factory
 
 
 @dataclass(frozen=True)
@@ -87,9 +89,9 @@ class LatestFrameQueue:
 def _open_capture(source: str) -> cv2.VideoCapture:
     # If source is a digit, treat as camera index.
     if source.isdigit():
-        idx = int(source)
-        # CAP_DSHOW tends to start faster on Windows.
-        return cv2.VideoCapture(idx, cv2.CAP_DSHOW)
+        # open_camera negotiates a fast capture format (MSMF / MJPG) and sets
+        # the requested resolution; default CAP_DSHOW+YUY2 caps many webcams at ~10fps.
+        return open_camera(int(source))
     return cv2.VideoCapture(source)
 
 
@@ -294,9 +296,6 @@ def run_realtime_latest_frame_smoke(
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open source: {source}")
 
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-
     is_file = not source.isdigit()
     src_fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
     fps_for_ts = src_fps if (is_file and src_fps > 1e-3) else 30.0
@@ -446,9 +445,6 @@ def run(
         raise RuntimeError(f"Cannot open source: {source}")
 
     # Try to request a reasonable camera resolution; for files it is ignored.
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-
     src_fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
     is_file = not source.isdigit()
     fps_for_ts = src_fps if (is_file and src_fps > 1e-3) else 30.0
@@ -509,6 +505,97 @@ def run(
     cv2.destroyAllWindows()
 
 
+def run_realtime_parallel(
+    source: str,
+    *,
+    show: bool = True,
+    out_path: str | None = None,
+    pose_variant: str = "full",
+    enable_hands: bool = True,
+    workers: int = 4,
+) -> None:
+    """Realtime camera path that fans inference out across multiple IMAGE-mode pipelines.
+
+    Trade-off vs single-threaded VIDEO mode: much higher throughput on many-core CPUs
+    (a single VIDEO pipeline leaves most cores idle), at the cost of temporal
+    tracking/smoothing (skeleton is jITTERier). A bounded input queue drops the newest
+    frame when workers can't keep up, keeping end-to-end latency in check for live preview.
+    """
+    cap = _open_capture(source)
+    if not cap.isOpened():
+        raise RuntimeError(f"Cannot open source: {source}")
+
+    writer: cv2.VideoWriter | None = None
+    if out_path:
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 1280)
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 720)
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        writer = cv2.VideoWriter(out_path, fourcc, float(cap.get(cv2.CAP_PROP_FPS) or 0.0) or 30.0, (w, h))
+
+    engine = ParallelPoseEngine(
+        pipeline_factory=default_pipeline_factory(
+            models_dir=models_dir(), pose_variant=pose_variant, enable_hands=enable_hands
+        ),
+        workers=max(1, int(workers)),
+        drop_when_full=True,
+    )
+    engine.start()
+
+    stop_evt = threading.Event()
+
+    def reader() -> None:
+        try:
+            while not stop_evt.is_set():
+                ok, frame = cap.read()
+                if not ok:
+                    break
+                engine.submit(frame)
+        finally:
+            engine.signal_input_done()
+
+    t_reader = threading.Thread(target=reader, daemon=True)
+    t_reader.start()
+
+    t0 = time.monotonic()
+    rendered = 0
+    try:
+        while True:
+            res = engine.get(timeout=0.2)
+            if res is None:
+                if engine.is_drained():
+                    break
+                continue
+            annotated = res.annotated
+            h, w = annotated.shape[:2]
+            y = 30
+            for a in res.actions[:5]:
+                cv2.putText(annotated, a, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (20, 20, 240), 2, cv2.LINE_AA)
+                y += 30
+            rendered += 1
+            fps = rendered / max(1e-6, (time.monotonic() - t0))
+            cv2.putText(annotated, f"FPS: {fps:.1f} (x{workers})", (10, y + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1)
+            cv2.putText(annotated, "Press 'q' to quit", (10, h - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+
+            if writer is not None:
+                writer.write(annotated)
+            if show:
+                cv2.imshow("MediaPipe (Realtime Parallel)", annotated)
+                if (cv2.waitKey(1) & 0xFF) == ord("q"):
+                    break
+    finally:
+        stop_evt.set()
+        engine.close()
+        t_reader.join(timeout=2.0)
+        cap.release()
+        if writer is not None:
+            writer.release()
+        cv2.destroyAllWindows()
+
+    err = engine.take_error()
+    if err is not None:
+        raise RuntimeError("Realtime parallel inference worker failed") from err
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--source", default="0", help="Camera index like 0/1, or a video file path like demo.mp4")
@@ -526,7 +613,9 @@ def main() -> None:
         "--workers",
         type=int,
         default=1,
-        help="Offline video worker threads (>=1). For >1, uses per-frame IMAGE mode (better throughput, less temporal smoothing).",
+        help="Worker threads (>=1). For >1, uses per-frame IMAGE mode (better throughput on "
+        "many-core CPUs, less temporal smoothing). Works for both offline videos and live cameras; "
+        "the camera path drops frames under load to keep latency bounded.",
     )
     args = p.parse_args()
 
@@ -550,6 +639,17 @@ def main() -> None:
             cap=cap,
             out_path=args.out,
             show=not args.no_show,
+            pose_variant=args.pose,
+            enable_hands=not args.no_hands,
+            workers=max(1, int(args.workers)),
+        )
+    elif args.source.isdigit() and args.workers and args.workers > 1:
+        # Realtime camera with multi-core parallel inference (IMAGE mode, drops frames
+        # under load to keep latency bounded). Trades temporal smoothing for throughput.
+        run_realtime_parallel(
+            args.source,
+            show=not args.no_show,
+            out_path=args.out,
             pose_variant=args.pose,
             enable_hands=not args.no_hands,
             workers=max(1, int(args.workers)),

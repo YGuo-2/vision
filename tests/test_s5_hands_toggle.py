@@ -89,6 +89,8 @@ def test_ui_state_defaults_to_hands_enabled():
     app.enable_hands_var = _Var(True)
     app.save_var = _Var(False)
     app.out_var = _Var("")
+    app._source_state = app_ui.InputSourceState()
+    app._source_state.select_camera(0)
 
     state = app_ui.App._collect_state(app)
 
@@ -105,6 +107,8 @@ def test_ui_state_can_disable_hands():
     app.enable_hands_var = _Var(False)
     app.save_var = _Var(True)
     app.out_var = _Var("out.mp4")
+    app._source_state = app_ui.InputSourceState()
+    app._source_state.select_video("video.mp4")
 
     state = app_ui.App._collect_state(app)
 

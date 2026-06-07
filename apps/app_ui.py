@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from queue import Empty, Queue
-from tkinter import BooleanVar, DoubleVar, IntVar, Scrollbar, StringVar, Text, Tk, Toplevel, filedialog, messagebox, ttk
+from tkinter import BooleanVar, Canvas, DoubleVar, IntVar, Scrollbar, StringVar, Text, Tk, Toplevel, filedialog, messagebox, ttk
 
 import cv2
 import numpy as np
@@ -18,6 +19,10 @@ from core.action_compare import compare_video_to_template, create_template_from_
 from analysis.tech_eval import evaluate_video_assets, evaluate_video_detail, export_debug_video, to_jsonable
 from core.vision_pipeline import MediaPipePipeline, PipelineConfig
 from core.paths import models_dir, outputs_dir
+from core import model_manager
+from core.parallel_pose_engine import ParallelPoseEngine, default_pipeline_factory
+from core.recording_controller import RecordingController, RecordingState
+from apps.camera_enum import CameraEntry, InputSourceState, enumerate_cameras, open_camera
 
 
 ACTION_LABELS_ZH = {
@@ -27,6 +32,36 @@ ACTION_LABELS_ZH = {
     "RIGHT_HAND_UP": "右手举起",
     "SQUAT": "下蹲",
 }
+
+
+# Record_Toggle 三态按钮文本映射，供录制回调（任务 7.1/7.2/7.3）与 UI 重构（任务 9.x）复用。
+RECORD_BTN_TEXT = {
+    "idle": "开始录制",
+    "recording": "暂停录制",
+    "paused": "继续录制",
+}
+
+
+def clamp_workers(n: int) -> int:
+    """将离线线程数钳制到闭区间 [1, os.cpu_count()]。
+
+    - 小于 1 的输入钳制为 1
+    - 大于主机 CPU 逻辑核心数的输入钳制为核心数
+    - 当 ``os.cpu_count()`` 返回 None（无法确定核心数）时，上界回退为 1
+
+    Validates: Requirements 7.2
+    """
+    cpu = os.cpu_count()
+    upper = cpu if cpu and cpu >= 1 else 1
+    try:
+        value = int(n)
+    except (TypeError, ValueError):
+        value = 1
+    if value < 1:
+        return 1
+    if value > upper:
+        return upper
+    return value
 
 
 class CollapsibleSection:
@@ -992,13 +1027,270 @@ class UiState:
     out_path: str | None
 
 
+class SettingsWindow:
+    """设置窗口：模型管理（查看当前模型 / 下载缺失模型）。
+
+    本期仅提供 MediaPipe 模型下载。下载源为 Google 官方直链；若用户网络无法访问，
+    会在状态区提示自行解决网络问题（代理 / 加速等）。
+    """
+
+    def __init__(self, parent: Tk, *, current_pose: str = "full", hands_enabled: bool = True) -> None:
+        self._win = Toplevel(parent)
+        self._win.title("设置")
+        self._win.geometry("560x560")
+        self._win.minsize(520, 500)
+
+        # 主界面当前选择：用于在模型列表中标注「当前使用」并在顶部汇总展示。
+        self._current_pose = (current_pose or "full").strip().lower()
+        self._hands_enabled = bool(hands_enabled)
+        # 当前实际会用到的模型 key 集合（pose 选档 + 可选 hand）。
+        self._active_keys = {
+            {"lite": "pose_lite", "full": "pose_full", "heavy": "pose_heavy"}.get(
+                self._current_pose, "pose_full"
+            )
+        }
+        if self._hands_enabled:
+            self._active_keys.add("hand")
+
+        self.status_var = StringVar(value="就绪")
+        self.progress_text_var = StringVar(value="")
+        self.current_model_var = StringVar(value="")
+
+        # 每个模型一行的控件引用：key -> dict(state_var, btn)
+        self._rows: dict[str, dict] = {}
+
+        self._stop_evt = threading.Event()
+        self._worker: threading.Thread | None = None
+
+        self._build()
+        self._refresh_states()
+        self._win.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def is_open(self) -> bool:
+        return bool(self._win.winfo_exists())
+
+    def focus(self) -> None:
+        try:
+            self._win.deiconify()
+            self._win.lift()
+            self._win.focus_force()
+        except Exception:
+            pass
+
+    def _build(self) -> None:
+        outer = ttk.Frame(self._win, padding=12)
+        outer.pack(fill="both", expand=True)
+
+        # ===== 当前模型 =====
+        current_frame = ttk.Labelframe(outer, text="当前模型", padding=10)
+        current_frame.pack(fill="x")
+        ttk.Label(
+            current_frame,
+            textvariable=self.current_model_var,
+            wraplength=510,
+        ).pack(anchor="w")
+
+        # ===== 模型管理 =====
+        mp_frame = ttk.Labelframe(outer, text="MediaPipe 模型", padding=10)
+        mp_frame.pack(fill="x", pady=(12, 0))
+
+        ttk.Label(
+            mp_frame,
+            text="模型目录：" + str(models_dir()),
+            wraplength=500,
+        ).pack(anchor="w", pady=(0, 8))
+
+        for spec in model_manager.MEDIAPIPE_MODELS:
+            row = ttk.Frame(mp_frame)
+            row.pack(fill="x", pady=(4, 0))
+
+            name = ttk.Label(row, text=spec.label, width=34, anchor="w")
+            name.grid(row=0, column=0, sticky="w")
+
+            state_var = StringVar(value="检查中…")
+            state_lbl = ttk.Label(row, textvariable=state_var, width=14, anchor="w")
+            state_lbl.grid(row=0, column=1, sticky="w", padx=(8, 0))
+
+            btn = ttk.Button(
+                row, text="下载", width=8,
+                command=lambda s=spec: self._download(s),
+            )
+            btn.grid(row=0, column=2, sticky="e", padx=(8, 0))
+            row.columnconfigure(0, weight=1)
+
+            self._rows[spec.key] = {"spec": spec, "state_var": state_var, "btn": btn}
+
+        # 一键下载缺失模型
+        bulk_row = ttk.Frame(mp_frame)
+        bulk_row.pack(fill="x", pady=(12, 0))
+        self.download_all_btn = ttk.Button(
+            bulk_row, text="下载全部缺失模型", command=self._download_missing
+        )
+        self.download_all_btn.pack(side="left")
+        self.refresh_btn = ttk.Button(bulk_row, text="刷新状态", command=self._refresh_states)
+        self.refresh_btn.pack(side="left", padx=(8, 0))
+
+        # ===== 进度 / 状态 =====
+        status_frame = ttk.Labelframe(outer, text="状态", padding=10)
+        status_frame.pack(fill="both", expand=True, pady=(12, 0))
+
+        ttk.Label(status_frame, textvariable=self.status_var, wraplength=510).pack(anchor="w")
+        self.progress_bar = ttk.Progressbar(
+            status_frame, orient="horizontal", mode="determinate", maximum=100.0
+        )
+        self.progress_bar.pack(fill="x", pady=(8, 0))
+        ttk.Label(status_frame, textvariable=self.progress_text_var, wraplength=510).pack(
+            anchor="w", pady=(4, 0)
+        )
+        ttk.Label(
+            status_frame,
+            text="说明：模型从 Google 官方源下载。若长时间无进度或失败，通常是网络无法访问"
+            " storage.googleapis.com，请自行配置代理后重试。",
+            wraplength=510,
+            foreground="#666",
+        ).pack(anchor="w", pady=(10, 0))
+
+    def _busy(self) -> bool:
+        return self._worker is not None and self._worker.is_alive()
+
+    def _refresh_states(self) -> None:
+        """刷新每个模型的「已安装 / 未安装」状态显示，并标注当前使用的模型。"""
+        for key, info in self._rows.items():
+            spec = info["spec"]
+            active = key in self._active_keys
+            mark = "● 使用中  " if active else ""
+            if model_manager.is_installed(spec):
+                size = model_manager.installed_size_mb(spec)
+                info["state_var"].set(mark + (f"已安装 ({size} MB)" if size else "已安装"))
+                info["btn"].configure(text="重新下载")
+            else:
+                approx = f"约 {spec.approx_mb} MB" if spec.approx_mb else ""
+                info["state_var"].set((mark + f"未安装 {approx}").strip())
+                info["btn"].configure(text="下载")
+
+        self._refresh_current_summary()
+
+    def _refresh_current_summary(self) -> None:
+        """汇总当前主界面所选模型及其就绪情况，写入「当前模型」区。"""
+        parts: list[str] = []
+        missing: list[str] = []
+        for key in ("pose_lite", "pose_full", "pose_heavy", "hand"):
+            if key not in self._active_keys:
+                continue
+            info = self._rows.get(key)
+            if info is None:
+                continue
+            spec = info["spec"]
+            ready = model_manager.is_installed(spec)
+            parts.append(f"{spec.label}（{'已就绪' if ready else '缺失'}）")
+            if not ready:
+                missing.append(spec.label)
+        hands_txt = "开启" if self._hands_enabled else "关闭"
+        summary = f"姿态模型：{self._current_pose}　手部检测：{hands_txt}\n" + "\n".join(parts)
+        if missing:
+            summary += "\n\n⚠ 缺失模型会导致无法开始识别，请在下方下载后再使用。"
+        self.current_model_var.set(summary)
+
+    def _set_buttons_enabled(self, enabled: bool) -> None:
+        state = "normal" if enabled else "disabled"
+        for info in self._rows.values():
+            info["btn"].configure(state=state)
+        self.download_all_btn.configure(state=state)
+        self.refresh_btn.configure(state=state)
+
+    def _set_status(self, text: str) -> None:
+        self._win.after(0, lambda: self.status_var.set(text))
+
+    def _set_progress(self, downloaded: int, total: int | None) -> None:
+        def _set() -> None:
+            if total and total > 0:
+                pct = (downloaded / total) * 100.0
+                self.progress_bar.configure(mode="determinate", maximum=100.0)
+                self.progress_bar["value"] = pct
+                self.progress_text_var.set(
+                    f"{downloaded / 1024 / 1024:.1f} / {total / 1024 / 1024:.1f} MB（{pct:.0f}%）"
+                )
+            else:
+                self.progress_bar.configure(mode="determinate", maximum=100.0)
+                self.progress_bar["value"] = 0.0
+                self.progress_text_var.set(f"{downloaded / 1024 / 1024:.1f} MB…")
+
+        self._win.after(0, _set)
+
+    def _download(self, spec: "model_manager.ModelSpec") -> None:
+        self._start_download([spec])
+
+    def _download_missing(self) -> None:
+        missing = [info["spec"] for info in self._rows.values()
+                   if not model_manager.is_installed(info["spec"])]
+        if not missing:
+            messagebox.showinfo("模型管理", "所有模型均已安装。", parent=self._win)
+            return
+        self._start_download(missing)
+
+    def _start_download(self, specs: list) -> None:
+        if self._busy():
+            return
+        self._stop_evt.clear()
+        self._set_buttons_enabled(False)
+
+        def _run() -> None:
+            ok, failed = 0, []
+            try:
+                for spec in specs:
+                    if self._stop_evt.is_set():
+                        break
+                    self._set_status(f"正在下载：{spec.label} …")
+                    try:
+                        model_manager.download_model(
+                            spec,
+                            progress_cb=self._set_progress,
+                            should_stop=self._stop_evt.is_set,
+                        )
+                        ok += 1
+                        self._win.after(0, self._refresh_states)
+                    except InterruptedError:
+                        self._set_status("下载已取消。")
+                        return
+                    except Exception as e:  # noqa: BLE001
+                        failed.append((spec.label, str(e)))
+                if failed:
+                    detail = "\n".join(f"- {name}: {err}" for name, err in failed)
+                    self._set_status(f"完成 {ok} 个，{len(failed)} 个失败。")
+                    self._win.after(
+                        0,
+                        lambda: messagebox.showerror(
+                            "下载失败",
+                            "以下模型下载失败（多为网络无法访问 Google 源，请配置代理后重试）：\n\n"
+                            + detail,
+                            parent=self._win,
+                        ),
+                    )
+                else:
+                    self._set_status(f"全部完成，共下载 {ok} 个模型。")
+            finally:
+                self._win.after(0, self._refresh_states)
+                self._win.after(0, lambda: self._set_buttons_enabled(True))
+
+        self._worker = threading.Thread(target=_run, daemon=True)
+        self._worker.start()
+
+    def _on_close(self) -> None:
+        self._stop_evt.set()
+        self._win.destroy()
+
+
 class App:
     def __init__(self, root: Tk) -> None:
         self.root = root
         self.root.title("MediaPipe 动作识别（人体姿态 + 手部）")
         self.root.geometry("1100x720")
+        # 控制区改为可滚动容器后，限制窗口最小尺寸，保证滚动条与预览区可用（需求 1.5/1.6）。
+        self.root.minsize(800, 600)
 
-        self.source_var = StringVar(value="0")
+        self.source_var = StringVar(value="")
+        self.camera_choice_var = StringVar(value="")
+        self.source_hint_var = StringVar(value="当前输入源：未选择")
         self.pose_var = StringVar(value="full")
         self.workers_var = IntVar(value=2)
         self.enable_hands_var = BooleanVar(value=True)
@@ -1008,6 +1300,16 @@ class App:
         self.actions_var = StringVar(value="-")
         self.progress_var = DoubleVar(value=0.0)
         self.progress_text_var = StringVar(value="")
+        # 录制状态文本与 Result_Video 完整路径（需求 5.9/5.10）。对应的 Label 控件
+        # 由任务 9.3 在 _build_ui 中加入，此处先维护变量。
+        self.recording_status_var = StringVar(value="")
+        # 守卫标志：避免每 30ms 重复弹出同一录制错误对话框（需求 5.11）。
+        self._record_error_shown = False
+
+        # 输入源状态模型（camera / video / none 三态互斥）。
+        self._source_state = InputSourceState()
+        self._camera_entries: list[CameraEntry] = []
+        self._enum_busy = threading.Event()
 
         self._stop_evt = threading.Event()
         self._worker: threading.Thread | None = None
@@ -1015,10 +1317,19 @@ class App:
         self._photo: ImageTk.PhotoImage | None = None
         self._compare_win: CompareWindow | None = None
         self._tech_eval_win: TechEvalWindow | None = None
+        self._settings_win: SettingsWindow | None = None
+
+        # 录制/暂停运行时控制器（与 Tkinter 解耦的状态机）。使用模块默认的
+        # writer_factory（绑定 core.video_writer.open_video_writer）与默认
+        # path_provider（outputs_dir()/record_<timestamp>.mp4）。录制流程完全由
+        # 该控制器管理，不再依赖 UiState.save_output / out_path。
+        self._rec = RecordingController()
 
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._tick()
+        # 启动时后台枚举可用摄像头（需求 1.1）。
+        self._start_enumeration()
 
     def _build_ui(self) -> None:
         style = ttk.Style()
@@ -1033,61 +1344,159 @@ class App:
         outer.columnconfigure(1, weight=1)
         outer.rowconfigure(0, weight=1)
 
-        # Left: controls
-        left = ttk.Frame(outer)
-        left.grid(row=0, column=0, sticky="nsw", padx=(0, 12))
+        # Left: scrollable controls container（可滚动 Canvas + 垂直 Scrollbar + 内嵌 inner Frame，需求 1.5/1.6）。
+        # outer 列 0 固定宽度容器；列 1 预览区可伸展。
+        left_container = ttk.Frame(outer)
+        left_container.grid(row=0, column=0, sticky="ns", padx=(0, 12))
+        left_container.rowconfigure(0, weight=1)
 
-        card = ttk.Labelframe(left, text="输入", padding=10)
-        card.pack(fill="x", pady=(0, 10))
+        self.left_canvas = Canvas(left_container, width=360, highlightthickness=0, borderwidth=0)
+        self.left_canvas.grid(row=0, column=0, sticky="ns")
+        left_scroll = ttk.Scrollbar(left_container, orient="vertical", command=self.left_canvas.yview)
+        left_scroll.grid(row=0, column=1, sticky="ns")
+        self.left_canvas.configure(yscrollcommand=left_scroll.set)
 
-        ttk.Label(card, text="输入源（摄像头编号 或 视频文件路径）：").pack(anchor="w")
-        src_row = ttk.Frame(card)
-        src_row.pack(fill="x", pady=(6, 0))
-        self.source_entry = ttk.Entry(src_row, textvariable=self.source_var)
-        self.source_entry.pack(side="left", fill="x", expand=True)
-        ttk.Button(src_row, text="选择视频…", command=self._browse_video).pack(side="left", padx=(8, 0))
-
-        opts = ttk.Labelframe(left, text="选项", padding=10)
-        opts.pack(fill="x", pady=(0, 10))
-
-        ttk.Label(opts, text="人体姿态模型：").pack(anchor="w")
-        ttk.Combobox(opts, textvariable=self.pose_var, values=["lite", "full", "heavy"], state="readonly").pack(
-            fill="x", pady=(6, 0)
+        # 内嵌 inner Frame 作为所有控制卡片的父容器。
+        self.controls_inner = ttk.Frame(self.left_canvas)
+        self._controls_window = self.left_canvas.create_window(
+            (0, 0), window=self.controls_inner, anchor="nw"
         )
 
-        ttk.Label(opts, text="离线线程数（视频文件）：").pack(anchor="w", pady=(10, 0))
-        self.workers_spin = ttk.Spinbox(opts, from_=1, to=16, textvariable=self.workers_var, width=6)
+        # inner 内容尺寸变化时更新 scrollregion；同时让 inner 宽度跟随 canvas 宽度。
+        def _on_inner_configure(event: object) -> None:
+            self.left_canvas.configure(scrollregion=self.left_canvas.bbox("all"))
+
+        self.controls_inner.bind("<Configure>", _on_inner_configure)
+
+        def _on_canvas_configure(event: "Event") -> None:
+            self.left_canvas.itemconfigure(self._controls_window, width=event.width)
+
+        self.left_canvas.bind("<Configure>", _on_canvas_configure)
+
+        # 鼠标滚轮滚动（Windows: <MouseWheel> + event.delta）。指针进入控制区时绑定，离开时解绑。
+        def _on_mousewheel(event: "Event") -> None:
+            self.left_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        def _bind_mousewheel(event: object) -> None:
+            self.left_canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
+        def _unbind_mousewheel(event: object) -> None:
+            self.left_canvas.unbind_all("<MouseWheel>")
+
+        self.left_canvas.bind("<Enter>", _bind_mousewheel)
+        self.left_canvas.bind("<Leave>", _unbind_mousewheel)
+        self.controls_inner.bind("<Enter>", _bind_mousewheel)
+        self.controls_inner.bind("<Leave>", _unbind_mousewheel)
+
+        # 所有左侧控制卡片改为放入可滚动的 inner Frame。
+        left = self.controls_inner
+
+        # ===== Primary_Controls 分组（核心五项，固定顺序，需求 1.1/1.3）=====
+        # 自上而下恰好五项：Camera_Selector → Model_Selector → Start_Control
+        # → Record_Toggle → Compare_Control，相邻控件之间不插入任何 Secondary_Option。
+        primary = ttk.Labelframe(left, text="主要操作", padding=10)
+        primary.pack(fill="x", pady=(0, 10))
+
+        # 0) 顶部工具行：右上角「设置」按钮（模型管理等）。
+        top_row = ttk.Frame(primary)
+        top_row.pack(fill="x")
+        self.settings_btn = ttk.Button(top_row, text="⚙ 设置", width=8, command=self._open_settings)
+        self.settings_btn.pack(side="right")
+
+        # 1) Camera_Selector：摄像头下拉 + 刷新按钮（刷新为摄像头选择的附属操作，允许同行）。
+        ttk.Label(primary, text="选择摄像头：").pack(anchor="w")
+        cam_row = ttk.Frame(primary)
+        cam_row.pack(fill="x", pady=(6, 0))
+        self.camera_combo = ttk.Combobox(
+            cam_row, textvariable=self.camera_choice_var, state="readonly"
+        )
+        self.camera_combo.pack(side="left", fill="x", expand=True)
+        self.camera_combo.bind("<<ComboboxSelected>>", self._on_camera_selected)
+        self.refresh_btn = ttk.Button(cam_row, text="刷新", command=self._refresh_cameras)
+        self.refresh_btn.pack(side="left", padx=(8, 0))
+
+        # 2) Model_Selector：人体姿态模型下拉（绑定 self.model_combo，供运行态联动引用）。
+        ttk.Label(primary, text="人体姿态模型：").pack(anchor="w", pady=(10, 0))
+        self.model_combo = ttk.Combobox(
+            primary, textvariable=self.pose_var, values=["lite", "full", "heavy"], state="readonly"
+        )
+        self.model_combo.pack(fill="x", pady=(6, 0))
+
+        # 3) Start_Control：开始/停止（保留分离的 start/stop 双按钮与既有 _start/_stop 接线）。
+        start_row = ttk.Frame(primary)
+        start_row.pack(fill="x", pady=(10, 0))
+        self.start_btn = ttk.Button(start_row, text="开始", command=self._start)
+        self.start_btn.pack(side="left", fill="x", expand=True)
+        self.stop_btn = ttk.Button(start_row, text="停止", command=self._stop, state="disabled")
+        self.stop_btn.pack(side="left", fill="x", expand=True, padx=(8, 0))
+
+        # 4) Record_Controls：录制相关操作独立成组，与会话级 Start_Control（开始/停止）
+        #    在视觉上区分开。组内含两个动作（需求 5.x）：
+        #      - record_btn（三态切换）：开始录制 / 暂停录制 / 继续录制。
+        #      - record_stop_btn（结束录制）：结束当前录制片段并落盘，但不结束识别会话，
+        #        随后可在同一会话内再次「开始录制」生成新文件。
+        #    会话未运行时整组禁用（需求 5.1）。
+        record_group = ttk.Labelframe(primary, text="录制", padding=8)
+        record_group.pack(fill="x", pady=(10, 0))
+        self.record_btn = ttk.Button(
+            record_group, text=RECORD_BTN_TEXT["idle"], command=self._on_record_toggle, state="disabled"
+        )
+        self.record_btn.pack(fill="x")
+        self.record_stop_btn = ttk.Button(
+            record_group, text="结束录制", command=self._on_record_stop, state="disabled"
+        )
+        self.record_stop_btn.pack(fill="x", pady=(6, 0))
+
+        # 5) Compare_Control：动作比对（绑定 self.compare_btn，运行/未运行均保持 enabled）。
+        self.compare_btn = ttk.Button(primary, text="动作比对…", command=self._open_compare)
+        self.compare_btn.pack(fill="x", pady=(10, 0))
+
+        # ===== 可见分隔线：在 Primary_Controls 与 Secondary_Options 之间插入显式
+        # 水平分隔，强化主/次分区（需求 1.2）。布局测试可通过该属性定位。=====
+        self.primary_secondary_separator = ttk.Separator(left, orient="horizontal")
+        self.primary_secondary_separator.pack(fill="x", pady=8)
+
+        # ===== Secondary_Options 分组（次要选项，统一置于 Compare_Control 之后，
+        # 需求 1.4/7.1/7.2/7.3/7.4）。=====
+        secondary = ttk.Labelframe(left, text="次要选项", padding=10)
+        secondary.pack(fill="x", pady=(0, 10))
+
+        # 选择视频 + 输入源提示（需求 7.1）。
+        ttk.Button(secondary, text="选择视频…", command=self._browse_video).pack(anchor="w")
+        ttk.Label(secondary, textvariable=self.source_hint_var, wraplength=320).pack(
+            anchor="w", pady=(8, 0)
+        )
+
+        # 线程数（视频文件离线处理 / 摄像头实时并行；需求 7.2）。
+        ttk.Label(secondary, text="线程数（>1：多核并行，关闭时序平滑）：").pack(anchor="w", pady=(10, 0))
+        self.workers_spin = ttk.Spinbox(secondary, from_=1, to=16, textvariable=self.workers_var, width=6)
         self.workers_spin.pack(anchor="w", pady=(6, 0))
 
-        ttk.Checkbutton(opts, text="启用手部检测（V 手势 / 手部骨架）", variable=self.enable_hands_var).pack(
+        # 启用手部检测（需求 7.3）。
+        ttk.Checkbutton(secondary, text="启用手部检测（V 手势 / 手部骨架）", variable=self.enable_hands_var).pack(
             anchor="w", pady=(10, 0)
         )
 
-        ttk.Checkbutton(opts, text="导出结果视频", variable=self.save_var, command=self._toggle_out).pack(
+        # 导出结果视频 + 保存位置行（需求 7.4 附属）。
+        ttk.Checkbutton(secondary, text="导出结果视频", variable=self.save_var, command=self._toggle_out).pack(
             anchor="w", pady=(10, 0)
         )
-        out_row = ttk.Frame(opts)
+        out_row = ttk.Frame(secondary)
         out_row.pack(fill="x", pady=(6, 0))
         self.out_entry = ttk.Entry(out_row, textvariable=self.out_var, state="disabled")
         self.out_entry.pack(side="left", fill="x", expand=True)
         self.out_btn = ttk.Button(out_row, text="选择保存位置…", command=self._choose_out, state="disabled")
         self.out_btn.pack(side="left", padx=(8, 0))
 
-        runbox = ttk.Labelframe(left, text="运行", padding=10)
-        runbox.pack(fill="x", pady=(0, 10))
-        btn_row = ttk.Frame(runbox)
-        btn_row.pack(fill="x")
-        self.start_btn = ttk.Button(btn_row, text="开始", command=self._start)
-        self.start_btn.pack(side="left", fill="x", expand=True)
-        self.stop_btn = ttk.Button(btn_row, text="停止", command=self._stop, state="disabled")
-        self.stop_btn.pack(side="left", fill="x", expand=True, padx=(8, 0))
+        # 直拳检测（需求 7.4）。
+        ttk.Button(secondary, text="直拳检测…", command=self._open_tech_eval).pack(anchor="w", pady=(10, 0))
 
-        ttk.Button(runbox, text="动作比对…", command=self._open_compare).pack(fill="x", pady=(10, 0))
-        ttk.Button(runbox, text="直拳检测…", command=self._open_tech_eval).pack(fill="x", pady=(8, 0))
-
+        # ===== Status_Area（状态区，固定置于控制区底部，需求 7.6/7.7/7.8）。=====
         info = ttk.Labelframe(left, text="状态", padding=10)
         info.pack(fill="x")
         ttk.Label(info, textvariable=self.status_var, wraplength=320).pack(anchor="w")
+        # 录制状态文本与 Result_Video 完整路径（需求 5.9/5.10）。
+        ttk.Label(info, textvariable=self.recording_status_var, wraplength=320).pack(anchor="w", pady=(4, 0))
         ttk.Label(info, text="识别结果：").pack(anchor="w", pady=(8, 0))
         ttk.Label(info, textvariable=self.actions_var, wraplength=320).pack(anchor="w")
         ttk.Label(info, textvariable=self.progress_text_var, wraplength=320).pack(anchor="w", pady=(8, 0))
@@ -1108,13 +1517,35 @@ class App:
         if self._compare_win and self._compare_win.is_open():
             self._compare_win.focus()
             return
-        self._compare_win = CompareWindow(self.root)
+        # 比对窗口创建失败时弹框并保持主窗口状态不变（需求 6.3）：
+        # 不修改 self._compare_win（保留先前值/None），主窗口控件与录制状态均不受影响。
+        try:
+            win = CompareWindow(self.root)
+        except Exception as e:
+            messagebox.showerror("打开失败", f"动作比对窗口创建失败：{e}")
+            return
+        self._compare_win = win
 
     def _open_tech_eval(self) -> None:
         if self._tech_eval_win and self._tech_eval_win.is_open():
             self._tech_eval_win.focus()
             return
         self._tech_eval_win = TechEvalWindow(self.root)
+
+    def _open_settings(self) -> None:
+        if self._settings_win and self._settings_win.is_open():
+            self._settings_win.focus()
+            return
+        try:
+            win = SettingsWindow(
+                self.root,
+                current_pose=self.pose_var.get(),
+                hands_enabled=bool(self.enable_hands_var.get()),
+            )
+        except Exception as e:
+            messagebox.showerror("打开失败", f"设置窗口创建失败：{e}")
+            return
+        self._settings_win = win
 
     def _toggle_out(self) -> None:
         enabled = bool(self.save_var.get())
@@ -1123,13 +1554,279 @@ class App:
         if not enabled:
             self.out_var.set("")
 
+    def _on_record_toggle(self) -> None:
+        """Record_Toggle 点击回调：请求录制状态机切换，并据返回状态刷新按钮文本。
+
+        idle→开始录制、recording→暂停录制、paused→继续录制（见 RECORD_BTN_TEXT）。
+        Record_Toggle 控件由任务 9.2 在 _build_ui 中创建并绑定到 self.record_btn；
+        此处对其存在性做保护，使方法在控件尚未创建时仍可安全调用。
+        """
+        new_state = self._rec.request_toggle()
+        record_btn = getattr(self, "record_btn", None)
+        if record_btn is not None:
+            record_btn.configure(text=RECORD_BTN_TEXT[new_state])
+        # 「结束录制」仅在存在录制片段（recording/paused）时可用。
+        self._sync_record_stop_enabled(new_state)
+
+    def _on_record_stop(self) -> None:
+        """「结束录制」点击回调：结束当前录制片段并落盘，但不结束识别会话。
+
+        调用控制器 ``stop_recording()`` 复位为 idle（保持会话运行），随后把切换按钮
+        文本复位为「开始录制」、禁用「结束录制」，使用户可在同一会话内重新开始录制。
+        """
+        self._rec.stop_recording()
+        record_btn = getattr(self, "record_btn", None)
+        if record_btn is not None:
+            record_btn.configure(text=RECORD_BTN_TEXT["idle"])
+        self._sync_record_stop_enabled("idle")
+
+    def _sync_record_stop_enabled(self, state: RecordingState) -> None:
+        """根据录制状态联动「结束录制」按钮的可用性：recording/paused 启用，idle 禁用。"""
+        record_stop_btn = getattr(self, "record_stop_btn", None)
+        if record_stop_btn is not None:
+            try:
+                record_stop_btn.configure(
+                    state="normal" if state in ("recording", "paused") else "disabled"
+                )
+            except Exception:
+                pass
+
+    def _refresh_recording_status(self) -> None:
+        """周期性（由 _tick 每 tick 调用）刷新录制状态文本与错误提示。
+
+        - recording/paused：在 recording_status_var 显示状态文本与 Result_Video
+          的完整保存路径（需求 5.9）。
+        - idle：清除录制状态文本与路径（需求 5.10）。
+        - last_error 非空：弹出包含失败原因的错误提示、复位录制按钮文本到
+          「开始录制」、清除录制文本（需求 5.11）。用 _record_error_shown 守卫，
+          避免每 30ms 重复弹框。
+        """
+        snap = self._rec.snapshot()
+
+        if snap.last_error is not None:
+            if not self._record_error_shown:
+                self._record_error_shown = True
+                record_btn = getattr(self, "record_btn", None)
+                if record_btn is not None:
+                    record_btn.configure(text=RECORD_BTN_TEXT["idle"])
+                self._sync_record_stop_enabled("idle")
+                self.recording_status_var.set("")
+                messagebox.showerror("录制失败", f"录制发生错误：{snap.last_error}")
+            return
+
+        # 无错误：复位守卫，下次错误可再次提示。
+        self._record_error_shown = False
+
+        if snap.state in ("recording", "paused"):
+            path_text = str(snap.result_path) if snap.result_path is not None else "（准备中）"
+            label = "录制中" if snap.state == "recording" else "已暂停"
+            self.recording_status_var.set(f"{label}：{path_text}")
+        else:  # idle
+            self.recording_status_var.set("")
+        # 「结束录制」按钮可用性跟随真实状态联动（覆盖 worker 端错误复位等情形）。
+        self._sync_record_stop_enabled(snap.state)
+
+    def _set_running_controls(self, running: bool) -> None:
+        """集中管理运行态控件的 enable/disable 与文本联动（需求 2.5、3.5、3.6、4.3、4.5、5.1、5.2、6.4、6.5）。
+
+        运行中（running=True）：
+          - 禁用 Camera_Selector（需求 2.5）与刷新控件（经 _set_refresh_enabled）。
+          - 禁用 Model_Selector（需求 3.5）。
+          - 启用 Record_Toggle 并置文本「开始录制」（需求 5.2）。
+          - Start_Control 切换为「停止」语义：兼容现有分离的 start/stop 双按钮——禁用
+            start_btn、启用 stop_btn，并将 start_btn 文本置为「停止」（需求 4.3）。
+        未运行（running=False）：
+          - 恢复 Camera_Selector 为 readonly（仅当存在可选摄像头列表时）与刷新控件。
+          - 恢复 Model_Selector 为 readonly（需求 3.6）。
+          - 禁用 Record_Toggle（需求 5.1）；录制状态由 worker 的 close_session 复位为 idle，
+            此处不调用控制器方法以免误触发。
+          - Start_Control 恢复为「开始」：启用 start_btn、禁用 stop_btn。
+          - Status_Area 显示「就绪」（需求 4.5）。
+        Compare_Control 始终保持 enabled（需求 6.4、6.5）。
+
+        record_btn / model_combo / compare_btn 由任务 9.x 在 _build_ui 中创建，此处用
+        getattr 守卫，保证在它们尚未创建时方法仍可安全调用。
+        """
+        # Camera_Selector：运行中禁用；未运行时仅当有可选摄像头列表才恢复 readonly。
+        camera_combo = getattr(self, "camera_combo", None)
+        if camera_combo is not None:
+            try:
+                if running:
+                    camera_combo.configure(state="disabled")
+                elif self._camera_entries:
+                    camera_combo.configure(state="readonly")
+            except Exception:
+                pass
+
+        # 刷新控件：复用既有联动（枚举中 / 运行中禁用）。
+        self._set_refresh_enabled()
+
+        # Model_Selector：运行中禁用、未运行恢复 readonly。
+        model_combo = getattr(self, "model_combo", None)
+        if model_combo is not None:
+            try:
+                model_combo.configure(state="disabled" if running else "readonly")
+            except Exception:
+                pass
+
+        # Record_Toggle：运行中启用并置「开始录制」；未运行禁用。
+        record_btn = getattr(self, "record_btn", None)
+        if record_btn is not None:
+            try:
+                if running:
+                    record_btn.configure(state="normal", text=RECORD_BTN_TEXT["idle"])
+                else:
+                    record_btn.configure(state="disabled")
+            except Exception:
+                pass
+
+        # 「结束录制」：会话开始时尚无录制片段，故初始禁用；未运行同样禁用。
+        # 录制开始后由 _on_record_toggle / _refresh_recording_status 联动启用。
+        self._sync_record_stop_enabled("idle")
+
+        # Compare_Control：始终 enabled。
+        compare_btn = getattr(self, "compare_btn", None)
+        if compare_btn is not None:
+            try:
+                compare_btn.configure(state="normal")
+            except Exception:
+                pass
+
+        # Start_Control / stop_btn：兼容现有分离双按钮的同时切换 start_btn 文本。
+        start_btn = getattr(self, "start_btn", None)
+        if start_btn is not None:
+            try:
+                if running:
+                    start_btn.configure(state="disabled", text="停止")
+                else:
+                    start_btn.configure(state="normal", text="开始")
+            except Exception:
+                pass
+        stop_btn = getattr(self, "stop_btn", None)
+        if stop_btn is not None:
+            try:
+                stop_btn.configure(state="normal" if running else "disabled")
+            except Exception:
+                pass
+
+        # Status_Area：未运行显示「就绪」（需求 4.5）。
+        if not running:
+            self.status_var.set("就绪")
+
     def _browse_video(self) -> None:
         p = filedialog.askopenfilename(
             title="选择视频文件",
             filetypes=[("视频文件", "*.mp4;*.avi;*.mov;*.mkv"), ("所有文件", "*.*")],
         )
-        if p:
-            self.source_var.set(p)
+        # 取消：保持当前输入源不变（需求 3.6）。
+        if not p:
+            return
+        # 校验文件存在且可打开；任一校验失败均提前返回，
+        # 不修改 self._source_state，从而保留先前的输入源选择（需求 7.5、3.7、4.5）。
+        if not Path(p).exists():
+            messagebox.showerror("视频文件无效", f"文件不存在，已保留先前的输入源选择：{p}")
+            return
+        cap = cv2.VideoCapture(p)
+        opened = cap.isOpened()
+        cap.release()
+        if not opened:
+            messagebox.showerror("视频文件无效", f"无法打开该视频文件，已保留先前的输入源选择：{p}")
+            return
+        # 切换到视频输入源，清除摄像头选中（需求 3.4）。
+        self._source_state.select_video(p)
+        self.source_var.set(p)
+        self.camera_combo.set("")
+        self.source_hint_var.set(self._source_state.hint_text())
+
+    # ---- 摄像头枚举与选择 ----
+
+    def _set_refresh_enabled(self) -> None:
+        """仅当非枚举中且采集未运行时启用刷新控件（需求 5.3、5.7）。"""
+        running = bool(self._worker and self._worker.is_alive())
+        enabled = (not self._enum_busy.is_set()) and (not running)
+        try:
+            self.refresh_btn.configure(state="normal" if enabled else "disabled")
+        except Exception:
+            pass
+
+    def _start_enumeration(self) -> None:
+        """在后台线程枚举可用摄像头，结果经 root.after 回写 UI（需求 1.1、5.2）。"""
+        if self._enum_busy.is_set():
+            return
+        self._enum_busy.set()
+        self._set_refresh_enabled()
+        self.camera_combo.configure(state="disabled")
+        self.camera_choice_var.set("正在检测摄像头…")
+
+        def _run() -> None:
+            ok = True
+            entries: list[CameraEntry] = []
+            try:
+                entries = enumerate_cameras()
+            except Exception:
+                ok = False
+            self.root.after(0, lambda: self._apply_camera_entries(entries, ok))
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _apply_camera_entries(self, entries: list[CameraEntry], ok: bool) -> None:
+        """枚举回调（主线程）：重建下拉项并更新输入源状态。
+
+        需求 1.8、2.2、2.5、2.6、5.4、5.5、5.6。
+        """
+        try:
+            if not ok:
+                # 探测失败/超时：保留刷新前的列表与下拉项不变（需求 5.6）。
+                self.status_var.set("刷新摄像头失败，已保留原有列表。")
+                if self._camera_entries:
+                    self.camera_combo.configure(state="readonly")
+                return
+
+            self._camera_entries = list(entries)
+            if not entries:
+                # 空列表：禁用下拉并提示，不记录输入源（需求 1.8、2.6、5.5）。
+                self.camera_combo.configure(values=[], state="disabled")
+                self.camera_choice_var.set("")
+                self.source_hint_var.set("未检测到可用摄像头")
+                if self._source_state.kind == "camera":
+                    self._source_state.clear()
+                    self.source_var.set("")
+                return
+
+            labels = [e.label for e in entries]
+            self.camera_combo.configure(values=labels, state="readonly")
+            # 若当前已选视频，则不抢占输入源，仅刷新下拉可选项。
+            if self._source_state.kind == "video":
+                return
+            # 保留已选摄像头（若仍在列表中），否则默认选第一项（需求 2.5）。
+            current = self.camera_choice_var.get()
+            if current not in labels:
+                current = labels[0]
+            self.camera_choice_var.set(current)
+            self._select_camera_by_label(current)
+        finally:
+            self._enum_busy.clear()
+            self._set_refresh_enabled()
+
+    def _select_camera_by_label(self, label: str) -> None:
+        """由显示文本反查编号并记录为摄像头输入源（需求 2.3、3.3）。"""
+        for e in self._camera_entries:
+            if e.label == label:
+                self._source_state.select_camera(e.index)
+                self.source_var.set(str(e.index))
+                self.source_hint_var.set(self._source_state.hint_text())
+                return
+
+    def _on_camera_selected(self, event=None) -> None:
+        self._select_camera_by_label(self.camera_choice_var.get())
+
+    def _refresh_cameras(self) -> None:
+        """刷新可用摄像头列表（需求 5.1、5.3、5.7）。"""
+        if self._worker and self._worker.is_alive():
+            return
+        if self._enum_busy.is_set():
+            return
+        self._start_enumeration()
 
     def _choose_out(self) -> None:
         p = filedialog.asksaveasfilename(
@@ -1141,13 +1838,14 @@ class App:
             self.out_var.set(p)
 
     def _collect_state(self) -> UiState:
+        # 无有效输入源：使用统一提示文案（需求 4.2）。
+        if self._source_state.kind == "none":
+            raise ValueError("请先选择摄像头或视频")
         source = self.source_var.get().strip()
         if not source:
-            raise ValueError("请输入摄像头编号（例如 0）或选择一个视频文件。")
+            raise ValueError("请先选择摄像头或视频")
 
-        workers = int(self.workers_var.get() or 1)
-        if workers < 1:
-            workers = 1
+        workers = clamp_workers(self.workers_var.get() or 1)
 
         out_path = None
         if self.save_var.get():
@@ -1177,6 +1875,7 @@ class App:
         self._stop_evt.clear()
         self.start_btn.configure(state="disabled")
         self.stop_btn.configure(state="normal")
+        self._set_refresh_enabled()
         self.status_var.set("启动中…（首次运行可能需要下载模型）")
         self.actions_var.set("-")
         self.progress_var.set(0.0)
@@ -1185,6 +1884,8 @@ class App:
 
         self._worker = threading.Thread(target=self._worker_loop, args=(state,), daemon=True)
         self._worker.start()
+        # 集中刷新运行态控件（禁用 Camera/Model_Selector、启用 Record_Toggle 等，需求 4.3 等）。
+        self._set_running_controls(True)
 
     def _stop(self) -> None:
         self._stop_evt.set()
@@ -1200,7 +1901,7 @@ class App:
         is_file = not source.isdigit()
 
         if source.isdigit():
-            cap = cv2.VideoCapture(int(source), cv2.CAP_DSHOW)
+            cap = open_camera(int(source))
         else:
             cap = cv2.VideoCapture(source)
 
@@ -1213,98 +1914,99 @@ class App:
         fps_for_ts = src_fps if (is_file and src_fps > 1e-3) else 30.0
         total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0) if is_file else 0
 
-        writer: cv2.VideoWriter | None = None
-        if state.out_path:
-            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 1280)
-            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 720)
-            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-            writer = cv2.VideoWriter(state.out_path, fourcc, fps_for_ts, (w, h))
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 1280)
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 720)
 
         if is_file and state.workers > 1:
-            self._worker_loop_parallel_video(state, cap, writer, fps_for_ts, total)
+            self._worker_loop_parallel_video(state, cap, fps_for_ts, total)
             return
+
+        if (not is_file) and state.workers > 1:
+            self._worker_loop_parallel_camera(state, cap, fps_for_ts)
+            return
+
+        # 录制由 RecordingController 管理：进入帧循环前登记本会话写入参数（fps/size）。
+        self._rec.begin_session(fps=fps_for_ts, size=(w, h))
 
         try:
-            models_dir_path = models_dir()
-            pipe = MediaPipePipeline(
-                models_dir=models_dir_path,
-                cfg=PipelineConfig(
-                    pose_variant=state.pose_variant,
-                    running_mode="video",
-                    enable_hands=state.enable_hands,
-                ),
-            )
-        except Exception as e:
+            try:
+                models_dir_path = models_dir()
+                pipe = MediaPipePipeline(
+                    models_dir=models_dir_path,
+                    cfg=PipelineConfig(
+                        pose_variant=state.pose_variant,
+                        running_mode="video",
+                        enable_hands=state.enable_hands,
+                    ),
+                )
+            except Exception as e:
+                cap.release()
+                self._post_status(f"初始化失败：{e}")
+                self._post_done()
+                return
+
+            t0 = time.monotonic()
+            frame_count = 0
+            self._post_status("运行中…")
+            self._post_progress(0, total)
+
+            while not self._stop_evt.is_set():
+                ok, frame = cap.read()
+                if not ok:
+                    # Video ended or camera read failed.
+                    self._stop_evt.set()
+                    break
+
+                ts = pipe.next_timestamp_ms(is_file=is_file, fps_for_ts=fps_for_ts)
+                annotated, actions = pipe.annotate(frame, timestamp_ms=ts)
+
+                frame_count += 1
+                if is_file and total > 0 and (frame_count % 5 == 0 or frame_count == total):
+                    self._post_progress(frame_count, total)
+                fps = frame_count / max(1e-6, (time.monotonic() - t0))
+                cv2.putText(
+                    annotated,
+                    f"FPS: {fps:.1f}",
+                    (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    (255, 255, 255),
+                    2,
+                    cv2.LINE_AA,
+                )
+                cv2.putText(
+                    annotated,
+                    "点击“停止”结束",
+                    (10, annotated.shape[0] - 12),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (255, 255, 255),
+                    1,
+                    cv2.LINE_AA,
+                )
+
+                self._rec.write_frame(annotated)
+
+                if actions:
+                    actions_text = ", ".join(ACTION_LABELS_ZH.get(a, a) for a in actions)
+                else:
+                    actions_text = "-"
+                self._post_frame(annotated, actions_text)
+
             cap.release()
-            if writer is not None:
-                writer.release()
-            self._post_status(f"初始化失败：{e}")
+            cv2.destroyAllWindows()
+
+            self._post_status("已停止")
+            self._post_progress(frame_count, total)
             self._post_done()
-            return
-
-        t0 = time.monotonic()
-        frame_count = 0
-        self._post_status("运行中…")
-        self._post_progress(0, total)
-
-        while not self._stop_evt.is_set():
-            ok, frame = cap.read()
-            if not ok:
-                # Video ended or camera read failed.
-                self._stop_evt.set()
-                break
-
-            ts = pipe.next_timestamp_ms(is_file=is_file, fps_for_ts=fps_for_ts)
-            annotated, actions = pipe.annotate(frame, timestamp_ms=ts)
-
-            frame_count += 1
-            if writer is not None and is_file and total > 0 and (frame_count % 5 == 0 or frame_count == total):
-                self._post_progress(frame_count, total)
-            fps = frame_count / max(1e-6, (time.monotonic() - t0))
-            cv2.putText(
-                annotated,
-                f"FPS: {fps:.1f}",
-                (10, 30),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                (255, 255, 255),
-                2,
-                cv2.LINE_AA,
-            )
-            cv2.putText(
-                annotated,
-                "点击“停止”结束",
-                (10, annotated.shape[0] - 12),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (255, 255, 255),
-                1,
-                cv2.LINE_AA,
-            )
-
-            if writer is not None:
-                writer.write(annotated)
-
-            if actions:
-                actions_text = ", ".join(ACTION_LABELS_ZH.get(a, a) for a in actions)
-            else:
-                actions_text = "-"
-            self._post_frame(annotated, actions_text)
-
-        cap.release()
-        if writer is not None:
-            writer.release()
-        cv2.destroyAllWindows()
-
-        self._post_status("已停止")
-        self._post_progress(frame_count, total)
-        self._post_done()
+        finally:
+            # 覆盖正常结束 / 停止 / 异常：释放 writer 并复位录制状态。
+            self._rec.close_session()
 
     def _worker_loop_parallel_video(
         self,
         state: UiState,
         cap: cv2.VideoCapture,
-        writer: cv2.VideoWriter | None,
         fps_for_ts: float,
         total: int,
     ) -> None:
@@ -1313,6 +2015,11 @@ class App:
         workers = max(1, int(state.workers))
         frame_q: "Queue[tuple[int, object] | None]" = Queue(maxsize=workers * 2)
         result_q: "Queue[tuple[int, object, list[str]]]" = Queue(maxsize=workers * 2)
+
+        # 录制由 RecordingController 管理：进入帧循环前登记本会话写入参数（fps/size）。
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 1280)
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 720)
+        self._rec.begin_session(fps=fps_for_ts, size=(w, h))
 
         def reader() -> None:
             idx = 0
@@ -1358,21 +2065,128 @@ class App:
         written = 0
         t0 = time.monotonic()
 
-        while not self._stop_evt.is_set():
-            if next_idx in pending:
-                annotated, actions = pending.pop(next_idx)
-                written += 1
+        try:
+            while not self._stop_evt.is_set():
+                if next_idx in pending:
+                    annotated, actions = pending.pop(next_idx)
+                    written += 1
 
-                if writer is not None:
-                    writer.write(annotated)
+                    self._rec.write_frame(annotated)
 
-                if total > 0 and (written % 5 == 0 or written == total):
-                    self._post_progress(written, total)
+                    if total > 0 and (written % 5 == 0 or written == total):
+                        self._post_progress(written, total)
 
-                fps = written / max(1e-6, (time.monotonic() - t0))
+                    fps = written / max(1e-6, (time.monotonic() - t0))
+                    cv2.putText(
+                        annotated,
+                        f"FPS: {fps:.1f}",
+                        (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.8,
+                        (255, 255, 255),
+                        2,
+                        cv2.LINE_AA,
+                    )
+
+                    if actions:
+                        actions_text = ", ".join(ACTION_LABELS_ZH.get(a, a) for a in actions)
+                    else:
+                        actions_text = "-"
+                    self._post_frame(annotated, actions_text)
+                    next_idx += 1
+                    continue
+
+                try:
+                    idx, annotated, actions = result_q.get(timeout=0.2)
+                except Exception:
+                    alive = t_reader.is_alive() or any(t.is_alive() for t in worker_ts)
+                    if (not alive) and (not pending):
+                        break
+                    continue
+
+                pending[int(idx)] = (annotated, actions)
+
+            self._stop_evt.set()
+            t_reader.join(timeout=2.0)
+            for t in worker_ts:
+                t.join(timeout=2.0)
+
+            cap.release()
+            cv2.destroyAllWindows()
+
+            self._post_status("已停止")
+            self._post_progress(written, total)
+            self._post_done()
+        finally:
+            # 覆盖正常结束 / 停止 / 异常：释放 writer 并复位录制状态。
+            self._rec.close_session()
+
+    def _worker_loop_parallel_camera(
+        self,
+        state: UiState,
+        cap: cv2.VideoCapture,
+        fps_for_ts: float,
+    ) -> None:
+        """实时摄像头多核并行推理（IMAGE 模式 + 满则丢帧）。
+
+        单线程 VIDEO 模式在多核机上只用到少数核心，heavy 模型实时只能跑 ~15fps；并行多
+        worker 能近线性提升吞吐。代价是失去 VIDEO 模式的时序平滑（骨架更抖），且高负载时
+        丢弃新帧以约束端到端延迟。默认（线程数=1）仍走单线程 VIDEO 路径，行为不变。
+        """
+        workers = max(1, int(state.workers))
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 1280)
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 720)
+        self._rec.begin_session(fps=fps_for_ts, size=(w, h))
+
+        engine = ParallelPoseEngine(
+            pipeline_factory=default_pipeline_factory(
+                models_dir=models_dir(),
+                pose_variant=state.pose_variant,
+                enable_hands=state.enable_hands,
+            ),
+            workers=workers,
+            drop_when_full=True,
+        )
+
+        try:
+            try:
+                engine.start()
+            except Exception as e:
+                cap.release()
+                self._post_status(f"初始化失败：{e}")
+                self._post_done()
+                return
+
+            def reader() -> None:
+                try:
+                    while not self._stop_evt.is_set():
+                        ok, frame = cap.read()
+                        if not ok:
+                            break
+                        engine.submit(frame)
+                finally:
+                    engine.signal_input_done()
+
+            t_reader = threading.Thread(target=reader, daemon=True)
+            t_reader.start()
+
+            self._post_status(f"运行中…（实时多线程：{workers}，时序平滑关闭）")
+            self._post_progress(0, 0)
+
+            t0 = time.monotonic()
+            rendered = 0
+            while not self._stop_evt.is_set():
+                res = engine.get(timeout=0.2)
+                if res is None:
+                    if engine.is_drained():
+                        break
+                    continue
+                annotated = res.annotated
+                rendered += 1
+                fps = rendered / max(1e-6, (time.monotonic() - t0))
                 cv2.putText(
                     annotated,
-                    f"FPS: {fps:.1f}",
+                    f"FPS: {fps:.1f} (x{workers})",
                     (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.8,
@@ -1381,37 +2195,30 @@ class App:
                     cv2.LINE_AA,
                 )
 
-                if actions:
-                    actions_text = ", ".join(ACTION_LABELS_ZH.get(a, a) for a in actions)
+                self._rec.write_frame(annotated)
+
+                if res.actions:
+                    actions_text = ", ".join(ACTION_LABELS_ZH.get(a, a) for a in res.actions)
                 else:
                     actions_text = "-"
                 self._post_frame(annotated, actions_text)
-                next_idx += 1
-                continue
 
-            try:
-                idx, annotated, actions = result_q.get(timeout=0.2)
-            except Exception:
-                alive = t_reader.is_alive() or any(t.is_alive() for t in worker_ts)
-                if (not alive) and (not pending):
-                    break
-                continue
+            self._stop_evt.set()
+            engine.close()
+            t_reader.join(timeout=2.0)
+            cap.release()
+            cv2.destroyAllWindows()
 
-            pending[int(idx)] = (annotated, actions)
-
-        self._stop_evt.set()
-        t_reader.join(timeout=2.0)
-        for t in worker_ts:
-            t.join(timeout=2.0)
-
-        cap.release()
-        if writer is not None:
-            writer.release()
-        cv2.destroyAllWindows()
-
-        self._post_status("已停止")
-        self._post_progress(written, total)
-        self._post_done()
+            err = engine.take_error()
+            if err is not None:
+                self._post_status(f"推理失败：{err}")
+            else:
+                self._post_status("已停止")
+            self._post_progress(0, 0)
+            self._post_done()
+        finally:
+            engine.close()
+            self._rec.close_session()
 
     def _post_frame(self, frame_bgr: np.ndarray, actions: str) -> None:
         # Keep only the latest frame.
@@ -1445,10 +2252,16 @@ class App:
         def _done() -> None:
             self.start_btn.configure(state="normal")
             self.stop_btn.configure(state="disabled")
+            self._set_refresh_enabled()
+            # 会话结束：集中复位运行态控件并使 Status_Area 显示「就绪」（需求 4.5、5.1）。
+            self._set_running_controls(False)
 
         self.root.after(0, _done)
 
     def _tick(self) -> None:
+        # 录制状态刷新必须每 tick 执行，与帧队列是否有新帧无关（需求 5.9/5.10/5.11）。
+        self._refresh_recording_status()
+
         try:
             frame_bgr, actions = self._queue.get_nowait()
         except Empty:

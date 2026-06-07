@@ -25,11 +25,19 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 
 def repo_root() -> Path:
-    """返回仓库根目录（``core/`` 包目录的父目录）。"""
+    """返回 artifact 根目录。
+
+    - 源码运行：``core/`` 包目录的父目录（仓库根）。
+    - PyInstaller 冻结运行：可执行文件所在目录。此时 ``__file__`` 指向临时解压目录
+      （``sys._MEIPASS``），不能用来定位 models/templates/outputs，否则运行结束目录被清空。
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parents[1]
 
 

@@ -25,6 +25,11 @@ core/models/*.task
 *.avi
 *.zip
 vision_old/
+
+# PyInstaller 打包产物（本地构建，不入库）
+build/
+dist/
+*.exe
 _pip_*.log
 标准样本/
 学员样本/
