@@ -149,21 +149,16 @@ def _classify_pose_actions(landmarks, w: int, h: int) -> list[str]:
 
 
 def _pose_model_url(variant: str) -> str:
-    urls = {
-        "lite": (
-            "https://storage.googleapis.com/mediapipe-models/pose_landmarker/"
-            "pose_landmarker_lite/float16/latest/pose_landmarker_lite.task"
-        ),
-        "full": (
-            "https://storage.googleapis.com/mediapipe-models/pose_landmarker/"
-            "pose_landmarker_full/float16/latest/pose_landmarker_full.task"
-        ),
-        "heavy": (
-            "https://storage.googleapis.com/mediapipe-models/pose_landmarker/"
-            "pose_landmarker_heavy/float16/latest/pose_landmarker_heavy.task"
-        ),
-    }
-    return urls.get(variant, urls["lite"])
+    # 模型清单已收口到 core.model_manager，避免 URL 在多处漂移。
+    from core.model_manager import MEDIAPIPE_MODELS
+
+    key = {"lite": "pose_lite", "full": "pose_full", "heavy": "pose_heavy"}.get(
+        (variant or "").strip().lower(), "pose_lite"
+    )
+    for spec in MEDIAPIPE_MODELS:
+        if spec.key == key:
+            return spec.url
+    return ""
 
 
 def _ensure_file(url: str, path: Path) -> None:

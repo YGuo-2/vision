@@ -1,3 +1,263 @@
+## 2026-06-09: 设置面板（模型管理）+ onefile 单文件打包（用户自助下载模型）
+
+### 问题描述
+
+希望只分发单个 `vision_ui.exe`，模型由使用者自行下载安装。需要：(1) UI 增加「设置」入口，
+内含「当前模型」展示与缺失模型「下载」按钮（本期只放 MediaPipe）；(2) 把 UI 打包成单文件
+exe，且不能因 CUDA 版 torch 把体积撑到 GB 级。
+
+### 修改内容
+
+- 新增 `core/model_manager.py`：MediaPipe 模型清单与下载工具（仅依赖标准库 + `core.paths`）。
+  - `MEDIAPIPE_MODELS`：pose lite/full/heavy + hand 四个 `ModelSpec`（key/filename/官方 url/label/approx_mb）。
+  - `is_installed` / `installed_size_mb` / `model_path` 状态查询。
+  - `download_model(progress_cb, should_stop)`：下载到 `.part` 临时文件后原子改名，可中断、带进度；
+    网络异常向上抛出由 UI 提示。下载源固定官方直链 `storage.googleapis.com`（国内无稳定免代理镜像，
+    经实测官方源可达，决定让用户自行配置代理）。
+- `core/vision_pipeline.py`：`_pose_model_url()` 改为复用 `core.model_manager` 的清单，消除 URL 重复。
+- `apps/app_ui.py`：
+  - 主操作面板右上角新增「⚙ 设置」按钮（`_open_settings`），打开时传入当前 pose 档位与 hands 开关。
+  - 新增 `SettingsWindow`：顶部「当前模型」区汇总当前使用的姿态模型 + 手部检测开关及就绪/缺失状态；
+    下方 MediaPipe 模型列表逐行显示安装状态（使用中的行标注「● 使用中」）+ 下载/重新下载按钮；
+    支持「下载全部缺失模型」「刷新状态」，后台线程下载 + 进度条，失败弹框提示多为网络问题。
+- 新增 `app_ui_onefile.spec`：PyInstaller 单文件打包。
+  - 不用 `collect_submodules` 粗放收集 analysis/batch（会顺着 `core.yolo_adapter` 的
+    `from ultralytics import YOLO` 把 CUDA 版 torch≈4.2GB 整条链打进来，导致 exe 膨胀到 3GB）。
+  - 改为显式列出 UI 实际用到的内部模块，并通过 `excludes` 切断 torch/torchvision/ultralytics/
+    onnx*/tensorrt/nvidia*/yolo_adapter 等重依赖。
+
+### 构建步骤
+
+```powershell
+.\.venv\Scripts\python.exe -m PyInstaller app_ui_onefile.spec --noconfirm --clean
+```
+
+产物：`dist/vision_ui.exe`（单文件，117 MB，可单独分发）。
+
+### 验证方法
+
+- 编译：`.\.venv\Scripts\python.exe -m py_compile .\apps\app_ui.py .\core\model_manager.py .\core\vision_pipeline.py .\core\paths.py`（通过）。
+- SettingsWindow 逻辑 smoke：full+hands 激活 `{pose_full, hand}`、heavy+无 hands 激活 `{pose_heavy}`，
+  「当前模型」汇总与「● 使用中」标注正确。
+- onefile 体积从误打 torch 的 3033 MB 降到 117 MB（torch 成功排除）。
+- 干净临时目录（无 models）启动 `vision_ui.exe` ≥25 秒未崩溃，且 exe 旁自动创建 `models/` 目录
+  （冻结模式路径解析锚定到 exe 所在目录，用户下载的模型落到此处）。
+
+### 分发说明
+
+- 只需分发 `dist/vision_ui.exe` 一个文件。
+- 用户首次运行后，打开「设置 → MediaPipe 模型」下载所需模型（pose full ≈9MB + hand ≈7.5MB 即可用）。
+- 下载走 Google 官方源，国内用户需自备代理；也可手动下载后放入 exe 同级 `models/` 目录。
+- onefile 首次启动需解压运行时到临时目录，比 onedir（`app_ui.spec`）略慢，属正常现象。
+
+---
+
+## 2026-06-09: PyInstaller 打包桌面 UI 为 Windows 可执行程序
+
+### 问题描述
+
+需要将项目打包成可独立分发的 Windows 可执行程序（.exe），便于在没有 Python 环境的机器上运行桌面 UI（`apps/app_ui.py`）。
+
+### 修改内容
+
+- `core/paths.py`：`repo_root()` 增加 PyInstaller 冻结模式判定。当 `sys.frozen` 为真时，artifact 根目录（models/templates/outputs）锚定到**可执行文件所在目录**而非临时解压目录 `sys._MEIPASS`，避免运行结束后目录被清空、模型/输出找不到。源码运行行为保持不变。
+- 新增 `app_ui.spec`：PyInstaller 打包配置（onedir 模式）。
+  - `collect_all("mediapipe")` 整包收集 MediaPipe 的数据文件（`.binarypb` / modules 等）与二进制。
+  - `collect_submodules` 收集 core/apps/analysis/batch 内部包，并补齐 `pygrabber`、`PIL._tkinter_finder`、`cv2` 等隐藏导入。
+  - `console=False`（GUI 程序，无控制台窗口）；排除 `hypothesis`/`pytest` 测试依赖。
+  - 模型文件不嵌入二进制，构建后复制到 exe 同级 `models/`，便于替换/增量更新，并与冻结模式路径解析一致。
+- 安装构建工具：`pyinstaller 6.20.0`（经本地代理 `127.0.0.1:7890`）。
+
+### 构建步骤
+
+```powershell
+.\.venv\Scripts\python.exe -m PyInstaller app_ui.spec --noconfirm
+Copy-Item -Path .\models -Destination .\dist\vision_ui\models -Recurse -Force
+```
+
+产物：`dist/vision_ui/`（入口 `vision_ui.exe`，含 models 共约 5.0 GB）。
+
+### 验证方法
+
+- 构建成功，`Build complete`。
+- 启动 `dist/vision_ui/vision_ui.exe`，进程持续运行 ≥12 秒未崩溃，UI 正常加载（Tkinter 窗口启动成功）。
+
+---
+
+## 2026-06-06: 实时多核并行姿态推理（heavy CPU 提速 ~11fps → 30+fps）
+
+### 问题描述
+
+用户用 heavy 模型实时识别时 FPS 低、且 CPU 利用率只有 ~10% 拉不上去。前序排查已排除采集端
+（外接摄像头 30fps 不是瓶颈）。用真人画面实测：heavy 单帧 ~56ms（~15-18fps）、heavy pose-only
+~41ms（~24fps），是真·CPU 算力瓶颈。但单条 MediaPipe VIDEO 管线只用到底层少数线程，在 32
+逻辑核机器上整机利用率极低——一个满载核心仅占 ~3%，其余 ~28 核闲置。
+
+GPU delegate 复测（含 heavy，补齐 `docs/mediapipe_gpu_delegate_report.md` 之前只测 full 的空白）
+确认对 heavy 无收益（中位延迟基本持平，仅延迟更稳定）：桌面 MediaPipe GPU delegate 走
+OpenGL/CL，每帧上传/下载图像的传输开销抵消了计算节省，且无法切到 Vulkan / 用 Rust 绕开
+（推理本就是 native C++，Python 非瓶颈）。因此选择 CPU 多核并行方案。
+
+### 修改内容
+
+- 新增 `core/parallel_pose_engine.py`：可复用、可测试的多 worker 并行姿态推理引擎。
+  - 每个 worker 独立持有一条 IMAGE 模式 `MediaPipePipeline`（landmarker 非线程安全）。
+  - reader→有界输入队列→N worker→collector 按帧序号重排→有序输出队列。
+  - 实时模式 `drop_when_full=True`：输入队列满则丢弃新帧以约束端到端延迟；离线模式
+    `drop_when_full=False`：阻塞背压保证每帧都处理。
+  - `signal_input_done()` 与 worker / collector 的入队均改为可中断（非阻塞哨兵 + 带超时
+    重试 + stop 检查），修复了 reader/worker/collector/consumer 四方背压死锁。
+  - `default_pipeline_factory()` 工厂、`InferResult` 结果结构、`stats`（submitted/dropped/
+    emitted）、`take_error()` 错误传播。
+- `apps/main.py`：新增 `run_realtime_parallel()`，摄像头源 + `--workers>1` 时走多核并行实时
+  路径（满则丢帧）；`main()` 路由补充摄像头并行分支；`--workers` 帮助文案更新为同时适用于
+  离线视频与实时摄像头。
+- `apps/app_ui.py`：新增 `_worker_loop_parallel_camera()`，摄像头 + 线程数>1 时走并行引擎；
+  `_worker_loop` 增加摄像头并行分支；线程数控件标签由「离线线程数（视频文件）」改为
+  「线程数（>1：多核并行，关闭时序平滑）」。
+- 默认行为不变：线程数=1 时仍走单线程 VIDEO 模式（保留时序跟踪/平滑）。并行模式为显式
+  opt-in，代价是失去 VIDEO 时序平滑（骨架更抖）。
+- 修复 `tests/test_s5_hands_toggle.py` 两个陈旧用例：补上 `_source_state` 构造，使其与
+  camera-dropdown 后的 `_collect_state` 实现一致。
+
+### 验证方法
+
+- 编译：`.\.venv\Scripts\python.exe -m py_compile .\apps\main.py .\apps\app_ui.py .\core\parallel_pose_engine.py`（通过）。
+- 引擎测试：`.\.venv\Scripts\python.exe -m pytest tests\test_parallel_pose_engine.py -q`（5 passed：
+  有序完整性、多 worker 单调有序、丢帧无空洞、错误传播、资源释放）。
+- 相关回归：`tests\test_s5_hands_toggle.py tests\test_s5_realtime_latest_frame.py tests\test_camera_enum.py tests\test_s5_ui_no_go.py`（30 passed）。
+- 真实人物视频吞吐实测（heavy + hands）：workers=1 → 10.8fps，2 → 19.0fps，4 → 31.8fps，
+  6 → 40.9fps，近线性扩展；heavy 实时从 ~11fps 提升到 4 worker 30+fps。
+
+### 备注
+
+- 全量 `pytest tests` 中存在两类与本改动无关的预存在失败：`test_camera_enum.py` 真实 DShow
+  摄像头并发探测偶发 native access violation；`test_app_controls.py` 6 例属于尚未完成的录制/
+  UI 重构功能（`_sync_record_stop_enabled` 桩缺失）。二者均非本次并行引擎引入。
+
+---
+
+## 2026-06-06: 修复摄像头实时帧率低（YUY2 带宽瓶颈）+ heavy 模型 CPU 利用率低
+
+### 问题描述
+
+用户用 heavy 模型实时识别时反馈：FPS 很低，且 CPU 利用率只有 ~10% 拉不上去。
+
+经定位，这是典型的「等待型瓶颈」——瓶颈不在算力而在采集端：
+
+- 单帧推理实测（合成帧）：heavy pose-only ~10ms（~100fps）、heavy+hands ~18ms（~54fps），
+  与 full 几乎一致。模型并非瓶颈。
+- 摄像头实测：原代码用 `cv2.CAP_DSHOW` 打开摄像头并请求 720p，设备退回到未压缩的
+  **YUY2** 像素格式，受 USB 带宽限制，720p 仅 ~10fps（640x480 也才 15fps）。
+- 主循环大部分时间阻塞在 `cap.read()` 等待下一帧，因此 CPU 长期空闲、整体 FPS 被采集端钉死。
+- 后端对比：`cv2.CAP_MSMF` 能协商到压缩格式，720p 直接跑满 **30fps**；DSHOW 即便强制
+  MJPG 在本机也未生效（仍 YUY2）。
+
+### 修改内容
+
+- `apps/camera_enum.py`：新增 `open_camera(index, *, width=1280, height=720)` 共享 helper。
+  按 `CAP_MSMF`（最优）→ `CAP_DSHOW + 强制 MJPG`（压缩格式回退）→ 朴素 `CAP_DSHOW`（兜底出图）
+  的顺序协商高帧率采集格式，并设置请求分辨率。
+- `apps/main.py`：`_open_capture()` 摄像头分支改用 `open_camera()`；移除 `run()` 与
+  realtime-latest-frame smoke 路径里多余的 `cap.set(FRAME_WIDTH/HEIGHT)`（helper 已处理）。
+- `apps/app_ui.py`：`_worker_loop()` 摄像头打开改用 `open_camera()`。
+- 视频文件路径（非数字源）行为保持不变，仍走 `cv2.VideoCapture(source)`。
+
+### 验证方法
+
+- 编译检查：`.\.venv\Scripts\python.exe -m py_compile .\apps\main.py .\apps\app_ui.py .\apps\camera_enum.py`（通过）。
+- 端到端实测（摄像头 0）：`open_camera(0)` 协商到 720p/30fps；原始采集 30.0fps；
+  heavy+hands 端到端 18.4fps（瓶颈转移到 hand landmarker，符合预期，采集不再拖后腿）。
+- 提速幅度：摄像头采集 10fps → 30fps（3x）；实时识别 FPS 不再被采集端限制。
+
+### 备注
+
+- 若仍想进一步提速 heavy+hands，可关闭 hands（`--no-hands` / UI 选项），pose-only 端到端可达 ~30fps（受采集上限）。
+- 与 `docs/mediapipe_gpu_delegate_report.md` 结论一致：本机 MediaPipe GPU delegate 对实时链路无明显收益，未改默认 CPU 路径。
+
+---
+
+## 2026-06-06: 录制控制拆分为「开始/暂停/继续 + 结束录制」并独立成组
+
+### 问题描述
+
+桌面 UI（`apps/app_ui.py`）主操作面板里，录制只有一个三态切换按钮（开始录制→暂停录制
+→继续录制），而「结束录制」被隐式合并进会话级的「停止」按钮。用户反馈布局不直观：
+录制看不到独立的「结束录制」入口，且录制按钮与会话级「开始/停止」混在同一列，难以区分。
+
+### 修改内容
+
+- `core/recording_controller.py`：新增 `stop_recording()` 方法。
+  - 结束当前录制片段：释放 writer、状态复位 `idle`、清空 `_result_path`/`_frames_written`，
+    但**保持会话运行**（`_session_active` 不变），使用户可在同一识别会话内重新「开始录制」
+    生成新的文件片段。与 `close_session()`（结束整个会话）区分开。
+  - 会话未运行时为 no-op；返回本片段实际落盘路径或 `None`。
+- `apps/app_ui.py`：
+  - 主操作面板新增独立的「录制」`Labelframe` 分组，把录制相关按钮与会话级「开始/停止」
+    在视觉上分开。组内含：三态切换按钮（`record_btn`）+ 新增「结束录制」按钮（`record_stop_btn`）。
+  - 新增 `_on_record_stop()` 回调：调用 `stop_recording()`，复位切换按钮文本为「开始录制」、
+    禁用「结束录制」。
+  - 新增 `_sync_record_stop_enabled(state)`：录制中/已暂停时启用「结束录制」，idle 时禁用；
+    在 `_on_record_toggle`、`_refresh_recording_status`（覆盖 worker 端错误复位）、
+    `_set_running_controls` 中联动调用。
+  - 导入补充 `RecordingState` 类型。
+
+### 验证方法
+
+- 编译检查：`.\.venv\Scripts\python.exe -m py_compile .\apps\app_ui.py .\core\recording_controller.py`（通过）。
+- 属性测试：`.\.venv\Scripts\python.exe -m pytest tests\test_recording_controller.py -q`（10 passed）。
+- UI 交互（录制三连按钮可用性、结束录制后可重新开始）需手动运行 `apps/app_ui.py` 验证。
+
+---
+
+## 2026-06-06: UI 摄像头下拉选择（camera-dropdown-selection）
+
+### 问题描述
+
+桌面 UI（`apps/app_ui.py`）原先通过自由文本框手动输入摄像头编号（数字），不直观，
+用户无法预知系统上有哪些可用摄像头。需求改为：从“当前可调用的摄像头列表”中以下拉菜单
+直观选择，同时保留对视频文件路径输入的支持。spec 见
+`.kiro/specs/camera-dropdown-selection/`（requirements / design / tasks）。
+
+### 修改内容
+
+- 新增 `apps/camera_enum.py`（不依赖 tkinter，可独立测试）：
+  - `CameraEntry`、`make_label`（编号→显示文本，单射）、`clamp_scan_limit`（钳制到 [1,32]）。
+  - `probe_camera`：DSHOW 后端探测单个编号，判定可用 = `isOpened()` 且能 `read()` 到非空帧；
+    子线程 + `join(timeout)` 实现 2s 超时保护，`finally` 释放资源；异常视为不可用。
+  - `enumerate_cameras`：注入式 `probe`，从 0 扫描至钳制后上限（默认 5），返回升序去重条目列表。
+  - `InputSourceState`：camera / video / none 三态互斥状态模型，维护“任一时刻至多一个生效源”不变式。
+- 改造 `apps/app_ui.py` 的 `App` 输入区：
+  - 用只读 `ttk.Combobox` 替代原摄像头编号 `ttk.Entry`（移除自由文本框）；保留“选择视频…”；
+    新增“刷新”按钮与“当前输入源”指示标签。
+  - 启动时后台线程枚举摄像头，结果经 `root.after` 回写；空列表禁用下拉并提示“未检测到可用摄像头”。
+  - `_on_camera_selected` / `_browse_video`（含视频可打开校验）/ `_refresh_cameras` /
+    `_start_enumeration` / `_apply_camera_entries` / `_set_refresh_enabled`。
+  - 采集运行中与枚举进行中禁用刷新；`_collect_state` 在无输入源时报错；`_worker_loop` 沿用
+    `source.isdigit()` 分支保持兼容（数字→DSHOW 摄像头，否则按路径打开）。
+- 新增测试：`tests/test_camera_enum.py`（Property 1/2/3 + probe_camera 示例：未打开/空帧/非空帧/超时/release）、
+  `tests/test_input_source_state.py`（Property 4 互斥不变式 + 状态切换示例 + 刷新门控）。
+- `requirements.txt`：补充测试依赖 `hypothesis`、`pytest`。
+
+### 验证方法
+
+- 编译检查：`.\.venv\Scripts\python.exe -m py_compile .\apps\app_ui.py .\apps\camera_enum.py`（通过）。
+- 单元/属性测试：`.\.venv\Scripts\python.exe -m pytest tests/test_camera_enum.py tests/test_input_source_state.py`（18 passed）。
+- 模块导入：`python -c "import apps.app_ui"`（OK）。
+- 真实硬件（下拉枚举、刷新、采集打开摄像头/视频）需手动运行 `apps/app_ui.py` 验证。
+
+### 后续补充（设备友好名）
+
+- 下拉项原为“摄像头 N”，应用户要求改为显示 Windows 设备友好名，如
+  “摄像头 0: USB2.0 HD UVC WebCam”。
+- `apps/camera_enum.py` 新增 `list_device_names()`：通过 `pygrabber`（DirectShow）读取
+  摄像头友好名，顺序与 OpenCV DSHOW 索引一致；任何失败（含缺依赖/非 Windows）回退空列表。
+- `make_label(index, name=None)` 支持带设备名格式，缺名时回退“摄像头 N”；
+  `enumerate_cameras` 新增可注入的 `names` 回调，按索引合并设备名（越界回退无名）。
+- `requirements.txt` 补充 `pygrabber`。新增测试覆盖设备名合并与越界回退。
+
+---
+
 ## 2026-06-02: 完成 #44 离线 DTW / 序列提取 profile 与优化决策
 
 ### 问题描述
@@ -1442,3 +1702,102 @@ DTW query 退化成整段模板，不报错、最难查。本 Issue 把这些 sh
 - `.\.venv\Scripts\python.exe -m pytest tests\test_pose33_v3_golden.py` → 16 passed（**默认行为不变**，硬门槛）。
 - `.\.venv\Scripts\python.exe -m pytest tests\` → 34 passed（含两个新增测试文件）。
 - 全程对照 Issue #4 验收标准逐条核对：golden 全绿、layout shape 参数化、周期裁切修复、py_compile 通过、change.md 已记录。
+
+## 2026-06-08: UI 控制区分隔与 Secondary_Options 分组（ui-layout-redesign 任务 9.3）
+
+### 问题描述
+
+任务 9.2 在 `apps/app_ui.py` 的 `_build_ui` 中建立了 Primary_Controls（"主要操作"）分组，
+但次要选项仍暂留于旧的"选项"（opts）卡片，主/次分区无显式视觉分隔，且
+`recording_status_var`（录制状态/路径文本）尚无对应控件展示。需求 1.2/1.4/7.x。
+
+### 修改内容
+
+- 在 Primary_Controls 之后插入显式水平分隔线 `ttk.Separator(orient="horizontal")`，
+  存为 `self.primary_secondary_separator` 供布局测试定位（需求 1.2）。
+- 新建 `ttk.Labelframe(text="次要选项")` 分组，置于分隔线之后、Compare_Control 之下，
+  迁移（非复制）原"选项"卡片中的全部次要控件：选择视频…/输入源提示、离线线程数
+  Spinbox（`self.workers_spin`）、启用手部检测 Checkbutton、导出结果视频 Checkbutton +
+  保存位置行（`self.out_entry`/`self.out_btn`）、直拳检测…（需求 1.4/7.1/7.2/7.3/7.4）。
+- 移除旧的"选项"（opts）Labelframe，控件均迁移无重复、无遗漏。
+- Status_Area（"状态" info）保留在控制区底部，新增绑定 `self.recording_status_var`
+  的 Label（紧邻 status_var）以展示录制状态/路径（需求 5.9/5.10 surfacing）；
+  保留识别结果、进度文本、`self.progress_bar`（需求 7.6/7.7/7.8）。
+
+### 验证方法
+
+```powershell
+.\.venv\Scripts\python.exe -m py_compile .\apps\app_ui.py
+```
+退出码 0，编译通过。
+
+## 2026-06-08: UI 布局重构 - 任务 9.3（添加可见分隔并构建 Secondary_Options 分组）
+
+### 问题描述
+
+`ui-layout-redesign` spec 任务 9.3：在 `apps/app_ui.py` 的 `App._build_ui` 中，
+显式强化主/次操作分区——在 Primary_Controls 与次要选项之间插入可见水平分隔线，
+并将原 “选项” 分组规范为 “次要选项”（Secondary_Options），统一置于 Compare_Control 之后；
+Status_Area 固定保留在控制区底部，并补充录制状态/路径显示控件。
+
+### 修改内容（`apps/app_ui.py` `_build_ui`，父容器 `self.controls_inner` = `left`）
+
+- 在 Primary_Controls（“主要操作” Labelframe）之后插入可见水平分隔：
+  `self.primary_secondary_separator = ttk.Separator(left, orient="horizontal")`，
+  `pack(fill="x", pady=8)`，供布局测试定位。
+- 新建 Secondary_Options 分组 `ttk.Labelframe(left, text="次要选项")`，置于分隔线之后，含：
+  选择视频…（`_browse_video`，7.1）+ 输入源提示（`source_hint_var`）、离线线程数
+  `self.workers_spin`（from_=1 to=16，7.2）、启用手部检测 Checkbutton（`enable_hands_var`，7.3）、
+  导出结果视频 Checkbutton（`save_var` + `_toggle_out`）及 `self.out_entry`/`self.out_btn` 行、
+  直拳检测…（`_open_tech_eval`，7.4）。属性名保持不变，未重复或遗失控件。
+- Status_Area（“状态” Labelframe）固定于控制区底部，含 status_var、识别结果 actions_var、
+  progress_text_var、`self.progress_bar`（7.6/7.7/7.8）；并在 status_var 之后新增绑定
+  `self.recording_status_var` 的 Label，用于显示录制状态/Result_Video 路径（需求 5.9/5.10）。
+
+控制区自上而下结构：主要操作（Primary_Controls）→ 可见水平分隔线 → 次要选项
+（Secondary_Options）→ 状态（Status_Area）。
+
+### 验证方法
+
+```powershell
+.\.venv\Scripts\python.exe -m py_compile .\apps\app_ui.py   # 退出码 0
+```
+
+## 2026-06-08: UI 布局重组与录制/暂停运行时控制（ui-layout-redesign 全量完成）
+
+### 问题描述
+
+`apps/app_ui.py` 的桌面 UI 将控件分散在「输入/选项/运行/状态」四张卡片中，主次不分、布局凌乱；
+且录制只能在启动前预先勾选导出，无法在识别会话运行期间按需开始/暂停。spec 见
+`.kiro/specs/ui-layout-redesign/`（requirements / design / tasks）。本次实现两条主线：
+与 Tkinter 解耦的录制状态机 `RecordingController`，以及左侧控制区的可滚动重组（主/次分组）。
+
+### 修改内容
+
+- 新增 `core/recording_controller.py`（与 tkinter 解耦、可独立属性测试）：
+  - `RecordingState` / `WriterFactory` 类型别名、`RecordingSnapshot` 不可变快照、`VideoWriterLike` 协议。
+  - `RecordingController`：`begin_session` / `request_toggle`（idle→recording→paused→recording 循环）/
+    `write_frame`（仅 recording 写盘 + 首帧懒创建 + 错误收敛复位）/ `close_session`（无条件释放复位）/
+    `snapshot`；单把 `threading.Lock` 串行化所有状态/写盘操作；默认 writer 工厂绑定
+    `open_video_writer`，默认路径 `outputs_dir()/record_<timestamp>.mp4`。
+- 改造 `apps/app_ui.py`：
+  - `App.__init__` 创建 `self._rec = RecordingController()`；新增 `recording_status_var`、`_record_error_shown`。
+  - `_worker_loop` / `_worker_loop_parallel_video`：去除内联 `cv2.VideoWriter` 逻辑，改为 `begin_session` +
+    `write_frame` + `finally: close_session`，录制不再依赖 `UiState.save_output/out_path`。
+  - 新增 `_on_record_toggle`（三态按钮文本映射 `RECORD_BTN_TEXT`）、`_refresh_recording_status`（由 `_tick`
+    每 tick 调用，刷新状态/路径文本，错误弹框并复位）、`_set_running_controls`（运行态控件 enable/disable 联动）。
+  - `clamp_workers(n)` 将离线线程数钳制到 `[1, os.cpu_count()]`，在 Spinbox 读取处复用。
+  - `_build_ui` 重构：左侧改为 `Canvas + Scrollbar + inner` 可滚动容器，`root.minsize(800, 600)`；
+    Primary_Controls 分组（摄像头→模型→开始→录制/暂停→动作比对，固定顺序）+ 可见 `ttk.Separator` +
+    Secondary_Options 分组（选择视频/离线线程数/手部检测/直拳检测）+ 底部 Status_Area。
+  - 错误处理：无输入源弹「请先选择摄像头或视频」、无效视频拒绝并保留先前选择、比对窗口创建失败 try/except 弹框。
+- 新增测试：`tests/test_recording_controller.py`（Property 1–6 + 夹具/引用模型）、`tests/test_clamp_workers.py`
+  （Property 7）、`tests/test_app_controls.py`（按钮文本映射与控件联动）、`tests/test_layout_structure.py`
+  （布局结构断言）、`tests/test_error_handling.py`（错误处理场景）。
+
+### 验证方法
+
+- 编译检查：`.\.venv\Scripts\python.exe -m py_compile .\apps\main.py .\apps\app_ui.py .\core\recording_controller.py`（通过）。
+- 全量测试：`.\.venv\Scripts\python.exe -m pytest tests/test_recording_controller.py tests/test_clamp_workers.py tests/test_app_controls.py tests/test_layout_structure.py tests/test_error_handling.py -q`
+  → 27 passed, 1 skipped（布局测试在无显示环境下跳过）。
+- 真实窗口的最小尺寸/滚动/端到端预览与录制写盘为冒烟/人工验证项。
