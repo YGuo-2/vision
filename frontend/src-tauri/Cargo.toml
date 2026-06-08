@@ -1,0 +1,22 @@
+[package]
+name = "vision-tauri-ui"
+version = "0.1.0"
+description = "Vision desktop frontend"
+authors = ["Vision"]
+edition = "2021"
+
+[lib]
+name = "vision_tauri_ui_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "vision-tauri-ui"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

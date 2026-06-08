@@ -1,3 +1,141 @@
+## 2026-06-09: 迁移前端到 Windows-only Vue + Tauri + Vite，并保留 Python 后端契约
+
+### 问题描述
+
+需要把现有 Tkinter 前端迁移到 Vue + Tauri + Vite，同时满足三条边界：后端不动、完整覆盖
+现有 Tkinter 用户可见功能、只做 Windows。迁移还需要能在本机开发、验证和打包，且不能破坏
+MediaPipe 默认 `pose33_v3`、`infer()`/`annotate()`、golden 回归、`valid_mask` 与 YOLO 未授权
+评分边界。
+
+### 修改内容
+
+- 新增 `frontend/`：Vue + Vite + Tauri + TypeScript 工程，提供主窗口、预览区、状态区、
+  录制控制、动作分析入口、模型状态/下载入口与 raw JSON 展示。
+- 新增 `apps/ui_backend.py`：JSON bridge 进程，封装摄像头枚举、识别会话、录制三态、
+  模板生成、模板比对、直拳技术评估、模型状态和模型下载；调用既有 Python 后端，不把算法迁移到
+  Rust/TypeScript。
+- 新增 Tauri Rust bridge：管理持久 Python bridge 子进程，转发 `bridge-event` / `bridge-stderr`，
+  开发期使用 `.venv\Scripts\python.exe -u apps/ui_backend.py`，打包期优先启动
+  `vision-ui-backend.exe` sidecar。
+- 新增 Windows 打包链路：`ui_backend_sidecar.spec`、`scripts/build-tauri-sidecar.ps1`、
+  `packaging/pyinstaller/pyi_rth_video_writer_alias.py`，并在 Tauri `resources/` 中打包 Python bridge
+  sidecar；新增根目录脚本 `verify:desktop`、`build:sidecar`、`package:windows`。
+- 新增迁移验证测试：bridge 契约、job 生命周期、实时会话、动作分析、模型管理、Windows packaging
+  smoke；补充 `requirements-dev.txt` 中 Hypothesis 测试依赖。
+- 旧 `apps/app_ui.py` 保留为 Tkinter 入口，仅做测试 stub 兼容的小范围修补，避免既有 UI 控件测试失败。
+- 更新 `README.md` 与 `AGENTS.md`，说明新前端开发、验证和 Windows 打包命令。
+
+### 验证方法
+
+- `npm run verify:desktop` 通过：前端 build、Tauri `cargo check`、`py_compile apps/app_ui.py apps/ui_backend.py core/vision_pipeline.py`、
+  106 个桌面迁移相关 Python 回归测试通过。
+- `npm run package:windows` 通过，生成
+  `frontend/src-tauri/target/release/bundle/nsis/Vision 动作识别与评分_0.1.0_x64-setup.exe`。
+- `pytest tests/test_windows_packaging_smoke.py -q` → 6 passed。
+- `frontend/src-tauri/resources/vision-ui-backend.exe` 使用 `bridge.ping` 返回协议版本 `1.0`。
+
+---
+
+## 2026-06-07: 移除主界面「选择视频…」功能
+
+### 问题描述
+
+主界面「次要选项」里的「选择视频…」按钮用于把输入源从摄像头切换为本地视频文件，
+但实际使用中暂无明确场景（离线视频分析有独立的 CLI 与「动作分析」窗口承担），保留
+该入口反而增加界面复杂度，故移除。
+
+### 修改内容
+
+- `apps/app_ui.py`：
+  - 删除「次要选项」分组里的「选择视频…」按钮；保留其下方的输入源提示 Label
+    （摄像头选择仍复用 `source_hint_var` 显示当前选中的摄像头）。
+  - 删除 `_browse_video` 方法（约 24 行）：文件选择对话框、文件存在/可打开校验、
+    切换到 video 输入源的逻辑。
+  - 删除 `_start_enumeration` 中「若当前已选视频则不抢占输入源」的死分支
+    （`if self._source_state.kind == "video": return`），因不再可能选中视频。
+  - 保留 `cv2` / `filedialog` 导入（其它处仍在使用）；`camera_enum.InputSourceState`
+    的 `select_video`/`"video"` 分支保留（不影响摄像头路径，且 CLI 仍可走文件源）。
+
+### 验证方法
+
+- `py_compile apps/app_ui.py` 通过。
+- 摄像头枚举/选择、启动处理流程不受影响（仅移除视频输入入口）。
+
+---
+
+## 2026-06-07: 将「直拳检测」融合进「动作比对」（合并为单视频「动作分析」窗口）
+
+### 问题描述
+
+主界面同时存在「动作比对…」和「直拳检测…」两个入口，功能高度重合（都吃动作/拳击
+视频、都跑 MediaPipe 姿态分析、都给质量评估），但分属两个独立 Toplevel 窗口，输入口
+径不一致（模板比对单视频 vs 直拳检测目录批量），用户需要在两个窗口间来回切换。
+
+### 修改内容
+
+- `apps/app_ui.py`：
+  - `CompareWindow` 重构为单视频「动作分析」窗口（标题改为「动作分析（模板比对 +
+    直拳技术评估）」）：选**一个**目标视频，按勾选一次性得到「模板相似度」与
+    「直拳技术指标」。
+  - 「① 准备模板」分组加「启用模板比对」开关（`do_compare_var`）：关闭时隐藏模板
+    准备区/预览行/大号相似度显示，仅做技术评估，因此模板变为可选。
+  - 新增「② 直拳技术评估」选项区（`do_tech_var` 开关 + 站姿/视角下拉 + 导出调试视频），
+    融合自原 `TechEvalWindow` 但改为针对单视频；结果区新增「直拳技术指标」明细文本框。
+  - `_start_compare` 重写为按开关顺序执行模板比对（`compare_video_to_template`）与
+    技术评估（`evaluate_video_detail`/`evaluate_video_assets`），合并输出到统一 JSON
+    详情；新增 `_run_tech_eval`、`_set_detail`、`_toggle_compare_section`、
+    `_toggle_tech_section` 方法。
+  - **删除** `TechEvalWindow` 类（约 420 行）及其入口：`_open_tech_eval` 方法、
+    `_tech_eval_win` 字段、「次要选项」里的「直拳检测…」按钮。
+  - 主操作面板按钮文案「动作比对…」→「动作分析…」。
+  - 移除原直拳检测的「目录批量 / CSV+JSONL 报告」能力（按用户确认弱化为单视频）；
+    调试视频改为可选项，落盘到 `outputs_dir()/<stem>_debug_<ts>.mp4`。
+
+### 验证方法
+
+- `python -m py_compile apps/app_ui.py` 通过。
+- AST 静态检查：`CompareWindow` 引用的方法全部存在，`TechEvalWindow` 已不存在。
+- GUI 冒烟：构造 `CompareWindow`，在 do_compare/do_tech 三种开关组合下切换显隐与
+  `_set_detail` 均不抛异常。
+- `pytest tests/test_ui_controls.py tests/test_layout_structure.py
+  tests/test_recording_controller.py` → 20 passed（解释器退出阶段相机枚举线程的
+  access violation 为既有 flaky 噪声，改动前后一致，不影响测试结果与退出码）。
+
+---
+
+## 2026-06-07: 移除「导出结果视频」选项，新增录制视频保存目录
+
+### 问题描述
+
+主界面「次要选项」里的「导出结果视频」勾选项 + 「选择保存位置…」整行已无实际消费方
+（识别会话的落盘完全由 `RecordingController` 负责，`UiState.save_output/out_path`
+没有任何读取点），属于冗余 UI。同时「录制」功能此前固定写到 `outputs_dir()`，用户
+无法自选保存目录。
+
+### 修改内容
+
+- `apps/app_ui.py`：
+  - 删除「次要选项」中的「导出结果视频」`Checkbutton` 及其「选择保存位置…」行
+    （`out_row`/`out_entry`/`out_btn`），以及配套的 `save_var`/`out_var` 变量、
+    `_toggle_out()` 与 `_choose_out()` 方法。
+  - `UiState` 移除不再被消费的 `save_output` / `out_path` 字段；`_collect_state()`
+    同步去掉相关校验与赋值。
+  - 「录制」分组新增「保存目录：」`Entry` + 「选择…」按钮，绑定新变量
+    `record_dir_var`（默认 `str(outputs_dir())`），按钮回调 `_choose_record_dir()`
+    使用 `filedialog.askdirectory` 选目录。
+  - `RecordingController` 改为注入 `path_provider=self._record_path`：在用户选择的
+    目录下按 `record_<timestamp>.mp4` 时间戳生成文件名，目录为空时回退 `outputs_dir()`。
+
+### 验证方法
+
+- `python -m py_compile apps/app_ui.py` 通过。
+- `pytest tests/test_recording_controller.py tests/test_ui_controls.py
+  tests/test_layout_structure.py` → 18 passed, 2 skipped。
+- `test_app_controls.py` 的 6 个失败为既有问题（stub 缺 `_sync_record_stop_enabled`
+  等属性），与本次改动无关（改动前 stash 后复现同样 6 failed）。
+
+---
+
 ## 2026-06-09: 设置面板（模型管理）+ onefile 单文件打包（用户自助下载模型）
 
 ### 问题描述

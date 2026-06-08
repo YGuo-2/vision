@@ -13,8 +13,14 @@ vision/
 ├── apps/               # Application entry points
 │   ├── main.py               # CLI runner for camera/offline video processing
 │   ├── app_ui.py             # Tkinter desktop UI (Chinese localized)
+│   ├── ui_backend.py         # JSON bridge for the Vue/Tauri desktop frontend
 │   ├── make_template.py      # Create pose templates from videos
 │   └── match_template.py     # Match templates against videos
+├── frontend/           # Windows-only Vue + Vite + Tauri desktop frontend
+│   ├── src/                  # Vue UI and bridge client
+│   └── src-tauri/            # Tauri Rust shell, resources, bundle config
+├── scripts/            # Verification and Windows packaging helpers
+├── packaging/          # PyInstaller runtime hooks for Tauri sidecars
 ├── batch/              # Batch processing tools
 │   ├── batch_dual_compare.py # Dual-template comparison for directories
 │   ├── batch_export_skeleton.py
@@ -53,6 +59,22 @@ Run UI:
 .\.venv\Scripts\python.exe apps/app_ui.py
 ```
 
+Run Vue/Tauri UI in development mode:
+```powershell
+$env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"
+npm --prefix frontend run tauri dev
+```
+
+Verify the desktop migration stack:
+```powershell
+npm run verify:desktop
+```
+
+Build the Windows Tauri package:
+```powershell
+npm run package:windows
+```
+
 Run CLI (camera `0`):
 ```powershell
 .\.venv\Scripts\python.exe apps/main.py --source 0
@@ -67,13 +89,20 @@ Offline export + progress + multithreading (higher throughput, less temporal smo
 
 - Python, 4-space indentation, keep functions small and typed where practical.
 - Prefer clear module boundaries: UI code stays in `app_ui.py`, inference/logic stays in `vision_pipeline.py`.
+- For the migrated frontend, keep Vue/Tauri code under `frontend/` and bridge adaptation in `apps/ui_backend.py`; do not move vision algorithms into Rust or TypeScript.
 - Avoid committing large artifacts (models/videos). Keep `.gitignore` up to date.
+- Do not commit generated desktop artifacts such as `dist/`, `build/`, `frontend/dist/`, `frontend/src-tauri/target/`, or `frontend/src-tauri/resources/*.exe`.
 
 ## Testing Guidelines
 
 No formal test suite yet. Minimum checks before opening a PR:
 ```powershell
 .\.venv\Scripts\python.exe -m py_compile .\apps\main.py .\apps\app_ui.py .\core\vision_pipeline.py
+```
+
+For Vue/Tauri frontend migration work, also run:
+```powershell
+npm run verify:desktop
 ```
 
 ## Commit & Pull Request Guidelines

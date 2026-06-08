@@ -5,3 +5,4 @@
 # 后续所有 Issue 的新增测试统一沿用 pytest 风格，
 # 验收命令：.\.venv\Scripts\python.exe -m pytest tests\xxx.py
 pytest==8.4.2
+hypothesis==6.155.2

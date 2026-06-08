@@ -32,6 +32,9 @@ build/
 dist/
 *.exe
 _pip_*.log
+frontend/node_modules/
+frontend/dist/
+frontend/src-tauri/target/
 标准样本/
 学员样本/
 标准动作要点/

@@ -9,7 +9,8 @@
 - 单模板 / 双模板（正面+侧面）动作匹配与评分
 - 规则引擎扣分（基于 Pose33 原始关键点）
 - 批量目录级对比，输出 CSV/JSONL
-- Tkinter 桌面 GUI（中文界面）
+- Tkinter 桌面 GUI（中文界面，迁移期保留）
+- Windows-only Vue + Tauri + Vite 桌面前端（通过 Python bridge 调用既有后端）
 
 ## 依赖
 
@@ -17,6 +18,8 @@
 - MediaPipe 0.10.31
 - OpenCV 4.13
 - NumPy / Pillow
+- Node.js / npm（新前端开发与构建）
+- Rust / Cargo（Tauri 桌面壳构建）
 
 ## 安装
 
@@ -24,14 +27,42 @@
 python -m venv .venv
 .venv/Scripts/activate      # Windows
 pip install -r requirements.txt
+npm --prefix frontend install
 ```
 
 ## 使用
 
-### 桌面 GUI
+### Tkinter 桌面 GUI（旧入口，保留）
 
 ```bash
 python apps/app_ui.py
+```
+
+### Vue + Tauri 桌面前端（Windows）
+
+开发模式：
+
+```powershell
+$env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"
+npm --prefix frontend run tauri dev
+```
+
+一键验证前端、Tauri 与 Python bridge：
+
+```powershell
+npm run verify:desktop
+```
+
+Windows 打包（会先构建 Python bridge sidecar，再生成 NSIS 安装包）：
+
+```powershell
+npm run package:windows
+```
+
+打包产物位于：
+
+```text
+frontend/src-tauri/target/release/bundle/nsis/
 ```
 
 ### 摄像头实时识别
@@ -76,10 +107,19 @@ core/
   rule_scoring.py      # 规则扣分引擎
   video_writer.py      # 编解码器自适应视频输出
 apps/
-  app_ui.py            # Tkinter 桌面 GUI
+  app_ui.py            # Tkinter 桌面 GUI（迁移期保留）
+  ui_backend.py        # Vue/Tauri JSON bridge，调用既有 Python 后端
   main.py              # CLI 入口
   make_template.py     # 模板创建工具
   match_template.py    # 模板匹配工具
+frontend/
+  src/                 # Vue + Vite 前端
+  src-tauri/           # Tauri Rust 壳与 Windows 打包配置
+scripts/
+  verify-desktop-stack.ps1  # 前端/Tauri/Python bridge 一键验证
+  build-tauri-sidecar.ps1   # 构建 Python bridge sidecar
+packaging/
+  pyinstaller/         # Tauri sidecar 打包 runtime hook
 batch/
   batch_dual_compare.py    # 批量双模板对比
   batch_export_skeleton.py # 批量骨架导出
