@@ -21,16 +21,16 @@ export function initialSessionProgressText(): string {
 export function isBridgeEventForCurrentState(event: BridgeEnvelope, state: CurrentBridgeState): boolean {
   const eventName = event.event ?? "";
   const isSessionScoped = eventName.startsWith("session.") || eventName === "record.status";
-  if (isSessionScoped && event.sessionId && state.sessionId && event.sessionId !== state.sessionId) {
-    return false;
+  if (isSessionScoped) {
+    return Boolean(state.sessionId && event.sessionId === state.sessionId);
   }
 
   const isJobScoped =
     eventName.startsWith("job.") ||
     eventName.endsWith(".progress") ||
     JOB_SCOPED_STATUS_EVENTS.has(eventName);
-  if (isJobScoped && event.jobId && !isKnownJobId(event.jobId, state)) {
-    return false;
+  if (isJobScoped) {
+    return Boolean(event.jobId && isKnownJobId(event.jobId, state));
   }
   return true;
 }

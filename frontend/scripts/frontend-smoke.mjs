@@ -115,6 +115,27 @@ assert(
 );
 assert(
   bridgeState.isBridgeEventForCurrentState(
+    { type: "event", event: "session.frame", jobId: "job-session", payload: {}, error: null, timestamp: "" },
+    currentState
+  ) === false,
+  "missing-id session.frame must be ignored"
+);
+assert(
+  bridgeState.isBridgeEventForCurrentState(
+    { type: "event", event: "record.status", payload: {}, error: null, timestamp: "" },
+    currentState
+  ) === false,
+  "missing-id record.status must be ignored"
+);
+assert(
+  bridgeState.isBridgeEventForCurrentState(
+    { type: "event", event: "record.status", sessionId: "session-current", payload: {}, error: null, timestamp: "" },
+    currentState
+  ) === true,
+  "current record.status must be accepted"
+);
+assert(
+  bridgeState.isBridgeEventForCurrentState(
     { type: "event", event: "analysis.status", jobId: "job-old", payload: {}, error: null, timestamp: "" },
     currentState
   ) === false,
@@ -136,10 +157,17 @@ assert(
 );
 assert(
   bridgeState.isBridgeEventForCurrentState(
+    { type: "event", event: "job.completed", payload: {}, error: null, timestamp: "" },
+    currentState
+  ) === false,
+  "missing-id job.completed must be ignored"
+);
+assert(
+  bridgeState.isBridgeEventForCurrentState(
     { type: "event", event: "analysis.status", jobId: "job-analysis", payload: {}, error: null, timestamp: "" },
     currentState
   ) === true,
-  "current analysis.status must be accepted"
+  "preassigned current analysis.status must be accepted before response"
 );
 
 assert(bridgeState.initialSessionProgressText() === "等待帧", "startup progress must not be 0%");

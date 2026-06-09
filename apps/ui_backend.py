@@ -1494,7 +1494,7 @@ def protocol_manifest() -> JsonDict:
         "version": BRIDGE_VERSION,
         "commands": COMMANDS,
         "message_contract": {
-            "request": ["type", "command", "requestId", "payload"],
+            "request": ["type", "command", "requestId", "jobId", "sessionId", "payload"],
             "response": ["type", "requestId", "ok", "jobId", "sessionId", "payload", "error", "timestamp"],
             "event": ["type", "event", "jobId", "sessionId", "payload", "error", "timestamp"],
         },

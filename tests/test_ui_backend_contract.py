@@ -15,6 +15,14 @@ def test_protocol_manifest_lists_required_message_fields():
     assert manifest["version"] == ui_backend.BRIDGE_VERSION
     assert "session.start" in manifest["commands"]
     assert "analysis.run" in manifest["commands"]
+    assert manifest["message_contract"]["request"] == [
+        "type",
+        "command",
+        "requestId",
+        "jobId",
+        "sessionId",
+        "payload",
+    ]
     assert manifest["message_contract"]["response"] == [
         "type",
         "requestId",

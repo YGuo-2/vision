@@ -38,6 +38,10 @@ def test_rust_bridge_prefers_packaged_sidecar_and_keeps_dev_fallback() -> None:
     assert ".venv" in source
     assert "apps" in source and "ui_backend.py" in source
     assert "creation_flags(0x08000000)" in source
+    assert '"request": ["type", "command", "requestId", "jobId", "sessionId", "payload"]' in source
+    assert '"event": "bridge.decode_error"' in source
+    assert '"jobId": null' in source
+    assert '"sessionId": null' in source
 
 
 def test_sidecar_spec_targets_bridge_without_yolo_or_tkinter_entry() -> None:

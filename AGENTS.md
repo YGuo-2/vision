@@ -80,6 +80,12 @@ Build the Windows Tauri package:
 npm run package:windows
 ```
 
+Latest desktop migration validation (2026-06-09):
+- `npm run verify:desktop`: frontend build, Frontend behavior smoke, Tauri `cargo check`, Python `py_compile`, and desktop regressions passed.
+- `npm run package:windows`: NSIS installer generated.
+- `pytest tests/test_windows_packaging_smoke.py -q`: packaged sidecar `bridge.ping` passed.
+- `pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q`: 31 passed.
+
 Run CLI (camera `0`):
 ```powershell
 .\.venv\Scripts\python.exe apps/main.py --source 0

@@ -89,6 +89,8 @@ def test_frontend_smoke_exercises_behavior_not_only_static_markers():
         "progressTextForFrameProgress",
         "modelDownloadStatusFromJobEvent",
         "foreign analysis.status must be ignored",
+        "missing-id job.completed must be ignored",
+        "preassigned current analysis.status must be accepted before response",
         "failed model download must be shown as failed",
         "raw JSON must keep jobId",
     ):

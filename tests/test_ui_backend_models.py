@@ -228,3 +228,49 @@ def test_download_model_interruption_removes_part_file(tmp_path: Path, monkeypat
 
     assert not (tmp_path / "fake.task.part").exists()
     assert not (tmp_path / "fake.task").exists()
+
+
+def test_download_model_interruption_preserves_existing_model_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec = model_manager.ModelSpec(
+        key="fake",
+        filename="fake.task",
+        url="https://example.test/fake.task",
+        label="Fake",
+    )
+    monkeypatch.setattr(model_manager, "models_dir", lambda: tmp_path)
+    existing = tmp_path / "fake.task"
+    existing.write_bytes(b"existing-model")
+
+    class FakeResponse:
+        headers = {"Content-Length": "10"}
+
+        def __init__(self) -> None:
+            self.read_calls = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self, chunk_size: int) -> bytes:
+            self.read_calls += 1
+            return b"12345" if self.read_calls == 1 else b""
+
+    monkeypatch.setattr(model_manager.urllib.request, "urlopen", lambda req, timeout: FakeResponse())
+    progress_calls = 0
+
+    def progress(downloaded: int, total: int | None) -> None:
+        nonlocal progress_calls
+        progress_calls += 1
+
+    def should_stop() -> bool:
+        return progress_calls >= 2
+
+    with pytest.raises(InterruptedError):
+        model_manager.download_model(spec, progress_cb=progress, should_stop=should_stop)
+
+    assert not (tmp_path / "fake.task.part").exists()
+    assert existing.read_bytes() == b"existing-model"

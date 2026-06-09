@@ -227,25 +227,31 @@ async function refreshModels(): Promise<void> {
 }
 
 async function downloadModel(modelKey: string): Promise<void> {
-  const response = await sendBridgeCommand("model.download", { modelKey });
+  const pendingJobId = nextBridgeId("model-job");
+  modelDownloadJobId.value = pendingJobId;
+  const response = await sendBridgeCommand("model.download", { modelKey }, { jobId: pendingJobId });
   setRawJson(response);
   if (!response.ok) {
+    modelDownloadJobId.value = undefined;
     errorText.value = response.error?.message ?? "模型下载失败";
     return;
   }
-  modelDownloadJobId.value = response.jobId;
+  modelDownloadJobId.value = response.jobId ?? pendingJobId;
   modelDownloadStatus.value = `下载中：${modelKey}`;
   modelDownloadProgress.value = null;
 }
 
 async function downloadAllMissing(): Promise<void> {
-  const response = await sendBridgeCommand("model.download", { allMissing: true });
+  const pendingJobId = nextBridgeId("model-job");
+  modelDownloadJobId.value = pendingJobId;
+  const response = await sendBridgeCommand("model.download", { allMissing: true }, { jobId: pendingJobId });
   setRawJson(response);
   if (!response.ok) {
+    modelDownloadJobId.value = undefined;
     errorText.value = response.error?.message ?? "下载缺失模型失败";
     return;
   }
-  modelDownloadJobId.value = response.jobId;
+  modelDownloadJobId.value = response.jobId ?? pendingJobId;
   modelDownloadStatus.value = "下载全部缺失模型中";
   modelDownloadProgress.value = null;
 }
@@ -267,6 +273,10 @@ async function startSession(): Promise<void> {
   fpsText.value = "--";
   progressText.value = initialSessionProgressText();
   previewImage.value = "";
+  const pendingSessionId = nextBridgeId("session");
+  const pendingJobId = nextBridgeId("session-job");
+  sessionId.value = pendingSessionId;
+  jobId.value = pendingJobId;
   const payload: JsonRecord = {
     sourceKind: sourceKind.value,
     poseVariant: poseVariant.value,
@@ -279,16 +289,21 @@ async function startSession(): Promise<void> {
   } else {
     payload.videoPath = videoPath.value.trim();
   }
-  const response = await sendBridgeCommand("session.start", payload);
+  const response = await sendBridgeCommand("session.start", payload, {
+    sessionId: pendingSessionId,
+    jobId: pendingJobId
+  });
   setRawJson(response);
   if (!response.ok) {
     statusText.value = "启动失败";
+    sessionId.value = undefined;
+    jobId.value = undefined;
     errorText.value = response.error?.message ?? "启动失败";
     return;
   }
   isRunning.value = true;
-  sessionId.value = response.sessionId;
-  jobId.value = response.jobId;
+  sessionId.value = response.sessionId ?? pendingSessionId;
+  jobId.value = response.jobId ?? pendingJobId;
 }
 
 async function stopSession(): Promise<void> {
@@ -352,14 +367,17 @@ async function createTemplate(): Promise<void> {
   assignOptionalInt(payload, "startFrame", analysisStartFrame.value);
   assignOptionalInt(payload, "endFrame", analysisEndFrame.value);
 
-  const response = await sendBridgeCommand("template.create", payload);
+  const pendingJobId = nextBridgeId("analysis-job");
+  analysisJobId.value = pendingJobId;
+  const response = await sendBridgeCommand("template.create", payload, { jobId: pendingJobId });
   setRawJson(response);
   if (!response.ok) {
     analysisStatus.value = "模板生成失败";
+    analysisJobId.value = undefined;
     errorText.value = response.error?.message ?? "模板生成失败";
     return;
   }
-  analysisJobId.value = response.jobId;
+  analysisJobId.value = response.jobId ?? pendingJobId;
 }
 
 async function runAnalysis(): Promise<void> {
@@ -395,14 +413,17 @@ async function runAnalysis(): Promise<void> {
   assignOptionalString(payload, "previewOut", previewOut.value);
   assignOptionalString(payload, "debugVideoPath", debugVideoPath.value);
 
-  const response = await sendBridgeCommand("analysis.run", payload);
+  const pendingJobId = nextBridgeId("analysis-job");
+  analysisJobId.value = pendingJobId;
+  const response = await sendBridgeCommand("analysis.run", payload, { jobId: pendingJobId });
   setRawJson(response);
   if (!response.ok) {
     analysisStatus.value = "动作分析失败";
+    analysisJobId.value = undefined;
     errorText.value = response.error?.message ?? "动作分析失败";
     return;
   }
-  analysisJobId.value = response.jobId;
+  analysisJobId.value = response.jobId ?? pendingJobId;
 }
 
 async function stopAnalysisJob(): Promise<void> {
@@ -569,6 +590,14 @@ function assignOptionalInt(payload: JsonRecord, key: string, value: string): voi
   if (Number.isFinite(parsed)) {
     payload[key] = parsed;
   }
+}
+
+function nextBridgeId(prefix: string): string {
+  const cryptoApi = globalThis.crypto;
+  if (cryptoApi && "randomUUID" in cryptoApi) {
+    return `${prefix}-${cryptoApi.randomUUID()}`;
+  }
+  return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 function isJsonRecord(value: unknown): value is JsonRecord {

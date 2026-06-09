@@ -82,7 +82,7 @@ fn bridge_protocol_manifest() -> serde_json::Value {
             "job.stop": { "description": "Stop any long-running bridge job.", "long_running": false }
         },
         "messageContract": {
-            "request": ["type", "command", "requestId", "payload"],
+            "request": ["type", "command", "requestId", "jobId", "sessionId", "payload"],
             "response": ["type", "requestId", "ok", "jobId", "sessionId", "payload", "error", "timestamp"],
             "event": ["type", "event", "jobId", "sessionId", "payload", "error", "timestamp"]
         }
@@ -279,6 +279,8 @@ fn start_bridge_process(app: AppHandle) -> Result<BridgeProcess, String> {
                         serde_json::json!({
                             "type": "event",
                             "event": "bridge.decode_error",
+                            "jobId": null,
+                            "sessionId": null,
                             "payload": { "line": line, "error": err.to_string() },
                             "error": null,
                             "timestamp": ""
