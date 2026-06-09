@@ -16,7 +16,8 @@ import {
   modelDownloadStatusFromJobEvent,
   modelDownloadStatusFromPayload,
   progressTextForFrameProgress,
-  progressTextForSessionStatus
+  progressTextForSessionStatus,
+  sessionStatusFromJobEvent
 } from "./bridge-state";
 
 type SourceKind = "none" | "camera" | "video";
@@ -492,11 +493,11 @@ function handleBridgeEvent(event: BridgeEnvelope): void {
   if (event.event === "template.status" || event.event === "analysis.status") {
     applyAnalysisPayload(event.payload);
   }
-  if (event.event === "job.completed" || event.event === "job.stopped") {
+  if (event.event === "job.completed" || event.event === "job.stopped" || event.event === "job.failed") {
     if (event.jobId === modelDownloadJobId.value) {
       const summary = modelDownloadStatusFromJobEvent(event);
       modelDownloadStatus.value = summary.status;
-      if (summary.failed.length > 0) {
+      if (summary.failed.length > 0 || event.event === "job.failed") {
         errorText.value = summary.status;
       }
       modelDownloadJobId.value = undefined;
@@ -504,15 +505,24 @@ function handleBridgeEvent(event: BridgeEnvelope): void {
       return;
     }
     if (event.jobId === analysisJobId.value) {
+      if (event.event === "job.failed") {
+        analysisStatus.value = "失败";
+        analysisJobId.value = undefined;
+        if (event.error) {
+          errorText.value = event.error.message;
+        }
+        return;
+      }
       const result = isJsonRecord(event.payload.result) ? event.payload.result : event.payload;
       applyAnalysisPayload(result);
       analysisStatus.value = event.event === "job.stopped" ? "已停止" : "已完成";
       analysisJobId.value = undefined;
       return;
     }
-    if (!event.jobId || event.jobId === jobId.value) {
+    const sessionTerminalStatus = sessionStatusFromJobEvent(event);
+    if (sessionTerminalStatus && (!event.jobId || event.jobId === jobId.value)) {
       isRunning.value = false;
-      statusText.value = "已停止";
+      statusText.value = sessionTerminalStatus;
     }
   }
   if (event.error) {

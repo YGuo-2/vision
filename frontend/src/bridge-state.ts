@@ -79,8 +79,26 @@ export function modelDownloadStatusFromJobEvent(event: BridgeEnvelope): ModelDow
   if (event.event === "job.stopped") {
     return { status: "已取消", failed: [] };
   }
+  if (event.event === "job.failed") {
+    const result = asRecord(event.payload.result) ?? event.payload;
+    const failed = arrayOfRecords(result.failed);
+    if (failed.length > 0) {
+      return { status: `下载失败：${formatFailedModels(failed)}`, failed };
+    }
+    return { status: `下载失败：${event.error?.message ?? "未知错误"}`, failed: [] };
+  }
   const result = asRecord(event.payload.result) ?? event.payload;
   return modelDownloadStatusFromPayload(result) ?? { status: "下载完成", failed: [] };
+}
+
+export function sessionStatusFromJobEvent(event: BridgeEnvelope): string | null {
+  if (event.event === "job.failed") {
+    return "运行失败";
+  }
+  if (event.event === "job.completed" || event.event === "job.stopped") {
+    return "已停止";
+  }
+  return null;
 }
 
 function isKnownJobId(eventJobId: string, state: CurrentBridgeState): boolean {

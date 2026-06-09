@@ -47,12 +47,17 @@ Spce workflow final acceptance 的第一轮与对抗审查发现：已提交的 
 - 第三轮第一波 B-016 复查发现卸载取消模型下载仅有 marker 覆盖；本轮追加 B-019，
   新增 `frontend/src/bridge-lifecycle.ts`，让 `App.vue` 卸载路径复用 `stopJobById`，
   并在 frontend behavior smoke 中用 stub 断言 `job.stop` 的 command、payload 和 options。
+- 第四轮第一波 B-003 复查发现当前实时识别 job 异步失败后 UI 仍可能保持运行态；本轮追加
+  B-020，让当前 session `job.failed` 映射为“运行失败”终态并清理运行状态，同时补充
+  current/foreign failed event 的 behavior smoke 断言。
 
 ### 验证方法
 
 - `npm --prefix frontend run test` → Frontend behavior smoke checks passed；覆盖 B-019 的 active model download unmount helper 精确 `job.stop` 断言。
 - `pytest tests/test_vue_tauri_acceptance_gaps.py -q` → 6 passed（B-019），第一波新增修复后随组合测试为 13 passed。
 - `npm --prefix frontend run build` → passed。
+- `npm --prefix frontend run test` → Frontend behavior smoke checks passed；覆盖 B-020 的 current/foreign `job.failed` 和 session failed terminal status。
+- `pytest tests/test_ui_backend_sessions.py tests/test_input_source_state.py tests/test_vue_tauri_acceptance_gaps.py -q` → 21 passed。
 - `pytest tests/test_ui_backend_models.py tests/test_vue_tauri_acceptance_gaps.py -q` → 13 passed。
 - `pytest tests/test_ui_backend_contract.py tests/test_windows_packaging_smoke.py -q` → 17 passed。
 - `pytest tests/test_ui_backend_contract.py tests/test_ui_backend_models.py tests/test_vue_tauri_acceptance_gaps.py tests/test_windows_packaging_smoke.py -q` → 29 passed（前序复验组合）。

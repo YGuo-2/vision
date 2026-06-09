@@ -98,6 +98,7 @@ for (const marker of [
   "isBridgeEventForCurrentState",
   "progressTextForSessionStatus",
   "modelDownloadStatusFromJobEvent",
+  "sessionStatusFromJobEvent",
   "JOB_SCOPED_STATUS_EVENTS"
 ]) {
   assertIncludes(bridgeStateSource, marker, "bridge-state.ts");
@@ -179,6 +180,20 @@ assert(
 );
 assert(
   bridgeState.isBridgeEventForCurrentState(
+    { type: "event", event: "job.failed", jobId: "job-session", payload: {}, error: { code: "runtime", message: "camera failed", detail: {} }, timestamp: "" },
+    currentState
+  ) === true,
+  "current session job.failed must be accepted"
+);
+assert(
+  bridgeState.isBridgeEventForCurrentState(
+    { type: "event", event: "job.failed", jobId: "job-old", payload: {}, error: { code: "runtime", message: "old failed", detail: {} }, timestamp: "" },
+    currentState
+  ) === false,
+  "foreign session job.failed must be ignored"
+);
+assert(
+  bridgeState.isBridgeEventForCurrentState(
     { type: "event", event: "analysis.status", jobId: "job-analysis", payload: {}, error: null, timestamp: "" },
     currentState
   ) === true,
@@ -205,6 +220,40 @@ const failedDownload = bridgeState.modelDownloadStatusFromJobEvent({
 });
 assert(failedDownload.status.includes("下载失败"), "failed model download must be shown as failed");
 assert(!failedDownload.status.includes("下载完成"), "failed model download must not be shown as completed");
+
+const failedJobDownload = bridgeState.modelDownloadStatusFromJobEvent({
+  type: "event",
+  event: "job.failed",
+  jobId: "job-model",
+  payload: {},
+  error: { code: "network", message: "connection lost", detail: {} },
+  timestamp: ""
+});
+assert(failedJobDownload.status.includes("下载失败"), "job.failed model download must be shown as failed");
+assert(failedJobDownload.status.includes("connection lost"), "job.failed model download must include error message");
+
+assert(
+  bridgeState.sessionStatusFromJobEvent({
+    type: "event",
+    event: "job.failed",
+    jobId: "job-session",
+    payload: {},
+    error: { code: "runtime", message: "camera failed", detail: {} },
+    timestamp: ""
+  }) === "运行失败",
+  "current session job.failed must map to failed terminal status"
+);
+assert(
+  bridgeState.sessionStatusFromJobEvent({
+    type: "event",
+    event: "job.stopped",
+    jobId: "job-session",
+    payload: {},
+    error: null,
+    timestamp: ""
+  }) === "已停止",
+  "current session job.stopped must map to stopped terminal status"
+);
 
 const stopCalls = [];
 const stoppedEnvelope = await bridgeLifecycle.stopJobById(async (command, payload, options) => {

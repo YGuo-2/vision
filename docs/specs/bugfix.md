@@ -52,6 +52,7 @@ Vue + Tauri + Vite 前端迁移在 `docs/specs/tasks.md` 中已被标记为完�
 - B-008/B-010 agent 发现 active spec 仍有以 moving HEAD 表达的提交范围，最终验收证据不可稳定复查。
 - 重新进入 final acceptance 后，B-008 agent 发现 docs sync commit `3aa2578` 未纳入 active progress/task 证据链，且 B-017 grep 命令使用了不完整写法，仍影响文档可追溯性。
 - 第三轮第一波 B-016 agent 发现 Vue unmount 取消 active 模型下载虽然已实现，但测试仍停留在 marker 覆盖，缺少真实 `job.stop` payload/options 行为断言。
+- 第四轮第一波 B-003 agent 发现当前实时识别 job 若异步发出 `job.failed`，Vue 只写错误文本，不会清理 `isRunning` 与运行态文案。
 
 ### 2.5 影响范围
 
