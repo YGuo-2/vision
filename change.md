@@ -64,6 +64,7 @@ Spce workflow final acceptance 的第一轮与对抗审查发现：已提交的 
 - `pytest tests/test_ui_backend_sessions.py tests/test_input_source_state.py tests/test_vue_tauri_acceptance_gaps.py -q` → 21 passed。
 - `pytest tests/test_ui_backend_models.py tests/test_vue_tauri_acceptance_gaps.py -q` → 13 passed。
 - `npm --prefix frontend run test` → Frontend behavior smoke checks passed；覆盖 B-021 的早到 failed 阻止 late response 复活运行态。
+- `npm run verify:desktop` → Desktop stack verification passed，含 118 条 Python desktop regression tests。
 - `pytest tests/test_ui_backend_contract.py tests/test_windows_packaging_smoke.py -q` → 17 passed。
 - `pytest tests/test_ui_backend_contract.py tests/test_ui_backend_models.py tests/test_vue_tauri_acceptance_gaps.py tests/test_windows_packaging_smoke.py -q` → 29 passed（前序复验组合）。
 - `C:\Users\ny\.cargo\bin\cargo.exe check`（`frontend/src-tauri`）→ passed。
