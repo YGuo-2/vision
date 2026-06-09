@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
+    "test": "node scripts/frontend-smoke.mjs",
     "build:sidecar": "powershell -NoProfile -ExecutionPolicy Bypass -File ../scripts/build-tauri-sidecar.ps1",
     "preview": "vite preview",
     "tauri": "tauri"

@@ -31,6 +31,9 @@ function Invoke-Step {
     Write-Host ""
     Write-Host "==> $Name" -ForegroundColor Cyan
     & $Action
+    if ($LASTEXITCODE -ne $null -and $LASTEXITCODE -ne 0) {
+        throw "$Name failed with exit code $LASTEXITCODE"
+    }
 }
 
 $DesktopTests = @(
@@ -46,11 +49,28 @@ $DesktopTests = @(
     "tests/test_pose33_v3_golden.py",
     "tests/test_template_metadata.py",
     "tests/test_tech_eval_contract.py",
-    "tests/test_valid_mask_migration.py"
+    "tests/test_valid_mask_migration.py",
+    "tests/test_vue_tauri_acceptance_gaps.py"
 )
 
 Invoke-Step "Frontend build" {
-    npm --prefix $FrontendRoot run build
+    Push-Location $RepoRoot
+    try {
+        npm --prefix frontend run build
+    }
+    finally {
+        Pop-Location
+    }
+}
+
+Invoke-Step "Frontend interaction smoke" {
+    Push-Location $RepoRoot
+    try {
+        npm --prefix frontend run test
+    }
+    finally {
+        Pop-Location
+    }
 }
 
 Invoke-Step "Tauri cargo check" {

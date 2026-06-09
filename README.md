@@ -53,6 +53,12 @@ npm --prefix frontend run tauri dev
 npm run verify:desktop
 ```
 
+前端 smoke 可单独运行：
+
+```powershell
+npm --prefix frontend run test
+```
+
 Windows 打包（会先构建 Python bridge sidecar，再生成 NSIS 安装包）：
 
 ```powershell

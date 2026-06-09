@@ -130,6 +130,12 @@ select {
   margin-top: 12px;
 }
 
+.path-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 96px;
+  gap: 8px;
+}
+
 button {
   height: 34px;
   border: 1px solid #c7d1d2;
@@ -212,7 +218,7 @@ button:disabled {
 
 .segmented {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 6px;
   padding: 3px;
   border: 1px solid #c7d1d2;
@@ -238,6 +244,50 @@ button:disabled {
   color: #65757c;
   font-size: 12px;
   line-height: 1.45;
+}
+
+.compact-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.result-block {
+  margin-top: 10px;
+  border-top: 1px solid #d8e1e1;
+  padding-top: 8px;
+}
+
+.indicator-row {
+  display: grid;
+  gap: 3px;
+  margin-top: 8px;
+  color: #33444b;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.settings-panel {
+  margin-top: 10px;
+}
+
+.model-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 76px;
+  gap: 8px;
+  align-items: center;
+  margin-top: 10px;
+  border-top: 1px solid #d8e1e1;
+  padding-top: 8px;
+}
+
+.model-row div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  color: #33444b;
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .error-text {

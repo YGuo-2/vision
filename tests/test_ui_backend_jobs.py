@@ -116,17 +116,20 @@ def test_submit_serializes_job_failure_with_traceback_detail():
 def test_job_stop_command_uses_the_default_manager():
     events: list[dict] = []
     manager = ui_backend.BridgeJobManager(events.append)
+    started = threading.Event()
+    release = threading.Event()
     previous = ui_backend.DEFAULT_JOB_MANAGER
     ui_backend.DEFAULT_JOB_MANAGER = manager
     try:
         assert manager.submit(
             "analysis.run",
             {"video": "demo.mp4"},
-            lambda ctx: {"stopped": ctx.stopped()},
+            lambda ctx: (started.set(), release.wait(1.0), {"stopped": ctx.stopped()})[-1],
             request_id="req-4",
             job_id="job-4",
             session_id="session-4",
         )
+        assert started.wait(1.0)
         response = ui_backend.handle_command(
             ui_backend.CommandRequest(
                 command="job.stop",
@@ -136,5 +139,29 @@ def test_job_stop_command_uses_the_default_manager():
         )
         assert response["ok"] is True
         assert response["payload"] == {"jobId": "job-4", "stopped": True}
+        release.set()
+        final = manager.wait("job-4", 2.0)
+        assert final is not None
+        assert final.status == "stopped"
     finally:
+        release.set()
         ui_backend.DEFAULT_JOB_MANAGER = previous
+
+
+def test_stop_completed_job_returns_false_and_keeps_snapshot_unchanged():
+    manager = ui_backend.BridgeJobManager()
+
+    manager.submit(
+        "analysis.run",
+        {"video": "demo.mp4"},
+        lambda ctx: {"done": True, "stopped": ctx.stopped()},
+        request_id="req-completed",
+        job_id="job-completed",
+    )
+    final = manager.wait("job-completed", 2.0)
+
+    assert final is not None
+    assert final.status == "succeeded"
+    assert final.snapshot()["stopRequested"] is False
+    assert manager.stop("job-completed") is False
+    assert final.snapshot()["stopRequested"] is False

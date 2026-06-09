@@ -78,6 +78,13 @@ export async function listenBridgeEvents(callback: (event: BridgeEnvelope) => vo
   return listen<BridgeEnvelope>("bridge-event", (event) => callback(event.payload));
 }
 
+export async function selectDirectory(): Promise<string | null> {
+  if (!isTauriRuntime()) {
+    return null;
+  }
+  return invoke<string | null>("select_directory");
+}
+
 function nextRequestId(): string {
   const cryptoApi = globalThis.crypto;
   if (cryptoApi && "randomUUID" in cryptoApi) {

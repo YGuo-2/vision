@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::ffi::c_void;
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -67,25 +68,96 @@ struct BridgeState {
 fn bridge_protocol_manifest() -> serde_json::Value {
     serde_json::json!({
         "version": "1.0",
-        "commands": [
-            "bridge.ping",
-            "camera.list",
-            "model.status",
-            "model.download",
-            "session.start",
-            "session.stop",
-            "record.toggle",
-            "record.stop",
-            "template.create",
-            "analysis.run",
-            "job.stop"
-        ],
+        "commands": {
+            "bridge.ping": { "description": "Return bridge liveness and protocol version.", "long_running": false },
+            "camera.list": { "description": "Enumerate Windows camera devices.", "long_running": false },
+            "model.status": { "description": "Return MediaPipe model install status.", "long_running": false },
+            "model.download": { "description": "Download one model or all missing models.", "long_running": true, "stoppable": true },
+            "session.start": { "description": "Start realtime camera or offline video preview.", "long_running": true, "stoppable": true },
+            "session.stop": { "description": "Stop a running preview session.", "long_running": false },
+            "record.toggle": { "description": "Toggle idle, recording, and paused state.", "long_running": false },
+            "record.stop": { "description": "Finalize the current recording segment.", "long_running": false },
+            "template.create": { "description": "Create a pose template from a reference video.", "long_running": true, "stoppable": true },
+            "analysis.run": { "description": "Run template comparison and/or tech evaluation.", "long_running": true, "stoppable": true },
+            "job.stop": { "description": "Stop any long-running bridge job.", "long_running": false }
+        },
         "messageContract": {
             "request": ["type", "command", "requestId", "payload"],
-            "response": ["type", "requestId", "ok", "payload", "error", "timestamp"],
-            "event": ["type", "event", "payload", "error", "timestamp"]
+            "response": ["type", "requestId", "ok", "jobId", "sessionId", "payload", "error", "timestamp"],
+            "event": ["type", "event", "jobId", "sessionId", "payload", "error", "timestamp"]
         }
     })
+}
+
+#[tauri::command]
+fn select_directory() -> Option<String> {
+    pick_windows_directory()
+}
+
+#[cfg(windows)]
+fn pick_windows_directory() -> Option<String> {
+    const BIF_RETURNONLYFSDIRS: u32 = 0x0000_0001;
+    const BIF_NEWDIALOGSTYLE: u32 = 0x0000_0040;
+
+    #[repr(C)]
+    struct BrowseInfoW {
+        hwnd_owner: *mut c_void,
+        pidl_root: *mut c_void,
+        psz_display_name: *mut u16,
+        lpsz_title: *const u16,
+        ul_flags: u32,
+        lpfn: *mut c_void,
+        l_param: isize,
+        i_image: i32,
+    }
+
+    #[link(name = "shell32")]
+    extern "system" {
+        fn SHBrowseForFolderW(lpbi: *mut BrowseInfoW) -> *mut c_void;
+        fn SHGetPathFromIDListW(pidl: *mut c_void, psz_path: *mut u16) -> i32;
+    }
+
+    #[link(name = "ole32")]
+    extern "system" {
+        fn CoTaskMemFree(pv: *mut c_void);
+    }
+
+    let title: Vec<u16> = "选择录制目录\0".encode_utf16().collect();
+    let mut display_name = [0u16; 260];
+    let mut browse_info = BrowseInfoW {
+        hwnd_owner: std::ptr::null_mut(),
+        pidl_root: std::ptr::null_mut(),
+        psz_display_name: display_name.as_mut_ptr(),
+        lpsz_title: title.as_ptr(),
+        ul_flags: BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE,
+        lpfn: std::ptr::null_mut(),
+        l_param: 0,
+        i_image: 0,
+    };
+
+    let pidl = unsafe { SHBrowseForFolderW(&mut browse_info) };
+    if pidl.is_null() {
+        return None;
+    }
+
+    let mut path = [0u16; 260];
+    let ok = unsafe { SHGetPathFromIDListW(pidl, path.as_mut_ptr()) != 0 };
+    unsafe { CoTaskMemFree(pidl) };
+    if !ok {
+        return None;
+    }
+
+    let len = path.iter().position(|item| *item == 0).unwrap_or(path.len());
+    if len == 0 {
+        None
+    } else {
+        Some(String::from_utf16_lossy(&path[..len]))
+    }
+}
+
+#[cfg(not(windows))]
+fn pick_windows_directory() -> Option<String> {
+    None
 }
 
 #[tauri::command]
@@ -286,7 +358,8 @@ pub fn run() {
         .manage(BridgeState::default())
         .invoke_handler(tauri::generate_handler![
             bridge_protocol_manifest,
-            bridge_command
+            bridge_command,
+            select_directory
         ])
         .run(tauri::generate_context!())
         .expect("error while running Vision Tauri application");

@@ -1,3 +1,40 @@
+## 2026-06-09: 修复 Vue/Tauri 迁移最终验收缺口
+
+### 问题描述
+
+Spce workflow final acceptance 的第一轮与对抗审查发现：已提交的 Vue/Tauri 迁移虽然通过构建、
+后端 bridge 测试和打包 smoke，但 Vue 端尚未完整覆盖 Tkinter 用户可见功能，且 bridge 错误
+`requestId`、job 停止语义、实时事件过滤、录制目录选择、动作分析/直拳技术评估、模型管理、
+前端交互验证和 docs/specs 状态同步均存在缺口。
+
+### 修改内容
+
+- 修复 `apps/ui_backend.py` bridge 契约：manifest 补 `jobId/sessionId` 字段，错误路径保留原
+  `requestId`，`job.stop` 仅对 pending/running job 成功。
+- 强化 Vue 主窗口状态：新增 `none/camera/video` 三态、完整 raw JSON envelope 展示、当前
+  `sessionId/jobId` 事件过滤、预览帧 UI 节流和实时流进度文案。
+- 补齐 Vue 动作分析面板：支持模板生成、模板比对、起止帧、worker、预览导出、直拳技术评估
+  的 stance/viewHint/debugVideo，并展示匹配分数、匹配片段、预览路径、技术指标、原因类型和失败环节。
+- 补齐设置/模型管理面板：展示模型目录、逐模型路径、安装状态、文件大小，支持单模型下载、
+  下载全部缺失、下载进度和取消。
+- 补齐录制目录选择：Vue 调用 Tauri `select_directory`，Rust 侧使用 Windows Shell32 folder picker
+  FFI；默认录制目录留空时回退 Python `outputs_dir()`，不再固定传相对 `outputs`。
+- 新增 `tests/test_vue_tauri_acceptance_gaps.py` 与 `frontend/scripts/frontend-smoke.mjs`，并将
+  `npm --prefix frontend run test` 接入 `npm run verify:desktop`；修复验证脚本未检查原生命令
+  exit code 的问题。
+- 将 `docs/specs/` 切换到 Bugfix 工作流并记录 B-001 至 B-008 的受控执行证据。
+
+### 验证方法
+
+- `npm --prefix frontend run test` → passed。
+- `pytest tests/test_vue_tauri_acceptance_gaps.py -q` → 5 passed。
+- `npm run verify:desktop` → 前端 build/test、Tauri `cargo check`、Python py_compile、114 个桌面回归测试通过。
+- `pytest tests/test_windows_packaging_smoke.py -q` → 6 passed。
+- `npm run package:windows` → 生成
+  `frontend/src-tauri/target/release/bundle/nsis/Vision 动作识别与评分_0.1.0_x64-setup.exe`。
+
+---
+
 ## 2026-06-09: 迁移前端到 Windows-only Vue + Tauri + Vite，并保留 Python 后端契约
 
 ### 问题描述

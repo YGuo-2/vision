@@ -270,6 +270,8 @@ class BridgeJobManager:
             record = self._jobs.get(job_id)
             if record is None:
                 return False
+            if record.status not in {"pending", "running"}:
+                return False
             record.stop_event.set()
             return True
 
@@ -1493,8 +1495,8 @@ def protocol_manifest() -> JsonDict:
         "commands": COMMANDS,
         "message_contract": {
             "request": ["type", "command", "requestId", "payload"],
-            "response": ["type", "requestId", "ok", "payload", "error", "timestamp"],
-            "event": ["type", "event", "payload", "error", "timestamp"],
+            "response": ["type", "requestId", "ok", "jobId", "sessionId", "payload", "error", "timestamp"],
+            "event": ["type", "event", "jobId", "sessionId", "payload", "error", "timestamp"],
         },
     }
 
@@ -1577,6 +1579,24 @@ def decode_message(line: str) -> JsonDict:
     if not isinstance(data, dict):
         raise ValueError("bridge message must be a JSON object")
     return data
+
+
+def error_context_from_line(line: str) -> tuple[str, str | None, str | None, JsonDict]:
+    try:
+        raw = json.loads(line)
+    except Exception:  # noqa: BLE001 - best effort context for malformed JSON.
+        return "unknown", None, None, {}
+    if not isinstance(raw, dict):
+        return "unknown", None, None, {"rawType": type(raw).__name__}
+
+    request_id = str(raw.get("requestId") or "").strip() or "unknown"
+    job_id = str(raw.get("jobId") or "").strip() or None
+    session_id = str(raw.get("sessionId") or "").strip() or None
+    detail: JsonDict = {}
+    command = str(raw.get("command") or "").strip()
+    if command:
+        detail["command"] = command
+    return request_id, job_id, session_id, detail
 
 
 def handle_command(request: CommandRequest) -> JsonDict:
@@ -1697,10 +1717,13 @@ def handle_line(line: str) -> str:
         request = parse_command(decode_message(line))
         response = handle_command(request)
     except Exception as exc:  # noqa: BLE001 - bridge must serialize all failures.
+        request_id, job_id, session_id, detail = error_context_from_line(line)
         response = make_response(
-            "unknown",
+            request_id,
             ok=False,
-            error=BridgeError("bad_request", str(exc)),
+            error=BridgeError("bad_request", str(exc), detail),
+            job_id=job_id,
+            session_id=session_id,
         )
     return encode_message(response)
 

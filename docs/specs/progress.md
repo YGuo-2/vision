@@ -1,17 +1,17 @@
 # Spce workflow Progress
 
-> **Workflow:** design-first
+> **Workflow:** bugfix
 > **Mode:** strict
 > **Status:** Completed
 > **Current Task:** n/a
 > **Approval:** approved
-> **Last Checkpoint:** 2026-06-09 00:45:27
+> **Last Checkpoint:** 2026-06-09 19:35:38
 > **Branch:** main
-> **Last Known Commit:** 3468fe2
+> **Last Known Commit:** n/a
 
 ## Resume Summary
-- Goal: 更新文档、`change.md` 和最终回归证据
-- Approved specs: design.md, requirements.md, tasks.md
+- Goal: 同步文档状态、`change.md` 和最终回归证据
+- Approved specs: bugfix.md, design.md, tasks.md
 - Current task: n/a
 - Next safe action: Run pre-acceptance, then final acceptance.
 - Blockers: n/a
@@ -20,25 +20,21 @@
 - Task ID: n/a
 - Status: done
 - Started at: n/a
-- Verification needed: README.md AGENTS.md and change.md updated; git diff --check passed with only LF-to-CRLF warnings; py_compile apps/app_ui.py apps/ui_backend.py core/vision_pipeline.py passed; pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q passed (31 tests); npm run verify:desktop passed (106 desktop tests); pytest tests/test_windows_packaging_smoke.py -q passed (6 tests)
-- Files expected to change: `README.md`, `AGENTS.md`, `change.md`, `docs/specs/`, `frontend/`
+- Verification needed: 同步 README.md、AGENTS.md、change.md 与 bugfix 规范状态，记录前端 smoke、verify:desktop、packaging 和核心回归证据。验证：git diff --check 无 whitespace error（仅 LF/CRLF warning）；py_compile apps/app_ui.py apps/ui_backend.py core/vision_pipeline.py passed；pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q -> 31 passed；pytest tests/test_windows_packaging_smoke.py -q -> 6 passed；npm run verify:desktop -> frontend build/test, cargo check, py_compile, 114 desktop regression tests passed。
+- Files expected to change: `docs/specs/`, `README.md`, `AGENTS.md`, `change.md`
 
 ## Completed Work Log
 | Task ID | Time | Commit/State | Verification | Notes |
 |:---|:---|:---|:---|:---|
-| - | - | - | - | - |
-| T-001 | 2026-06-08 22:49:11 | 3468fe2 | npm run build passed in frontend; cargo check passed in frontend/src-tauri after installing Rustup and adding icons/icon.ico | n/a |
-| T-002 | 2026-06-08 22:53:56 | 3468fe2 | pytest tests/test_ui_backend_contract.py -q passed (8 tests); cargo check passed with no warnings after public protocol structs | n/a |
-| T-003 | 2026-06-08 22:58:31 | 3468fe2 | pytest tests/test_ui_backend_contract.py tests/test_ui_backend_jobs.py -q passed (12 tests); cargo check passed | n/a |
-| T-004 | 2026-06-08 23:23:50 | 3468fe2 | pytest tests/test_camera_enum.py tests/test_input_source_state.py tests/test_ui_backend_contract.py tests/test_ui_backend_jobs.py tests/test_ui_backend_sessions.py -q passed (34 tests); npm run build passed; cargo check passed | n/a |
-| T-006 | 2026-06-08 23:42:28 | 3468fe2 | pytest tests/test_ui_backend_contract.py tests/test_ui_backend_jobs.py tests/test_ui_backend_sessions.py tests/test_recording_controller.py tests/test_app_controls.py -q passed (36 tests); py_compile apps/app_ui.py apps/ui_backend.py core/recording_controller.py passed; npm run build passed | n/a |
-| T-007 | 2026-06-08 23:49:12 | 3468fe2 | pytest tests/test_ui_backend_analysis.py tests/test_ui_backend_contract.py tests/test_ui_backend_jobs.py -q passed (15 tests); pytest tests/test_pose33_v3_golden.py tests/test_template_metadata.py -q passed (24 tests); py_compile apps/ui_backend.py core/action_compare.py passed; npm run build passed | n/a |
-| T-008 | 2026-06-08 23:53:56 | 3468fe2 | pytest tests/test_ui_backend_analysis.py tests/test_tech_eval_contract.py tests/test_pose33_v3_golden.py -q passed (30 tests); py_compile apps/ui_backend.py analysis/tech_eval.py passed; npm run build passed | n/a |
-| T-009 | 2026-06-09 00:01:48 | 3468fe2 | pytest tests/test_ui_backend_models.py tests/test_ui_backend_contract.py -q passed (12 tests); py_compile apps/ui_backend.py core/model_manager.py passed; npm run build passed | n/a |
-| T-005 | 2026-06-09 00:21:05 | 3468fe2 | npm run build passed; cargo check passed; pytest tests/test_app_controls.py tests/test_ui_controls.py -q passed (13 tests); py_compile apps/ui_backend.py apps/app_ui.py passed; Playwright screenshot output/playwright/t005-main.png inspected nonblank with main controls, preview, status areas | n/a |
-| T-010 | 2026-06-09 00:25:43 | 3468fe2 | npm run verify:desktop passed: frontend build, Tauri cargo check, py_compile apps/app_ui.py apps/ui_backend.py core/vision_pipeline.py, and 106 desktop regression tests passed | n/a |
-| T-011 | 2026-06-09 00:41:40 | 3468fe2 | npm run package:windows passed and produced frontend/src-tauri/target/release/bundle/nsis/Vision 动作识别与评分_0.1.0_x64-setup.exe; pytest tests/test_windows_packaging_smoke.py -q passed (6 tests); packaged sidecar frontend/src-tauri/resources/vision-ui-backend.exe bridge.ping returned protocol version 1.0 | n/a |
-| T-012 | 2026-06-09 00:45:27 | 3468fe2 | README.md AGENTS.md and change.md updated; git diff --check passed with only LF-to-CRLF warnings; py_compile apps/app_ui.py apps/ui_backend.py core/vision_pipeline.py passed; pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q passed (31 tests); npm run verify:desktop passed (106 desktop tests); pytest tests/test_windows_packaging_smoke.py -q passed (6 tests) | n/a |
+| — | — | — | — | 暂无完成任务 |
+| B-001 | 2026-06-09 18:49:49 | n/a | 新增 tests/test_vue_tauri_acceptance_gaps.py，并更新 bridge/job 契约测试；运行 .\\.venv\\Scripts\\python.exe -m pytest tests\\test_ui_backend_contract.py tests\\test_ui_backend_jobs.py tests\\test_vue_tauri_acceptance_gaps.py -q 得到 9 failed / 11 passed，失败点对应 final acceptance 缺口：manifest jobId/sessionId、bad request requestId、completed job stop、Vue analysis/model/download/dir picker/event/raw JSON/frontend test coverage。 | n/a |
+| B-002 | 2026-06-09 18:54:12 | n/a | 修复 apps/ui_backend.py 与 frontend/src-tauri/src/lib.rs 的 message contract、错误 requestId 保留和 active-only job.stop；更新阻塞式 job.stop 测试。验证：.\\.venv\\Scripts\\python.exe -m pytest tests\\test_ui_backend_contract.py tests\\test_ui_backend_jobs.py -q -> 15 passed；frontend/src-tauri cargo check passed。 | n/a |
+| B-003 | 2026-06-09 19:00:38 | n/a | 修复 Vue 输入源 none/camera/video 三态、完整 raw JSON envelope、当前 session/job 事件过滤、预览帧 UI 节流和实时流进度文案。验证：npm --prefix frontend run build passed；pytest tests\\test_ui_backend_sessions.py tests\\test_input_source_state.py -q -> 15 passed；tests\\test_vue_tauri_acceptance_gaps.py 中 event/raw JSON 覆盖项已转绿，剩余失败归属 B-004/B-005/B-006/B-007。 | n/a |
+| B-005 | 2026-06-09 19:10:10 | n/a | 补齐 Vue 动作分析面板：template.create、analysis.run、模板路径/基准视频/目标视频/startFrame/endFrame/worker/previewOut、doTechEval、stance/viewHint/debugVideo、结果展示和 job.stop。验证：npm --prefix frontend run build passed；pytest tests\\test_ui_backend_analysis.py tests\\test_tech_eval_contract.py tests\\test_pose33_v3_golden.py -q -> 30 passed；tests\\test_vue_tauri_acceptance_gaps.py 中 analysis/tech eval 覆盖项已转绿。 | n/a |
+| B-006 | 2026-06-09 19:14:02 | n/a | 补齐 Vue 设置/模型管理面板：modelsDir/path/sizeMb/installed/active 展示、model.download 单模型/全部缺失、model.progress、cancelModelDownload/job.stop。验证：npm --prefix frontend run build passed；pytest tests\\test_ui_backend_models.py tests\\test_ui_backend_contract.py -q -> 14 passed；tests\\test_vue_tauri_acceptance_gaps.py 中 settings/model download 覆盖项已转绿。 | n/a |
+| B-004 | 2026-06-09 19:20:07 | n/a | 补齐录制目录选择：Vue selectRecordDir 调用受限 Tauri select_directory，Rust 使用 Windows Shell32 folder picker FFI，无新增依赖、不走任意 shell；recordDir 默认留空，让 Python bridge 回退 outputs_dir()。验证：cargo check passed；npm --prefix frontend run build passed；pytest tests\\test_ui_backend_sessions.py tests\\test_recording_controller.py tests\\test_vue_tauri_acceptance_gaps.py -q 中目录覆盖项转绿，剩余唯一失败为 B-007 前端测试入口。 | n/a |
+| B-007 | 2026-06-09 19:28:42 | n/a | 强化验证集合：新增 frontend/scripts/frontend-smoke.mjs 与 npm --prefix frontend run test；verify-desktop-stack.ps1 接入前端 smoke、纳入 tests/test_vue_tauri_acceptance_gaps.py，并检查原生命令 exit code。验证：npm --prefix frontend run test passed；pytest tests\\test_vue_tauri_acceptance_gaps.py -q -> 5 passed；npm run verify:desktop -> frontend build/test, cargo check, py_compile, 114 desktop regression tests passed；pytest tests\\test_windows_packaging_smoke.py -q -> 6 passed；npm run package:windows produced NSIS installer。 | n/a |
+| B-008 | 2026-06-09 19:35:38 | n/a | 同步 README.md、AGENTS.md、change.md 与 bugfix 规范状态，记录前端 smoke、verify:desktop、packaging 和核心回归证据。验证：git diff --check 无 whitespace error（仅 LF/CRLF warning）；py_compile apps/app_ui.py apps/ui_backend.py core/vision_pipeline.py passed；pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q -> 31 passed；pytest tests/test_windows_packaging_smoke.py -q -> 6 passed；npm run verify:desktop -> frontend build/test, cargo check, py_compile, 114 desktop regression tests passed。 | n/a |
 
 ## Recovery Notes
-- Completed T-012
+- Completed B-008

@@ -19,6 +19,8 @@ def test_protocol_manifest_lists_required_message_fields():
         "type",
         "requestId",
         "ok",
+        "jobId",
+        "sessionId",
         "payload",
         "error",
         "timestamp",
@@ -26,6 +28,8 @@ def test_protocol_manifest_lists_required_message_fields():
     assert manifest["message_contract"]["event"] == [
         "type",
         "event",
+        "jobId",
+        "sessionId",
         "payload",
         "error",
         "timestamp",
@@ -133,6 +137,43 @@ def test_handle_line_serializes_ping_response():
     assert response["ok"] is True
     assert response["payload"]["version"] == ui_backend.BRIDGE_VERSION
     assert "session.start" in response["payload"]["commands"]
+
+
+def test_handle_line_preserves_request_id_on_parse_errors():
+    line = json.dumps(
+        {
+            "type": "command",
+            "command": "unknown.command",
+            "requestId": "req-bad-command",
+            "payload": {},
+        },
+        ensure_ascii=False,
+    )
+
+    response = json.loads(ui_backend.handle_line(line))
+
+    assert response["type"] == "response"
+    assert response["requestId"] == "req-bad-command"
+    assert response["ok"] is False
+    assert response["error"]["code"] == "bad_request"
+
+
+def test_handle_line_preserves_request_id_on_bad_payload_shape():
+    line = json.dumps(
+        {
+            "type": "command",
+            "command": "bridge.ping",
+            "requestId": "req-bad-payload",
+            "payload": [],
+        },
+        ensure_ascii=False,
+    )
+
+    response = json.loads(ui_backend.handle_line(line))
+
+    assert response["requestId"] == "req-bad-payload"
+    assert response["ok"] is False
+    assert response["error"]["code"] == "bad_request"
 
 
 def test_model_status_known_command_dispatches_successfully():
