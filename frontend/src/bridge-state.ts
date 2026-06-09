@@ -43,6 +43,18 @@ export function shouldApplySessionStartResponse(
   return state.sessionId === pendingSessionId && state.sessionJobId === pendingJobId;
 }
 
+export function shouldApplyModelDownloadStartResponse(state: CurrentBridgeState, pendingJobId: string): boolean {
+  return state.modelDownloadJobId === pendingJobId;
+}
+
+export function shouldRenderPreviewFrameAt(
+  nowMs: number,
+  lastRenderedAtMs: number,
+  minIntervalMs: number
+): boolean {
+  return nowMs - lastRenderedAtMs >= minIntervalMs;
+}
+
 export function progressTextForSessionStatus(payload: JsonRecord): string | null {
   if (String(payload.state ?? "") !== "running") {
     return null;

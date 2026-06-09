@@ -17,7 +17,9 @@ import {
   modelDownloadStatusFromPayload,
   progressTextForFrameProgress,
   progressTextForSessionStatus,
+  shouldApplyModelDownloadStartResponse,
   shouldApplySessionStartResponse,
+  shouldRenderPreviewFrameAt,
   sessionStatusFromJobEvent
 } from "./bridge-state";
 
@@ -233,8 +235,13 @@ async function downloadModel(modelKey: string): Promise<void> {
   const response = await sendBridgeCommand("model.download", { modelKey }, { jobId: pendingJobId });
   setRawJson(response);
   if (!response.ok) {
-    modelDownloadJobId.value = undefined;
+    if (shouldApplyModelDownloadStartResponse({ modelDownloadJobId: modelDownloadJobId.value }, pendingJobId)) {
+      modelDownloadJobId.value = undefined;
+    }
     errorText.value = response.error?.message ?? "模型下载失败";
+    return;
+  }
+  if (!shouldApplyModelDownloadStartResponse({ modelDownloadJobId: modelDownloadJobId.value }, pendingJobId)) {
     return;
   }
   modelDownloadJobId.value = response.jobId ?? pendingJobId;
@@ -248,8 +255,13 @@ async function downloadAllMissing(): Promise<void> {
   const response = await sendBridgeCommand("model.download", { allMissing: true }, { jobId: pendingJobId });
   setRawJson(response);
   if (!response.ok) {
-    modelDownloadJobId.value = undefined;
+    if (shouldApplyModelDownloadStartResponse({ modelDownloadJobId: modelDownloadJobId.value }, pendingJobId)) {
+      modelDownloadJobId.value = undefined;
+    }
     errorText.value = response.error?.message ?? "下载缺失模型失败";
+    return;
+  }
+  if (!shouldApplyModelDownloadStartResponse({ modelDownloadJobId: modelDownloadJobId.value }, pendingJobId)) {
     return;
   }
   modelDownloadJobId.value = response.jobId ?? pendingJobId;
@@ -269,6 +281,9 @@ async function cancelModelDownload(): Promise<void> {
 function stopActiveJobsBeforeUnmount(): void {
   if (modelDownloadJobId.value) {
     void cancelModelDownload();
+  }
+  if (analysisJobId.value) {
+    void stopAnalysisJob();
   }
   if (isRunning.value) {
     void stopSession();
@@ -440,8 +455,8 @@ async function runAnalysis(): Promise<void> {
 }
 
 async function stopAnalysisJob(): Promise<void> {
-  if (!analysisJobId.value) return;
-  const response = await sendBridgeCommand("job.stop", { jobId: analysisJobId.value }, { jobId: analysisJobId.value });
+  const response = await stopJobById(sendBridgeCommand, analysisJobId.value);
+  if (!response) return;
   setRawJson(response);
   if (!response.ok) {
     errorText.value = response.error?.message ?? "停止动作分析失败";
@@ -553,7 +568,7 @@ function shouldApplyBridgeEvent(event: BridgeEnvelope): boolean {
 
 function shouldRenderPreviewFrame(): boolean {
   const now = Date.now();
-  if (now - lastPreviewFrameAt < PREVIEW_FRAME_MIN_INTERVAL_MS) {
+  if (!shouldRenderPreviewFrameAt(now, lastPreviewFrameAt, PREVIEW_FRAME_MIN_INTERVAL_MS)) {
     return false;
   }
   lastPreviewFrameAt = now;
@@ -851,8 +866,8 @@ function applyRecordPayload(payload: RecordState): void {
               <span>大小：{{ model.sizeMb ?? "-" }} MB</span>
               <span>path：{{ model.path ?? "-" }}</span>
             </div>
-            <button class="secondary-button" :disabled="model.installed || Boolean(modelDownloadJobId)" @click="downloadModel(model.key)">
-              下载
+            <button class="secondary-button" :disabled="Boolean(modelDownloadJobId)" @click="downloadModel(model.key)">
+              {{ model.installed ? "重新下载" : "下载" }}
             </button>
           </div>
         </div>

@@ -64,10 +64,16 @@ for (const marker of [
   "downloadAllMissing",
   "cancelModelDownload",
   "stopActiveJobsBeforeUnmount",
-  "stopJobById(sendBridgeCommand, modelDownloadJobId.value)"
+  "stopJobById(sendBridgeCommand, modelDownloadJobId.value)",
+  "stopJobById(sendBridgeCommand, analysisJobId.value)",
+  "重新下载"
 ]) {
   assertIncludes(app, marker, "App.vue");
 }
+assert(
+  !app.includes(':disabled="model.installed || Boolean(modelDownloadJobId)"'),
+  "installed models must remain downloadable for redownload"
+);
 
 for (const handler of [
   "startSession",
@@ -99,7 +105,9 @@ for (const marker of [
   "progressTextForSessionStatus",
   "modelDownloadStatusFromJobEvent",
   "sessionStatusFromJobEvent",
+  "shouldApplyModelDownloadStartResponse",
   "shouldApplySessionStartResponse",
+  "shouldRenderPreviewFrameAt",
   "JOB_SCOPED_STATUS_EVENTS"
 ]) {
   assertIncludes(bridgeStateSource, marker, "bridge-state.ts");
@@ -279,6 +287,68 @@ assert(
   ) === false,
   "foreign late session.start response must not mark running"
 );
+assert(
+  bridgeState.shouldApplyModelDownloadStartResponse({ modelDownloadJobId: "job-model" }, "job-model") === true,
+  "matching model.download response must be allowed to keep downloading"
+);
+assert(
+  bridgeState.shouldApplyModelDownloadStartResponse({ modelDownloadJobId: undefined }, "job-model") === false,
+  "early model download failure must prevent late model.download response from marking downloading"
+);
+assert(
+  bridgeState.shouldApplyModelDownloadStartResponse({ modelDownloadJobId: "job-other" }, "job-model") === false,
+  "foreign late model.download response must not mark downloading"
+);
+
+let guardedModelDownloadStatus = "下载中：pose_full";
+let guardedModelDownloadJobId = "job-model";
+const earlyModelFailure = bridgeState.modelDownloadStatusFromJobEvent({
+  type: "event",
+  event: "job.completed",
+  jobId: "job-model",
+  payload: { result: { state: "failed", failed: [{ key: "pose_full", error: "network" }] } },
+  error: null,
+  timestamp: ""
+});
+guardedModelDownloadStatus = earlyModelFailure.status;
+guardedModelDownloadJobId = undefined;
+if (bridgeState.shouldApplyModelDownloadStartResponse({ modelDownloadJobId: guardedModelDownloadJobId }, "job-model")) {
+  guardedModelDownloadStatus = "下载中：pose_full";
+}
+assert(
+  guardedModelDownloadStatus.includes("下载失败"),
+  "early model download failure must keep failed status after late start response"
+);
+
+guardedModelDownloadStatus = "下载中：pose_full";
+guardedModelDownloadJobId = "job-model";
+const earlyModelStop = bridgeState.modelDownloadStatusFromJobEvent({
+  type: "event",
+  event: "job.stopped",
+  jobId: "job-model",
+  payload: {},
+  error: null,
+  timestamp: ""
+});
+guardedModelDownloadStatus = earlyModelStop.status;
+guardedModelDownloadJobId = undefined;
+if (bridgeState.shouldApplyModelDownloadStartResponse({ modelDownloadJobId: guardedModelDownloadJobId }, "job-model")) {
+  guardedModelDownloadStatus = "下载中：pose_full";
+}
+assert(
+  guardedModelDownloadStatus === "已取消",
+  "early model download stop must keep stopped status after late start response"
+);
+
+let lastPreviewFrameAt = 1000;
+if (bridgeState.shouldRenderPreviewFrameAt(1050, lastPreviewFrameAt, 100)) {
+  lastPreviewFrameAt = 1050;
+}
+assert(lastPreviewFrameAt === 1000, "rapid session.frame events must be throttled");
+if (bridgeState.shouldRenderPreviewFrameAt(1100, lastPreviewFrameAt, 100)) {
+  lastPreviewFrameAt = 1100;
+}
+assert(lastPreviewFrameAt === 1100, "later session.frame events must be accepted");
 
 const stopCalls = [];
 const stoppedEnvelope = await bridgeLifecycle.stopJobById(async (command, payload, options) => {
@@ -306,6 +376,25 @@ const skippedStop = await bridgeLifecycle.stopJobById(async () => {
 }, undefined);
 assert(skippedStop === null, "empty model download job id must skip stop command");
 assert(emptyStopCalled === false, "empty model download job id must not call bridge");
+
+const analysisStopCalls = [];
+const stoppedAnalysisEnvelope = await bridgeLifecycle.stopJobById(async (command, payload, options) => {
+  analysisStopCalls.push({ command, payload, options });
+  return {
+    type: "response",
+    requestId: "req-analysis-stop",
+    ok: true,
+    jobId: options.jobId,
+    payload: { stopped: true },
+    error: null,
+    timestamp: ""
+  };
+}, "job-analysis");
+assert(analysisStopCalls.length === 1, "active analysis unmount helper must send exactly one stop command");
+assert(analysisStopCalls[0].command === "job.stop", "active analysis unmount helper must call job.stop");
+assert(analysisStopCalls[0].payload.jobId === "job-analysis", "active analysis unmount helper must stop exact job payload");
+assert(analysisStopCalls[0].options.jobId === "job-analysis", "active analysis unmount helper must stop exact job options");
+assert(stoppedAnalysisEnvelope?.jobId === "job-analysis", "active analysis unmount helper must return stop envelope");
 
 const rawEnvelope = {
   type: "event",
