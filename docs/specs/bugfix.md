@@ -50,6 +50,7 @@ Vue + Tauri + Vite 前端迁移在 `docs/specs/tasks.md` 中已被标记为完�
 - B-004 agent 发现 Rust Shell32 目录选择器使用 `BIF_NEWDIALOGSTYLE` 和 `SHBrowseForFolderW`，但调用前缺少 COM/OLE 初始化，Windows 打包运行时可能静默失败。
 - B-006 agent 发现 `core/model_manager.py` 在 HTTP `Content-Length` 已知但实际读取不足时仍会 `os.replace(.part, dest)`，半成品可能被误判为已安装；Vue unmount 只停止 session，未取消 active 模型下载。
 - B-008/B-010 agent 发现 active spec 仍有以 moving HEAD 表达的提交范围，最终验收证据不可稳定复查。
+- 重新进入 final acceptance 后，B-008 agent 发现 docs sync commit `3aa2578` 未纳入 active progress/task 证据链，且 B-017 grep 命令使用了不完整写法，仍影响文档可追溯性。
 
 ### 2.5 影响范围
 

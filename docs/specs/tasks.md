@@ -4,7 +4,7 @@
 > **关联规范：** `docs/specs/bugfix.md` · `docs/specs/design.md`
 > **状态：** Completed
 > **当前任务：** n/a
-> **进度：** 17 / 17 已完成
+> **进度：** 18 / 18 已完成
 > **最后更新：** 2026-06-09
 
 ---
@@ -273,13 +273,27 @@
   - 完成时间: 2026-06-09 22:17:40
   - 备注: pre-acceptance 已在实现提交 8764f86 后用干净工作树通过；文档证据提交后需再次复查。
   - 涉及文件: `docs/specs/`, `README.md`, `AGENTS.md`, `change.md`
-  - 验证命令: `rg "5526945\.\.HE" docs\specs README.md AGENTS.md change.md`; `npm run verify:desktop`; `python <plugin-root>\scripts\validate_spec.py docs\specs --pre-acceptance`
+  - 验证命令: `powershell -NoProfile -Command "$p = '5526945..' + 'HEAD'; rg --fixed-strings $p docs\specs README.md AGENTS.md change.md"`; `npm run verify:desktop`; `python <plugin-root>\scripts\validate_spec.py docs\specs --pre-acceptance`
   - 依赖: B-016
   - 风险: medium
   - 覆盖: BUG-006, FIX-006
   - 可并行: 否
   - 验证标准: active docs 不再使用 moving HEAD 这类移动提交证据；README/AGENTS/change.md 记录新增修复与最终验证；pre-acceptance 通过后重新进入 final acceptance。
   - 预估工程量: 1 小时
+
+- [x] **B-018:** 修复第一波 B-008 文档追踪复查缺口
+  - 状态: done
+  - 验证证据: 记录 docs sync commit 3aa2578 并修复 B-017/B-018 grep 命令为完整 HEAD 字符串拼接，避免自匹配；PowerShell 构造 fixed-string 检查目标模式（`5526945..` + `HEAD`）-> no matches；change.md 已记录 B-018；validate_spec.py docs\specs --resume/--pre-acceptance 将在 docs-only 提交后重跑。
+  - 完成时间: 2026-06-09 22:50:10
+  - 备注: 当前 docs-only 证据提交的最终 hash 通过 git log -1 复查，避免提交内容自引用 hash。
+  - 涉及文件: `docs/specs/tasks.md`, `docs/specs/progress.md`, `docs/specs/spec.yml`, `change.md`
+  - 验证命令: `powershell -NoProfile -Command "$p = '5526945..' + 'HEAD'; rg --fixed-strings $p docs\specs README.md AGENTS.md change.md"`; `python <plugin-root>\scripts\validate_spec.py docs\specs --pre-acceptance`
+  - 依赖: B-017
+  - 风险: medium
+  - 覆盖: BUG-006, FIX-006
+  - 可并行: 否
+  - 验证标准: active docs 明确记录 docs sync commit `3aa2578`；B-017/B-018 证据说明当前 docs-only 证据提交通过 `git log -1` 复查；检查命令不再使用不完整 grep 写法且不造成自匹配。
+  - 预估工程量: 0.5 小时
 
 ---
 
@@ -302,6 +316,7 @@
 | 13 | B-015 | Windows 目录选择器 COM 初始化 |
 | 14 | B-016 | 模型下载完整性和卸载取消 |
 | 15 | B-017 | 验证、文档和 commit 证据同步 |
+| 16 | B-018 | B-008 文档追踪复查缺口修复 |
 
 ---
 
@@ -322,6 +337,7 @@
 | B-015 | Windows COM/打包 | Shell32 目录选择器未初始化 COM 可能在打包运行时静默失败 | 需 Rust marker 与 cargo check |
 | B-016 | 下载/文件完整性 | HTTP 截断或关闭窗口可能导致半成品模型被误安装或下载任务泄漏 | 需截断下载和 unmount 取消回归 |
 | B-017 | 文档/可追溯性 | 移动 `HEAD` 证据会让最终验收不可复查 | 需 docs grep、pre-acceptance |
+| B-018 | 文档/可追溯性 | docs sync commit 未纳入证据链会让最终验收无法重建当前文档状态 | 需 docs grep、resume/pre-acceptance |
 
 ---
 
@@ -339,3 +355,4 @@
 | B-015 | 2026-06-09 22:00:45 | `3d6441b..8764f86` | Rust Shell32 picker 增加 OleInitialize/OleUninitialize；MTA RPC_E_CHANGED_MODE 时禁用 BIF_NEWDIALOGSTYLE 降级；验证：C:\Users\ny\.cargo\bin\cargo.exe check -> passed；pytest tests/test_windows_packaging_smoke.py -q -> 8 passed；npm --prefix frontend run test -> Frontend behavior smoke checks passed。 | 依据 Microsoft SHBrowseForFolder COM 初始化要求修复。 |
 | B-016 | 2026-06-09 22:04:56 | `3d6441b..8764f86` | download_model 校验已知 Content-Length 的截断 EOF 并清理 .part；Vue onBeforeUnmount 复用 cancelModelDownload 停止 active 下载；验证：pytest tests/test_ui_backend_models.py tests/test_vue_tauri_acceptance_gaps.py -q -> 13 passed；npm --prefix frontend run test -> Frontend behavior smoke checks passed；npm --prefix frontend run build -> passed。 | 正式模型文件在中断和截断下载时均保持不变。 |
 | B-017 | 2026-06-09 22:17:40 | `3d6441b..8764f86` | README/AGENTS/change.md 与 docs/specs 已同步；rg '5526945\\.\\.HEAD' docs/specs README.md AGENTS.md change.md -> no matches；npm run verify:desktop -> 118 passed；pytest tests/test_windows_packaging_smoke.py -q -> 8 passed；pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q -> 31 passed；npm run package:windows -> NSIS installer generated；validate_spec.py docs\specs --resume 和 --pre-acceptance -> OK。 | 文档证据提交后再次复查 resume/pre-acceptance。 |
+| B-018 | 2026-06-09 22:50:10 | `3aa2578` | 记录 docs sync commit 3aa2578 并修复 B-017/B-018 grep 命令为完整 HEAD 字符串拼接，避免自匹配；PowerShell 构造 fixed-string 检查目标模式（`5526945..` + `HEAD`）-> no matches；change.md 已记录 B-018。 | 当前 docs-only 证据提交的最终 hash 通过 git log -1 复查，避免提交内容自引用 hash。 |

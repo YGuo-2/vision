@@ -42,6 +42,8 @@ Spce workflow final acceptance 的第一轮与对抗审查发现：已提交的 
   并将旧的 moving HEAD 证据固化为 `5526945..3d6441b`。
 - 将 `docs/specs/` 切换到 Bugfix 工作流并记录 B-001 至 B-017 的受控执行证据。
 - 第一波最终验收回路修复实现范围：`3d6441b..8764f86`。
+- 第一波重跑 B-008 复查发现 docs sync commit `3aa2578` 未纳入 active 证据链；本轮追加
+  B-018 文档修复，记录 `3aa2578` 并将 grep 命令改为完整 HEAD 字符串拼接，避免自匹配。
 
 ### 验证方法
 
