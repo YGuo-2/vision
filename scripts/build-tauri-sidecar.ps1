@@ -15,11 +15,18 @@ if (-not (Test-Path $PythonExe)) {
 }
 
 New-Item -ItemType Directory -Force -Path $ResourceDir | Out-Null
+if (Test-Path $SidecarExe) {
+    Remove-Item -LiteralPath $SidecarExe -Force
+}
 
 Write-Host "Building Python bridge sidecar..." -ForegroundColor Cyan
 Push-Location $RepoRoot
 try {
     & $PythonExe -m PyInstaller ui_backend_sidecar.spec --noconfirm --clean
+    $PyInstallerExitCode = $LASTEXITCODE
+    if ($null -ne $PyInstallerExitCode -and $PyInstallerExitCode -ne 0) {
+        throw "PyInstaller failed with exit code $PyInstallerExitCode"
+    }
 }
 finally {
     Pop-Location

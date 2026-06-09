@@ -90,7 +90,16 @@ def test_sidecar_build_script_copies_exe_into_tauri_resources() -> None:
     assert "ui_backend_sidecar.spec" in source
     assert "dist\\vision-ui-backend.exe" in source
     assert "frontend\\src-tauri\\resources" in source
+    assert "Remove-Item -LiteralPath $SidecarExe -Force" in source
+    assert "$PyInstallerExitCode = $LASTEXITCODE" in source
+    assert "PyInstaller failed with exit code" in source
     assert "Copy-Item" in source
+    assert source.index("Remove-Item -LiteralPath $SidecarExe -Force") < source.index(
+        "& $PythonExe -m PyInstaller"
+    )
+    assert source.index("$PyInstallerExitCode = $LASTEXITCODE") < source.index(
+        "Copy-Item -LiteralPath $SidecarExe"
+    )
 
 
 def test_sidecar_runtime_hook_aliases_video_writer(monkeypatch) -> None:
