@@ -77,7 +77,7 @@ frontend/src-tauri/target/release/bundle/nsis/
 - `npm run package:windows`：生成 NSIS 安装包。
 - `pytest tests/test_windows_packaging_smoke.py -q`：8 passed，packaged sidecar `bridge.ping` 通过，并覆盖 Shell32 目录选择器 COM 初始化。
 - `pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q`：31 passed。
-- 新增回归覆盖：bridge manifest optional/nullable 契约、TS null envelope、模型下载截断保护、窗口关闭取消下载、组合动作分析停止后跳过技术评估、预览帧节流行为、模型下载 early terminal late response guard、已安装模型重新下载和窗口卸载停止 active analysis/template job。
+- 新增回归覆盖：bridge manifest optional/nullable 契约、TS null envelope、模型下载截断保护、窗口关闭取消下载、组合动作分析停止后跳过技术评估、预览帧节流行为、模型下载 early terminal late response guard、已安装模型重新下载、窗口卸载停止 active analysis/template job，以及 sidecar 构建退出码/旧产物保护。
 
 ### 摄像头实时识别
 

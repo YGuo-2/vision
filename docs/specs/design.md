@@ -21,7 +21,7 @@
 - **事件状态隔离不足：** Vue 全局处理 bridge event，未按当前 `sessionId/jobId` 过滤；高频 `session.frame` 未节流。
 - **验证证据偏窄：** `npm run verify:desktop` 构建 Vue 并运行 Python/Tkinter 回归，但没有 Vue 交互测试、Tauri 协议边界测试、dev-mode 启动证据和安装后主窗口证据。
 - **文档状态不同步：** `tasks.md`、`progress.md`、`design.md`、`requirements.md` 的头部状态和 `spec.yml` 批准状态不一致。
-- **第一波验收补充根因：** manifest 未声明 optional 字段语义，TS 类型未接受 `null` envelope；Windows Shell32 picker 缺少 COM/OLE 初始化；模型下载未校验已知长度的截断 EOF；Vue unmount 未停止 active model download；复验证据使用 moving HEAD 范围；重新验收时 docs sync commit `3aa2578` 又未进入 active 证据链；第三轮第一波 B-016 发现 unmount 取消下载缺少行为级 payload/options 回归；第四轮第一波 B-003 发现当前 session `job.failed` 未作为实时会话终态处理；第五轮第一波 B-003 发现早到 `job.failed` 会被后到 `session.start` response 覆盖，且证据日志仍有非具体 commit/不可复现命令；第六轮第一波发现 B-013/B-018 详细任务证据仍有 stale wording，且 request-side `jobId/sessionId` nullable 语义未进入 Python/Rust manifest 与 parity 测试；第七轮第一波发现组合 `analysis.run` stop 后仍继续 tech eval，且最新验证数字未同步到 README/AGENTS/change/specs；第二波对抗审查发现预览帧节流缺少行为级测试、模型下载 early terminal 可能被 late start response 覆盖、已安装模型不能重新下载、unmount 未停止 active analysis/template job。
+- **第一波验收补充根因：** manifest 未声明 optional 字段语义，TS 类型未接受 `null` envelope；Windows Shell32 picker 缺少 COM/OLE 初始化；模型下载未校验已知长度的截断 EOF；Vue unmount 未停止 active model download；复验证据使用 moving HEAD 范围；重新验收时 docs sync commit `3aa2578` 又未进入 active 证据链；第三轮第一波 B-016 发现 unmount 取消下载缺少行为级 payload/options 回归；第四轮第一波 B-003 发现当前 session `job.failed` 未作为实时会话终态处理；第五轮第一波 B-003 发现早到 `job.failed` 会被后到 `session.start` response 覆盖，且证据日志仍有非具体 commit/不可复现命令；第六轮第一波发现 B-013/B-018 详细任务证据仍有 stale wording，且 request-side `jobId/sessionId` nullable 语义未进入 Python/Rust manifest 与 parity 测试；第七轮第一波发现组合 `analysis.run` stop 后仍继续 tech eval，且最新验证数字未同步到 README/AGENTS/change/specs；第二波对抗审查发现预览帧节流缺少行为级测试、模型下载 early terminal 可能被 late start response 覆盖、已安装模型不能重新下载、unmount 未停止 active analysis/template job；B-024 后首轮复验发现 sidecar build script 未检查 PyInstaller exit code，旧 sidecar exe 可能被复制进安装包。
 
 ### 1.3 触发条件
 
@@ -87,6 +87,7 @@ flowchart TD
 - 对第六轮第一波发现追加最小修复：同步 B-013/B-018 详细任务证据文字；Python/Rust manifest 的 `nullable.request` 显式列出 `jobId/sessionId`，并用 Python contract 与 Rust source smoke 锁定 request nullable parity。
 - 对第七轮第一波发现追加最小修复：`analysis.run` 在 compare 后和 tech eval/debug export 前检查 `ctx.stopped()`，停止后直接返回 stopped payload；新增组合 compare+tech eval stop 回归；README/AGENTS/change/specs 更新到当前 `verify:desktop` 结果。
 - 对第二波对抗审查发现追加最小修复：抽出可测试的预览帧节流 helper 与模型下载 start response guard；Vue 仅在 pending model job 仍匹配时应用 late response；已安装模型显示“重新下载”并复用固定 `modelKey` 下载；unmount 复用 `stopJobById` 停止 active analysis/template job；前端 smoke 增加对应行为断言。
+- 对 B-024 后首轮复验发现追加最小修复：sidecar 构建脚本在 PyInstaller 前删除旧 exe，运行后检查 `$LASTEXITCODE`，只有当前构建产物存在时才复制到 Tauri resources；packaging smoke 锁定删除旧产物、退出码检查和复制顺序。
 
 ### 3.2 被否决的备选方案
 

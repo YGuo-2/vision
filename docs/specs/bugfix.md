@@ -122,6 +122,8 @@ Vue + Tauri + Vite 前端迁移在 `docs/specs/tasks.md` 中已被标记为完�
 - **THEN** 部分文档仍显示 Draft、0/12、草稿或旧 commit，和完成/批准状态冲突。
 - **WHEN** 审查 Windows 打包证据
 - **THEN** 已有证据证明 installer 和 sidecar ping，但未证明 dev-mode 启动、安装后主窗口启动或缺模型时 packaged UI 下载入口。
+- **WHEN** PyInstaller 构建 sidecar 失败但旧 `dist\vision-ui-backend.exe` 仍存在
+- **THEN** build script 可能复制旧 sidecar 继续打包，导致安装包证据不能证明当前 bridge 已进入产物。
 
 ---
 
@@ -155,7 +157,7 @@ Vue + Tauri + Vite 前端迁移在 `docs/specs/tasks.md` 中已被标记为完�
 ### FIX-006: 验证与文档证据可信
 
 - **WHEN** 运行桌面验证与最终验收
-- **THEN** 验证集合包含 Vue 交互/协议测试、Python 回归、Tauri/Rust 检查、Windows 打包 smoke 和明确运行级证据；文档状态与实际审批/任务状态一致。
+- **THEN** 验证集合包含 Vue 交互/协议测试、Python 回归、Tauri/Rust 检查、Windows 打包 smoke、sidecar 构建退出码/旧产物保护和明确运行级证据；文档状态与实际审批/任务状态一致。
 
 ---
 

@@ -65,10 +65,15 @@ Spce workflow final acceptance 的第一轮与对抗审查发现：已提交的 
 - 第二波对抗审查发现 B-003/B-006/B-009/B-019+B-020 仍有四个前端生命周期和覆盖缺口：
   预览帧节流缺少行为测试、模型下载 early failed/stopped 可能被 late start response 覆盖为“下载中”、
   已安装模型无法像 Tkinter 一样“重新下载”、窗口卸载未停止 active analysis/template job。本轮追加
-  B-024（实现提交 `eab6894`）：抽出 `shouldRenderPreviewFrameAt` 与
+  B-024（实现提交 `eab6894`，docs sync 提交 `2b4ae3d`）：抽出 `shouldRenderPreviewFrameAt` 与
   `shouldApplyModelDownloadStartResponse` 行为 helper，Vue 只在 pending model job 仍匹配时应用
   start response；已安装模型按钮显示“重新下载”并复用固定 `modelKey` 下载；unmount 复用
   `stopJobById` 停止 active analysis/template job；frontend smoke 增加对应行为断言。
+- B-024 后首轮复验 B-007 发现 sidecar 构建脚本未检查 PyInstaller 退出码，且旧
+  `dist\vision-ui-backend.exe` 可能在失败构建后继续被复制进 Tauri resources。本轮追加 B-025
+  （实现提交 `7d44b21`）：`scripts/build-tauri-sidecar.ps1` 在运行 PyInstaller 前删除旧 sidecar，
+  运行后检查 `$LASTEXITCODE`，非零即失败；只有新产物存在才复制。`tests/test_windows_packaging_smoke.py`
+  锁定删除旧产物、退出码检查和复制顺序。
 
 ### 验证方法
 
@@ -86,6 +91,9 @@ Spce workflow final acceptance 的第一轮与对抗审查发现：已提交的 
 - `pytest tests/test_vue_tauri_acceptance_gaps.py tests/test_ui_backend_models.py tests/test_ui_backend_sessions.py tests/test_input_source_state.py -q` → 28 passed。
 - `npm run package:windows` → 重新生成 NSIS 安装包：
   `frontend/src-tauri/target/release/bundle/nsis/Vision 动作识别与评分_0.1.0_x64-setup.exe`。
+- `pytest tests/test_windows_packaging_smoke.py -q` → 8 passed；覆盖 B-025 sidecar 构建脚本的旧产物删除、PyInstaller 退出码检查和复制顺序。
+- `npm run package:windows` → 在 B-025 hardened sidecar 脚本下重新生成 NSIS 安装包。
+- `npm run verify:desktop` → Desktop stack verification passed，含 120 条 Python desktop regression tests（B-025 后）。
 - `pytest tests/test_ui_backend_contract.py tests/test_windows_packaging_smoke.py -q` → 19 passed；覆盖 B-022 request nullable manifest/parity。
 - `C:\Users\ny\.cargo\bin\cargo.exe check`（`frontend/src-tauri`）→ passed；覆盖 B-022 Rust manifest 更新。
 - `pytest tests/test_ui_backend_contract.py tests/test_windows_packaging_smoke.py -q` → 17 passed。
