@@ -42,6 +42,15 @@ def test_protocol_manifest_lists_required_message_fields():
         "error",
         "timestamp",
     ]
+    assert manifest["message_contract"]["optional"] == {
+        "request": ["jobId", "sessionId"],
+        "response": ["jobId", "sessionId"],
+        "event": ["jobId", "sessionId"],
+    }
+    assert manifest["message_contract"]["nullable"] == {
+        "response": ["jobId", "sessionId", "error"],
+        "event": ["jobId", "sessionId", "error"],
+    }
 
 
 def test_parse_command_requires_known_command_and_object_payload():

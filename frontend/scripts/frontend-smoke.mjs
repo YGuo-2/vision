@@ -60,7 +60,8 @@ for (const marker of [
   "selectRecordDir",
   "选择目录",
   "downloadAllMissing",
-  "cancelModelDownload"
+  "cancelModelDownload",
+  "stopActiveJobsBeforeUnmount"
 ]) {
   assertIncludes(app, marker, "App.vue");
 }
@@ -86,7 +87,7 @@ for (const marker of ["selectDirectory", "invoke<string | null>(\"select_directo
   assertIncludes(bridge, marker, "bridge.ts");
 }
 
-for (const marker of ["select_directory", "SHBrowseForFolderW", "SHGetPathFromIDListW"]) {
+for (const marker of ["select_directory", "OleInitialize", "OleUninitialize", "SHBrowseForFolderW", "SHGetPathFromIDListW"]) {
   assertIncludes(tauri, marker, "src-tauri lib.rs");
 }
 
@@ -161,6 +162,13 @@ assert(
     currentState
   ) === false,
   "missing-id job.completed must be ignored"
+);
+assert(
+  bridgeState.isBridgeEventForCurrentState(
+    { type: "event", event: "job.completed", jobId: null, sessionId: null, payload: {}, error: null, timestamp: "" },
+    currentState
+  ) === false,
+  "null-id job.completed must be ignored"
 );
 assert(
   bridgeState.isBridgeEventForCurrentState(

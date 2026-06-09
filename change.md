@@ -31,24 +31,33 @@ Spce workflow final acceptance 的第一轮与对抗审查发现：已提交的 
 - 修复复验发现的协议与竞态缺口：Python/Rust manifest request 契约补 `jobId/sessionId`，
   Rust `bridge.decode_error` 事件补完整 envelope；长任务发送前预分配 job/session id，避免
   快速任务事件早于 response 时被前端误过滤；缺失 ID 的 scoped event 不再污染当前 UI。
+- 修复第一波最终验收新增缺口：manifest 显式声明 `jobId/sessionId` optional/nullable 语义，
+  TS bridge envelope 支持 `null`；Windows Shell32 目录选择器增加 `OleInitialize` /
+  `OleUninitialize`，并在 MTA 场景下禁用 `BIF_NEWDIALOGSTYLE` 降级。
+- 修复模型下载完整性与关闭窗口清理：`download_model()` 在已知 `Content-Length` 但 EOF
+  字节不足时抛错并删除 `.part`，不替换正式模型；Vue unmount 时复用 `cancelModelDownload`
+  对 active 下载任务发送 `job.stop`。
 - 补模型下载正式文件保护回归：中断下载时删除 `.part`，并断言已有正式 `.task` 文件字节不变。
-- 将 `requirements.md`、README、AGENTS、`docs/specs/` 与 `change.md` 同步到复验后的最终证据链。
-- 将 `docs/specs/` 切换到 Bugfix 工作流并记录 B-001 至 B-012 的受控执行证据。
+- 将 `requirements.md`、README、AGENTS、`docs/specs/` 与 `change.md` 同步到复验后的最终证据链，
+  并将旧的 moving HEAD 证据固化为 `5526945..3d6441b`。
+- 将 `docs/specs/` 切换到 Bugfix 工作流并记录 B-001 至 B-017 的受控执行证据。
 
 ### 验证方法
 
 - `npm --prefix frontend run test` → Frontend behavior smoke checks passed。
-- `pytest tests/test_vue_tauri_acceptance_gaps.py -q` → 6 passed。
-- `pytest tests/test_ui_backend_models.py tests/test_vue_tauri_acceptance_gaps.py -q` → 11 passed。
-- `pytest tests/test_ui_backend_contract.py tests/test_ui_backend_models.py tests/test_vue_tauri_acceptance_gaps.py tests/test_windows_packaging_smoke.py -q` → 29 passed。
-- `frontend/src-tauri cargo check` → passed。
+- `pytest tests/test_vue_tauri_acceptance_gaps.py -q` → 6 passed（前序），第一波新增修复后随组合测试为 13 passed。
+- `pytest tests/test_ui_backend_models.py tests/test_vue_tauri_acceptance_gaps.py -q` → 13 passed。
+- `pytest tests/test_ui_backend_contract.py tests/test_windows_packaging_smoke.py -q` → 17 passed。
+- `pytest tests/test_ui_backend_contract.py tests/test_ui_backend_models.py tests/test_vue_tauri_acceptance_gaps.py tests/test_windows_packaging_smoke.py -q` → 29 passed（前序复验组合）。
+- `C:\Users\ny\.cargo\bin\cargo.exe check`（`frontend/src-tauri`）→ passed。
 - `py_compile apps/app_ui.py apps/ui_backend.py core/vision_pipeline.py` → passed。
 - `pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q` → 31 passed。
-- `npm run verify:desktop` → 前端 build/test、Tauri `cargo check`、Python py_compile、117 个桌面回归测试通过。
-- `pytest tests/test_windows_packaging_smoke.py -q` → 7 passed；其中 `frontend/src-tauri/resources/vision-ui-backend.exe`
+- `npm run verify:desktop` → 前端 build/test、Tauri `cargo check`、Python py_compile、118 个桌面回归测试通过。
+- `pytest tests/test_windows_packaging_smoke.py -q` → 8 passed；其中 `frontend/src-tauri/resources/vision-ui-backend.exe`
   实际响应 `bridge.ping`，返回 bridge version `1.0` 且包含 `model.download` 命令。
 - `npm run package:windows` → 生成
   `frontend/src-tauri/target/release/bundle/nsis/Vision 动作识别与评分_0.1.0_x64-setup.exe`。
+- `git diff --check` → 仅 LF/CRLF warning，无 whitespace error。
 
 ---
 

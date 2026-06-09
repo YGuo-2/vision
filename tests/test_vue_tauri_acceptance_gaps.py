@@ -48,6 +48,7 @@ def test_vue_frontend_exposes_settings_model_download_flow():
         "model.progress",
         "downloadAllMissing",
         "cancelModelDownload",
+        "stopActiveJobsBeforeUnmount",
         "modelsDir",
         "sizeMb",
         "path",
@@ -70,6 +71,8 @@ def test_vue_frontend_filters_foreign_events_and_keeps_full_raw_json():
 
     assert "event.sessionId" in source
     assert "event.jobId" in source
+    assert "jobId?: string | null" in source
+    assert "sessionId?: string | null" in source
     assert "isCurrentBridgeEnvelope" in source or "shouldApplyBridgeEvent" in source
     assert "isBridgeEventForCurrentState" in source
     assert "analysis.status" in smoke
@@ -90,6 +93,7 @@ def test_frontend_smoke_exercises_behavior_not_only_static_markers():
         "modelDownloadStatusFromJobEvent",
         "foreign analysis.status must be ignored",
         "missing-id job.completed must be ignored",
+        "null-id job.completed must be ignored",
         "preassigned current analysis.status must be accepted before response",
         "failed model download must be shown as failed",
         "raw JSON must keep jobId",

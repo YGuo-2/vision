@@ -39,9 +39,30 @@ def test_rust_bridge_prefers_packaged_sidecar_and_keeps_dev_fallback() -> None:
     assert "apps" in source and "ui_backend.py" in source
     assert "creation_flags(0x08000000)" in source
     assert '"request": ["type", "command", "requestId", "jobId", "sessionId", "payload"]' in source
+    assert '"optional": {' in source
+    assert '"request": ["jobId", "sessionId"]' in source
+    assert '"nullable": {' in source
+    assert '"response": ["jobId", "sessionId", "error"]' in source
     assert '"event": "bridge.decode_error"' in source
     assert '"jobId": null' in source
     assert '"sessionId": null' in source
+
+
+def test_rust_directory_picker_initializes_com_for_shell32_dialog() -> None:
+    source = TAURI_LIB.read_text(encoding="utf-8")
+
+    for marker in (
+        "OleInitialize",
+        "OleUninitialize",
+        "RPC_E_CHANGED_MODE",
+        "BIF_NEWDIALOGSTYLE",
+        "SHBrowseForFolderW",
+    ):
+        assert marker in source
+    assert source.index("let ole_result = unsafe { OleInitialize") < source.index(
+        "SHBrowseForFolderW(&mut browse_info)"
+    )
+    assert source.index("SHBrowseForFolderW(&mut browse_info)") < source.index("unsafe { OleUninitialize() }")
 
 
 def test_sidecar_spec_targets_bridge_without_yolo_or_tkinter_entry() -> None:

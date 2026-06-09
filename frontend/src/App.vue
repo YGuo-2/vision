@@ -190,10 +190,8 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  stopActiveJobsBeforeUnmount();
   if (unlisten) unlisten();
-  if (isRunning.value) {
-    void stopSession();
-  }
 });
 
 async function refreshCameras(): Promise<void> {
@@ -262,6 +260,15 @@ async function cancelModelDownload(): Promise<void> {
   setRawJson(response);
   if (!response.ok) {
     errorText.value = response.error?.message ?? "取消模型下载失败";
+  }
+}
+
+function stopActiveJobsBeforeUnmount(): void {
+  if (modelDownloadJobId.value) {
+    void cancelModelDownload();
+  }
+  if (isRunning.value) {
+    void stopSession();
   }
 }
 

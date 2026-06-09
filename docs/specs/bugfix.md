@@ -44,7 +44,14 @@ Vue + Tauri + Vite 前端迁移在 `docs/specs/tasks.md` 中已被标记为完�
 - **替代证据：** 12 个子 agent 对抗审查结论、`rg` 静态检索、现有 backend tests 通过但前端路径缺失、已有 `npm run verify:desktop` 只构建 Vue 不测交互。
 - **证据强度与限制：** 证据足以证明已声明完成的功能不可触达或验证不足；实现后仍必须补自动化测试和至少一条 Windows 运行级证据，降低 GUI smoke 的人工判断风险。
 
-### 2.4 影响范围
+### 2.4 第一波最终验收新增发现
+
+- B-002 agent 发现 manifest 仍只列 flat request 字段，未显式表达 `jobId/sessionId` 可选语义；TS envelope 类型未允许 Python/Rust 实际输出的 `null`。
+- B-004 agent 发现 Rust Shell32 目录选择器使用 `BIF_NEWDIALOGSTYLE` 和 `SHBrowseForFolderW`，但调用前缺少 COM/OLE 初始化，Windows 打包运行时可能静默失败。
+- B-006 agent 发现 `core/model_manager.py` 在 HTTP `Content-Length` 已知但实际读取不足时仍会 `os.replace(.part, dest)`，半成品可能被误判为已安装；Vue unmount 只停止 session，未取消 active 模型下载。
+- B-008/B-010 agent 发现 active spec 仍有以 moving HEAD 表达的提交范围，最终验收证据不可稳定复查。
+
+### 2.5 影响范围
 
 - **受影响模块：** `frontend/src/`, `frontend/src-tauri/src/lib.rs`, `apps/ui_backend.py`, `scripts/verify-desktop-stack.ps1`, `tests/`, `docs/specs/`, `change.md`
 - **受影响用户：** 使用新 Vue/Tauri Windows 桌面前端的本地用户和维护者

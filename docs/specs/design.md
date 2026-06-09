@@ -21,6 +21,7 @@
 - **事件状态隔离不足：** Vue 全局处理 bridge event，未按当前 `sessionId/jobId` 过滤；高频 `session.frame` 未节流。
 - **验证证据偏窄：** `npm run verify:desktop` 构建 Vue 并运行 Python/Tkinter 回归，但没有 Vue 交互测试、Tauri 协议边界测试、dev-mode 启动证据和安装后主窗口证据。
 - **文档状态不同步：** `tasks.md`、`progress.md`、`design.md`、`requirements.md` 的头部状态和 `spec.yml` 批准状态不一致。
+- **第一波验收补充根因：** manifest 未声明 optional 字段语义，TS 类型未接受 `null` envelope；Windows Shell32 picker 缺少 COM/OLE 初始化；模型下载未校验已知长度的截断 EOF；Vue unmount 未停止 active model download；复验证据使用移动 `HEAD` 范围。
 
 ### 1.3 触发条件
 
@@ -78,6 +79,7 @@ flowchart TD
 - 在 Vue 事件层补当前 session/job 过滤、帧预览节流和未知总帧进度显示。
 - 将前端交互测试或 Playwright/Vitest smoke 纳入 `verify:desktop`，补 dev-mode/packaged 启动证据。
 - 同步 `docs/specs/` 状态、README/AGENTS/change.md 和最终验证记录。
+- 对第一波最终验收新增问题追加最小修复：在 Python/Rust manifest 中显式记录 optional fields；TS bridge 类型允许 `null`；Rust Shell32 picker 使用 `OleInitialize` / `OleUninitialize`；`download_model()` 校验 `Content-Length` 完整性；Vue unmount 取消 active 模型下载；文档证据改为具体 commit/range。
 
 ### 3.2 被否决的备选方案
 

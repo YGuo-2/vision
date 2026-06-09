@@ -84,7 +84,16 @@ fn bridge_protocol_manifest() -> serde_json::Value {
         "messageContract": {
             "request": ["type", "command", "requestId", "jobId", "sessionId", "payload"],
             "response": ["type", "requestId", "ok", "jobId", "sessionId", "payload", "error", "timestamp"],
-            "event": ["type", "event", "jobId", "sessionId", "payload", "error", "timestamp"]
+            "event": ["type", "event", "jobId", "sessionId", "payload", "error", "timestamp"],
+            "optional": {
+                "request": ["jobId", "sessionId"],
+                "response": ["jobId", "sessionId"],
+                "event": ["jobId", "sessionId"]
+            },
+            "nullable": {
+                "response": ["jobId", "sessionId", "error"],
+                "event": ["jobId", "sessionId", "error"]
+            }
         }
     })
 }
@@ -119,17 +128,34 @@ fn pick_windows_directory() -> Option<String> {
 
     #[link(name = "ole32")]
     extern "system" {
+        fn OleInitialize(pv_reserved: *mut c_void) -> i32;
+        fn OleUninitialize();
         fn CoTaskMemFree(pv: *mut c_void);
+    }
+
+    const S_OK: i32 = 0;
+    const S_FALSE: i32 = 1;
+    const RPC_E_CHANGED_MODE: i32 = 0x8001_0106u32 as i32;
+
+    let ole_result = unsafe { OleInitialize(std::ptr::null_mut()) };
+    let should_uninitialize = ole_result == S_OK || ole_result == S_FALSE;
+    if !should_uninitialize && ole_result != RPC_E_CHANGED_MODE {
+        return None;
     }
 
     let title: Vec<u16> = "选择录制目录\0".encode_utf16().collect();
     let mut display_name = [0u16; 260];
+    let flags = if should_uninitialize {
+        BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE
+    } else {
+        BIF_RETURNONLYFSDIRS
+    };
     let mut browse_info = BrowseInfoW {
         hwnd_owner: std::ptr::null_mut(),
         pidl_root: std::ptr::null_mut(),
         psz_display_name: display_name.as_mut_ptr(),
         lpsz_title: title.as_ptr(),
-        ul_flags: BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE,
+        ul_flags: flags,
         lpfn: std::ptr::null_mut(),
         l_param: 0,
         i_image: 0,
@@ -137,12 +163,18 @@ fn pick_windows_directory() -> Option<String> {
 
     let pidl = unsafe { SHBrowseForFolderW(&mut browse_info) };
     if pidl.is_null() {
+        if should_uninitialize {
+            unsafe { OleUninitialize() };
+        }
         return None;
     }
 
     let mut path = [0u16; 260];
     let ok = unsafe { SHGetPathFromIDListW(pidl, path.as_mut_ptr()) != 0 };
     unsafe { CoTaskMemFree(pidl) };
+    if should_uninitialize {
+        unsafe { OleUninitialize() };
+    }
     if !ok {
         return None;
     }

@@ -12,11 +12,11 @@ export type BridgeError = {
 
 export type BridgeEnvelope<TPayload extends JsonRecord = JsonRecord> = {
   type: "response" | "event";
-  requestId?: string;
-  event?: string;
-  ok?: boolean;
-  jobId?: string;
-  sessionId?: string;
+  requestId?: string | null;
+  event?: string | null;
+  ok?: boolean | null;
+  jobId?: string | null;
+  sessionId?: string | null;
   payload: TPayload;
   error: BridgeError | null;
   timestamp: string;
@@ -26,8 +26,8 @@ export type BridgeCommandRequest = {
   type: "command";
   command: string;
   requestId: string;
-  jobId?: string;
-  sessionId?: string;
+  jobId?: string | null;
+  sessionId?: string | null;
   payload: JsonRecord;
 };
 
@@ -54,7 +54,7 @@ export function isTauriRuntime(): boolean {
 export async function sendBridgeCommand<TPayload extends JsonRecord = JsonRecord>(
   command: string,
   payload: JsonRecord = {},
-  options: { jobId?: string; sessionId?: string } = {}
+  options: { jobId?: string | null; sessionId?: string | null } = {}
 ): Promise<BridgeEnvelope<TPayload>> {
   const request: BridgeCommandRequest = {
     type: "command",

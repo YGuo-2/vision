@@ -147,6 +147,8 @@ def download_model(
                     downloaded += len(chunk)
                     if progress_cb:
                         progress_cb(downloaded, total)
+            if total is not None and downloaded != total:
+                raise OSError(f"下载不完整：期望 {total} 字节，实际 {downloaded} 字节")
     except BaseException:
         # 清理半成品。
         try:

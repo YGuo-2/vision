@@ -71,12 +71,13 @@ npm run package:windows
 frontend/src-tauri/target/release/bundle/nsis/
 ```
 
-本轮迁移验收验证结果（2026-06-09）：
+本轮迁移验收验证结果（2026-06-09，第一波最终验收缺口修复后）：
 
-- `npm run verify:desktop`：前端 build、Frontend behavior smoke、Tauri `cargo check`、Python `py_compile` 和桌面回归通过。
+- `npm run verify:desktop`：前端 build、Frontend behavior smoke、Tauri `cargo check`、Python `py_compile` 和 118 个桌面回归测试通过。
 - `npm run package:windows`：生成 NSIS 安装包。
-- `pytest tests/test_windows_packaging_smoke.py -q`：packaged sidecar `bridge.ping` 通过。
+- `pytest tests/test_windows_packaging_smoke.py -q`：8 passed，packaged sidecar `bridge.ping` 通过，并覆盖 Shell32 目录选择器 COM 初始化。
 - `pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q`：31 passed。
+- 新增回归覆盖：bridge manifest optional/nullable 契约、TS null envelope、模型下载截断保护和窗口关闭取消下载。
 
 ### 摄像头实时识别
 

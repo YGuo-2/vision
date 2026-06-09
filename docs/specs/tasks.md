@@ -2,9 +2,9 @@
 
 > **问题名称：** Vue/Tauri 迁移最终验收缺口修复
 > **关联规范：** `docs/specs/bugfix.md` · `docs/specs/design.md`
-> **状态：** Completed
-> **当前任务：** n/a
-> **进度：** 12 / 12 已完成
+> **状态：** In Progress
+> **当前任务：** B-013
+> **进度：** 12 / 17 已完成
 > **最后更新：** 2026-06-09
 
 ---
@@ -209,6 +209,80 @@
 
 ---
 
+## 阶段 6：第一波最终验收回路修复 (Acceptance Bugfix Loop)
+
+- [x] **B-013:** 固化第一波最终验收新增问题清单
+  - 状态: done
+  - 验证证据: 新增 B-013..B-017 任务并在 bugfix/design 记录第一波 B-002/B-004/B-006/B-008/B-010 ACTIONABLE_ISSUES；validate_spec.py docs\specs --workflow bugfix -> 34 passed；git status 仅 docs/specs 变更。
+  - 完成时间: 2026-06-09 21:51:10
+  - 备注: 第一波存在 actionable issues，未启动对抗审查。
+  - 涉及文件: `docs/specs/bugfix.md`, `docs/specs/design.md`, `docs/specs/tasks.md`, `docs/specs/progress.md`, `docs/specs/spec.yml`
+  - 验证命令: `python <plugin-root>\scripts\validate_spec.py docs\specs --workflow bugfix`; `python <plugin-root>\scripts\spec_progress.py resume docs\specs`
+  - 依赖: B-012
+  - 风险: medium
+  - 覆盖: BUG-001, BUG-003, BUG-005, BUG-006, FIX-001, FIX-003, FIX-005, FIX-006
+  - 可并行: 否
+  - 验证标准: 记录第一波 B-002/B-004/B-006/B-008/B-010 的 ACTIONABLE_ISSUES；任务图出现 B-013..B-017；不启动第二波对抗审查。
+  - 预估工程量: 0.5 小时
+
+- [x] **B-014:** 补齐 manifest optional 语义和 TS null envelope 契约
+  - 状态: done
+  - 验证证据: 补齐 Python/Rust manifest optional/nullable 元数据和 TS null envelope 类型；验证：pytest tests\test_ui_backend_contract.py tests\test_windows_packaging_smoke.py -q -> 17 passed；npm --prefix frontend run test -> Frontend behavior smoke checks passed；C:\Users\ny\.cargo\bin\cargo.exe check -> passed。
+  - 完成时间: 2026-06-09 21:57:29
+  - 备注: cargo 未在当前 PATH，使用本机绝对路径 C:\Users\ny\.cargo\bin\cargo.exe。
+  - 涉及文件: `apps/ui_backend.py`, `frontend/src/bridge.ts`, `frontend/src-tauri/src/lib.rs`, `tests/test_ui_backend_contract.py`, `tests/test_windows_packaging_smoke.py`, `frontend/scripts/frontend-smoke.mjs`
+  - 验证命令: `.\.venv\Scripts\python.exe -m pytest tests\test_ui_backend_contract.py tests\test_windows_packaging_smoke.py -q`; `npm --prefix frontend run test`; `cargo check` from `frontend/src-tauri`
+  - 依赖: B-013
+  - 风险: high
+  - 覆盖: BUG-001, FIX-001, SAFE-004
+  - 可并行: 否
+  - 验证标准: Python/Rust manifest 同时保留字段列表并显式声明 `jobId/sessionId` optional；TS `BridgeEnvelope`/`BridgeCommandRequest` 与 Python/Rust 的 `null` envelope 对齐；前端 smoke 覆盖 null envelope。
+  - 预估工程量: 1-2 小时
+
+- [x] **B-015:** 修复 Windows Shell32 目录选择器 COM 初始化
+  - 状态: done
+  - 验证证据: Rust Shell32 picker 增加 OleInitialize/OleUninitialize；MTA RPC_E_CHANGED_MODE 时禁用 BIF_NEWDIALOGSTYLE 降级；验证：C:\Users\ny\.cargo\bin\cargo.exe check -> passed；pytest tests\test_windows_packaging_smoke.py -q -> 8 passed；npm --prefix frontend run test -> Frontend behavior smoke checks passed。
+  - 完成时间: 2026-06-09 22:00:45
+  - 备注: 依据 Microsoft SHBrowseForFolder COM 初始化要求修复。
+  - 涉及文件: `frontend/src-tauri/src/lib.rs`, `tests/test_windows_packaging_smoke.py`, `frontend/scripts/frontend-smoke.mjs`
+  - 验证命令: `cargo check` from `frontend/src-tauri`; `.\.venv\Scripts\python.exe -m pytest tests\test_windows_packaging_smoke.py -q`; `npm --prefix frontend run test`
+  - 依赖: B-014
+  - 风险: medium
+  - 覆盖: BUG-003, FIX-003, SAFE-004
+  - 可并行: 否
+  - 验证标准: `SHBrowseForFolderW` 前执行 STA/OLE 初始化并在本调用拥有初始化时释放；测试锁定 `OleInitialize`/`OleUninitialize` 与 marker 顺序。
+  - 预估工程量: 1 小时
+
+- [x] **B-016:** 修复模型下载截断误安装和窗口关闭取消下载
+  - 状态: done
+  - 验证证据: download_model 校验已知 Content-Length 的截断 EOF 并清理 .part；Vue onBeforeUnmount 复用 cancelModelDownload 停止 active 下载；验证：pytest tests\test_ui_backend_models.py tests\test_vue_tauri_acceptance_gaps.py -q -> 13 passed；npm --prefix frontend run test -> Frontend behavior smoke checks passed；npm --prefix frontend run build -> passed。
+  - 完成时间: 2026-06-09 22:04:56
+  - 备注: 正式模型文件在中断和截断下载时均保持不变。
+  - 涉及文件: `core/model_manager.py`, `frontend/src/App.vue`, `frontend/scripts/frontend-smoke.mjs`, `tests/test_ui_backend_models.py`, `tests/test_vue_tauri_acceptance_gaps.py`
+  - 验证命令: `.\.venv\Scripts\python.exe -m pytest tests\test_ui_backend_models.py tests\test_vue_tauri_acceptance_gaps.py -q`; `npm --prefix frontend run test`; `npm --prefix frontend run build`
+  - 依赖: B-015
+  - 风险: high
+  - 覆盖: BUG-005, FIX-005, SAFE-004
+  - 可并行: 否
+  - 验证标准: HTTP `Content-Length` 已知但读取字节不足时抛错并删除 `.part`、不替换正式模型；Vue unmount 会对 active `modelDownloadJobId` 发起 `job.stop`。
+  - 预估工程量: 1-2 小时
+
+- [x] **B-017:** 同步第一波修复后的文档、验证和 commit 证据
+  - 状态: done
+  - 验证证据: README/AGENTS/change.md 与 docs/specs 已同步；rg '5526945\\.\\.HEAD' docs/specs README.md AGENTS.md change.md -> no matches；npm run verify:desktop -> 118 passed；pytest tests/test_windows_packaging_smoke.py -q -> 8 passed；pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q -> 31 passed；npm run package:windows -> NSIS installer generated；git diff --check -> only LF/CRLF warnings。
+  - 完成时间: 2026-06-09 22:17:40
+  - 备注: pre-acceptance 将在提交后用干净工作树重跑。
+  - 涉及文件: `docs/specs/`, `README.md`, `AGENTS.md`, `change.md`
+  - 验证命令: `rg "5526945\.\.HE" docs\specs README.md AGENTS.md change.md`; `npm run verify:desktop`; `python <plugin-root>\scripts\validate_spec.py docs\specs --pre-acceptance`
+  - 依赖: B-016
+  - 风险: medium
+  - 覆盖: BUG-006, FIX-006
+  - 可并行: 否
+  - 验证标准: active docs 不再使用 moving HEAD 这类移动提交证据；README/AGENTS/change.md 记录新增修复与最终验证；pre-acceptance 通过后重新进入 final acceptance。
+  - 预估工程量: 1 小时
+
+---
+
 ## 执行 Waves
 
 | Wave | 任务 | 说明 |
@@ -223,6 +297,11 @@
 | 8 | B-010 | 交互验证、运行级证据和文档同步 |
 | 9 | B-011 | 复验协议、过滤、竞态和模型保护修复 |
 | 10 | B-012 | 复验文档和 commit 证据同步 |
+| 11 | B-013 | 第一波最终验收新增问题固化 |
+| 12 | B-014 | 协议 optional/null 契约修复 |
+| 13 | B-015 | Windows 目录选择器 COM 初始化 |
+| 14 | B-016 | 模型下载完整性和卸载取消 |
+| 15 | B-017 | 验证、文档和 commit 证据同步 |
 
 ---
 
@@ -239,6 +318,10 @@
 | B-010 | 验证/证据链 | 静态 smoke 或占位文档可能让 final acceptance 误判完成 | 需 verify:desktop、packaging smoke、docs 同步和 change.md 审查 |
 | B-011 | 协议/竞态/文件保护 | 缺失 ID 或早到事件可能污染/丢失当前任务状态，取消下载可能破坏正式模型 | 需 behavior smoke、contract/parity 测试和 model_manager 回归 |
 | B-012 | 文档/可追溯性 | active specs 草稿或 commit 占位会让 final acceptance 无法复查 | 需 docs grep、resume/pre-acceptance |
+| B-014 | 协议/类型契约 | manifest 缺 optional 语义或 TS 不接受 null 会让前后端契约继续漂移 | 需 Python/Rust/TS parity 测试 |
+| B-015 | Windows COM/打包 | Shell32 目录选择器未初始化 COM 可能在打包运行时静默失败 | 需 Rust marker 与 cargo check |
+| B-016 | 下载/文件完整性 | HTTP 截断或关闭窗口可能导致半成品模型被误安装或下载任务泄漏 | 需截断下载和 unmount 取消回归 |
+| B-017 | 文档/可追溯性 | 移动 `HEAD` 证据会让最终验收不可复查 | 需 docs grep、pre-acceptance |
 
 ---
 
@@ -249,5 +332,5 @@
 | B-001..B-008 | 2026-06-09 | `f0b0cf1` | 已完成首轮 bugfix 提交前的 bridge、Vue 入口、模型管理、打包和核心回归验证；首轮 final acceptance 随后发现 B-009/B-010 追加缺口。 | 详见各任务“验证证据”字段 |
 | B-009 | 2026-06-09 20:18:46 | `5526945` | `npm --prefix frontend run test`、`npm --prefix frontend run build`、`pytest tests/test_ui_backend_models.py tests/test_vue_tauri_acceptance_gaps.py -q -> 11 passed`。 | 修复首轮验收前端状态语义缺口 |
 | B-010 | 2026-06-09 20:28:51 | `5526945` | `npm run verify:desktop -> 116 passed`、`npm run package:windows`、`pytest tests/test_windows_packaging_smoke.py -q -> 7 passed`、`pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q -> 31 passed`、`py_compile` passed、`git diff --check` 仅 CRLF warning。 | 补足 behavior smoke、sidecar ping 和文档证据 |
-| B-011 | 2026-06-09 21:03:12 | `5526945..HEAD` | `npm --prefix frontend run test`、`npm --prefix frontend run build`、`pytest tests/test_ui_backend_contract.py tests/test_ui_backend_models.py tests/test_vue_tauri_acceptance_gaps.py tests/test_windows_packaging_smoke.py -q -> 29 passed`、`cargo check` passed。 | 修复复验协议、过滤、竞态和模型保护缺口 |
-| B-012 | 2026-06-09 21:14:41 | `5526945..HEAD` | `npm run verify:desktop -> 117 passed`、`npm run package:windows`、`pytest tests/test_windows_packaging_smoke.py -q -> 7 passed`、`pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q -> 31 passed`、`py_compile` passed、`git diff --check` 仅 CRLF warning。 | 同步复验文档和 commit 证据 |
+| B-011 | 2026-06-09 21:03:12 | `5526945..3d6441b` | `npm --prefix frontend run test`、`npm --prefix frontend run build`、`pytest tests/test_ui_backend_contract.py tests/test_ui_backend_models.py tests/test_vue_tauri_acceptance_gaps.py tests/test_windows_packaging_smoke.py -q -> 29 passed`、`cargo check` passed。 | 修复复验协议、过滤、竞态和模型保护缺口 |
+| B-012 | 2026-06-09 21:14:41 | `5526945..3d6441b` | `npm run verify:desktop -> 117 passed`、`npm run package:windows`、`pytest tests/test_windows_packaging_smoke.py -q -> 7 passed`、`pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q -> 31 passed`、`py_compile` passed、`git diff --check` 仅 CRLF warning。 | 同步复验文档和 commit 证据 |

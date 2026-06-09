@@ -1497,6 +1497,15 @@ def protocol_manifest() -> JsonDict:
             "request": ["type", "command", "requestId", "jobId", "sessionId", "payload"],
             "response": ["type", "requestId", "ok", "jobId", "sessionId", "payload", "error", "timestamp"],
             "event": ["type", "event", "jobId", "sessionId", "payload", "error", "timestamp"],
+            "optional": {
+                "request": ["jobId", "sessionId"],
+                "response": ["jobId", "sessionId"],
+                "event": ["jobId", "sessionId"],
+            },
+            "nullable": {
+                "response": ["jobId", "sessionId", "error"],
+                "event": ["jobId", "sessionId", "error"],
+            },
         },
     }
 
