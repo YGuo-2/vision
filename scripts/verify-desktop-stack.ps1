@@ -63,7 +63,7 @@ Invoke-Step "Frontend build" {
     }
 }
 
-Invoke-Step "Frontend interaction smoke" {
+Invoke-Step "Frontend behavior smoke" {
     Push-Location $RepoRoot
     try {
         npm --prefix frontend run test

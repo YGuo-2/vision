@@ -9,6 +9,14 @@ import {
   selectDirectory,
   sendBridgeCommand
 } from "./bridge";
+import {
+  initialSessionProgressText,
+  isBridgeEventForCurrentState,
+  modelDownloadStatusFromJobEvent,
+  modelDownloadStatusFromPayload,
+  progressTextForFrameProgress,
+  progressTextForSessionStatus
+} from "./bridge-state";
 
 type SourceKind = "none" | "camera" | "video";
 
@@ -60,7 +68,7 @@ const defaultRecordDir = "Python outputs_dir()";
 const statusText = ref("就绪");
 const actionsText = ref("-");
 const fpsText = ref("--");
-const progressText = ref("0%");
+const progressText = ref("等待开始");
 const previewImage = ref("");
 const frameIndex = ref(0);
 const isRunning = ref(false);
@@ -257,7 +265,7 @@ async function startSession(): Promise<void> {
   statusText.value = "启动中…";
   actionsText.value = "-";
   fpsText.value = "--";
-  progressText.value = "0%";
+  progressText.value = initialSessionProgressText();
   previewImage.value = "";
   const payload: JsonRecord = {
     sourceKind: sourceKind.value,
@@ -416,6 +424,10 @@ function handleBridgeEvent(event: BridgeEnvelope): void {
     if (state === "running") {
       statusText.value = "运行中…";
       isRunning.value = true;
+      const nextProgressText = progressTextForSessionStatus(event.payload);
+      if (nextProgressText) {
+        progressText.value = nextProgressText;
+      }
     }
     if (state === "completed" || state === "stopped") {
       statusText.value = "已停止";
@@ -431,10 +443,9 @@ function handleBridgeEvent(event: BridgeEnvelope): void {
     actionsText.value = String(payload.actionsText ?? "-");
     frameIndex.value = Number(payload.frameIndex ?? 0);
     fpsText.value = Number(payload.fps ?? 0).toFixed(1);
-    if (payload.progress?.percent != null) {
-      progressText.value = `${payload.progress.done}/${payload.progress.total} (${payload.progress.percent.toFixed(1)}%)`;
-    } else if (payload.progress) {
-      progressText.value = `${payload.progress.done} 帧 / 实时`;
+    const nextProgressText = progressTextForFrameProgress(payload.progress);
+    if (nextProgressText) {
+      progressText.value = nextProgressText;
     }
   }
   if (event.event === "record.status") {
@@ -446,12 +457,19 @@ function handleBridgeEvent(event: BridgeEnvelope): void {
   if (event.event === "model.progress") {
     applyModelProgress(event.payload);
   }
+  if (event.event === "model.status") {
+    applyModelStatusPayload(event.payload);
+  }
   if (event.event === "template.status" || event.event === "analysis.status") {
     applyAnalysisPayload(event.payload);
   }
   if (event.event === "job.completed" || event.event === "job.stopped") {
     if (event.jobId === modelDownloadJobId.value) {
-      modelDownloadStatus.value = event.event === "job.stopped" ? "已取消" : "下载完成";
+      const summary = modelDownloadStatusFromJobEvent(event);
+      modelDownloadStatus.value = summary.status;
+      if (summary.failed.length > 0) {
+        errorText.value = summary.status;
+      }
       modelDownloadJobId.value = undefined;
       void refreshModels();
       return;
@@ -478,19 +496,12 @@ function setRawJson(envelope: BridgeEnvelope): void {
 }
 
 function shouldApplyBridgeEvent(event: BridgeEnvelope): boolean {
-  const isSessionScoped = event.event?.startsWith("session.") || event.event === "record.status";
-  if (isSessionScoped && event.sessionId && sessionId.value && event.sessionId !== sessionId.value) {
-    return false;
-  }
-  const isJobScoped = event.event?.startsWith("job.") || event.event === "model.progress" || event.event?.endsWith(".progress");
-  if (isJobScoped && event.jobId && !isKnownJobId(event.jobId)) {
-    return false;
-  }
-  return true;
-}
-
-function isKnownJobId(eventJobId: string): boolean {
-  return eventJobId === jobId.value || eventJobId === analysisJobId.value || eventJobId === modelDownloadJobId.value;
+  return isBridgeEventForCurrentState(event, {
+    sessionId: sessionId.value,
+    sessionJobId: jobId.value,
+    analysisJobId: analysisJobId.value,
+    modelDownloadJobId: modelDownloadJobId.value
+  });
 }
 
 function shouldRenderPreviewFrame(): boolean {
@@ -520,6 +531,17 @@ function applyModelProgress(payload: JsonRecord): void {
     percent: payload.percent == null ? null : Number(payload.percent)
   };
   modelDownloadStatus.value = modelDownloadProgress.value.stage;
+}
+
+function applyModelStatusPayload(payload: JsonRecord): void {
+  const summary = modelDownloadStatusFromPayload(payload);
+  if (!summary) {
+    return;
+  }
+  modelDownloadStatus.value = summary.status;
+  if (summary.failed.length > 0) {
+    errorText.value = summary.status;
+  }
 }
 
 function applyAnalysisPayload(payload: JsonRecord): void {

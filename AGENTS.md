@@ -70,7 +70,7 @@ Verify the desktop migration stack:
 npm run verify:desktop
 ```
 
-Run the frontend smoke checks only:
+Run the frontend behavior smoke checks only:
 ```powershell
 npm --prefix frontend run test
 ```

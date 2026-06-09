@@ -145,6 +145,49 @@ def test_model_download_all_missing_skips_installed_models(tmp_path: Path) -> No
         ui_backend.DEFAULT_MODEL_SERVICE = previous
 
 
+def test_model_download_reports_failed_state_on_download_exception(tmp_path: Path) -> None:
+    events: list[dict] = []
+    manager = ui_backend.BridgeJobManager(events.append)
+    specs = (_spec("pose_full", "pose.task", "Pose Full"),)
+
+    def fake_download(spec, *, progress_cb, should_stop):
+        raise RuntimeError("network unavailable")
+
+    service = ui_backend.ModelManagementService(
+        job_manager=manager,
+        specs=specs,
+        models_dir_func=lambda: tmp_path,
+        is_installed_func=lambda spec: False,
+        installed_size_func=lambda spec: None,
+        model_path_func=lambda spec: tmp_path / spec.filename,
+        download_func=fake_download,
+    )
+    previous = _install_model_service(service)
+    try:
+        response = ui_backend.handle_command(
+            ui_backend.CommandRequest(
+                command="model.download",
+                request_id="req-model-download-failed",
+                payload={"modelKey": "pose_full"},
+            )
+        )
+        assert response["ok"] is True
+
+        final = manager.wait(response["jobId"], 2.0)
+
+        assert final is not None
+        assert final.status == "succeeded"
+        assert final.result["state"] == "failed"
+        assert final.result["completed"] == []
+        assert final.result["failed"] == [
+            {"key": "pose_full", "error": "network unavailable", "interrupted": False}
+        ]
+        status_events = [event for event in events if event["event"] == "model.status"]
+        assert status_events[-1]["payload"]["state"] == "failed"
+    finally:
+        ui_backend.DEFAULT_MODEL_SERVICE = previous
+
+
 def test_download_model_interruption_removes_part_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     spec = model_manager.ModelSpec(
         key="fake",

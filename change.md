@@ -22,14 +22,24 @@ Spce workflow final acceptance 的第一轮与对抗审查发现：已提交的 
 - 新增 `tests/test_vue_tauri_acceptance_gaps.py` 与 `frontend/scripts/frontend-smoke.mjs`，并将
   `npm --prefix frontend run test` 接入 `npm run verify:desktop`；修复验证脚本未检查原生命令
   exit code 的问题。
-- 将 `docs/specs/` 切换到 Bugfix 工作流并记录 B-001 至 B-008 的受控执行证据。
+- 将前端 smoke 从静态 marker 扫描升级为 behavior smoke：解析 Vue SFC 模板验证关键按钮绑定，
+  并直接执行 `frontend/src/bridge-state.ts` 状态助手，覆盖 stale session/job 过滤、raw JSON envelope、
+  未知总帧实时文案和模型下载失败展示。
+- 修复首轮验收发现的状态语义缺口：启动未知总帧时不再显示 `0%`，`analysis.status` /
+  `template.status` / `model.status` 统一按当前 `jobId` 隔离，模型下载失败不会被 `job.completed`
+  误显示为“下载完成”。
+- 将 `docs/specs/` 切换到 Bugfix 工作流并记录 B-001 至 B-010 的受控执行证据。
 
 ### 验证方法
 
-- `npm --prefix frontend run test` → passed。
-- `pytest tests/test_vue_tauri_acceptance_gaps.py -q` → 5 passed。
+- `npm --prefix frontend run test` → Frontend behavior smoke checks passed。
+- `pytest tests/test_vue_tauri_acceptance_gaps.py -q` → 6 passed。
+- `pytest tests/test_ui_backend_models.py tests/test_vue_tauri_acceptance_gaps.py -q` → 11 passed。
+- `py_compile apps/app_ui.py apps/ui_backend.py core/vision_pipeline.py` → passed。
+- `pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q` → 31 passed。
 - `npm run verify:desktop` → 前端 build/test、Tauri `cargo check`、Python py_compile、114 个桌面回归测试通过。
-- `pytest tests/test_windows_packaging_smoke.py -q` → 6 passed。
+- `pytest tests/test_windows_packaging_smoke.py -q` → 7 passed；其中 `frontend/src-tauri/resources/vision-ui-backend.exe`
+  实际响应 `bridge.ping`，返回 bridge version `1.0` 且包含 `model.download` 命令。
 - `npm run package:windows` → 生成
   `frontend/src-tauri/target/release/bundle/nsis/Vision 动作识别与评分_0.1.0_x64-setup.exe`。
 

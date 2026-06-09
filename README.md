@@ -53,7 +53,7 @@ npm --prefix frontend run tauri dev
 npm run verify:desktop
 ```
 
-前端 smoke 可单独运行：
+前端 behavior smoke 可单独运行：
 
 ```powershell
 npm --prefix frontend run test

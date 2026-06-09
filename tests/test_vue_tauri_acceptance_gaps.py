@@ -16,6 +16,10 @@ def _frontend_source_text() -> str:
     return "\n".join(parts)
 
 
+def _frontend_smoke_text() -> str:
+    return (ROOT / "frontend" / "scripts" / "frontend-smoke.mjs").read_text(encoding="utf-8")
+
+
 def test_vue_frontend_exposes_analysis_and_tech_eval_commands():
     source = _frontend_source_text()
 
@@ -62,12 +66,33 @@ def test_vue_frontend_exposes_record_directory_picker_and_default_semantics():
 
 def test_vue_frontend_filters_foreign_events_and_keeps_full_raw_json():
     source = _frontend_source_text()
+    smoke = _frontend_smoke_text()
 
     assert "event.sessionId" in source
     assert "event.jobId" in source
     assert "isCurrentBridgeEnvelope" in source or "shouldApplyBridgeEvent" in source
+    assert "isBridgeEventForCurrentState" in source
+    assert "analysis.status" in smoke
+    assert "template.status" in smoke
+    assert "model.status" in smoke
     assert "JSON.stringify(event, null, 2)" in source or "setRawJson(event)" in source
     assert "JSON.stringify(response, null, 2)" in source or "setRawJson(response)" in source
+
+
+def test_frontend_smoke_exercises_behavior_not_only_static_markers():
+    smoke = _frontend_smoke_text()
+
+    for required in (
+        "assertTemplateBinding",
+        "isBridgeEventForCurrentState",
+        "progressTextForSessionStatus",
+        "progressTextForFrameProgress",
+        "modelDownloadStatusFromJobEvent",
+        "foreign analysis.status must be ignored",
+        "failed model download must be shown as failed",
+        "raw JSON must keep jobId",
+    ):
+        assert required in smoke
 
 
 def test_verify_desktop_invokes_frontend_interaction_tests():
