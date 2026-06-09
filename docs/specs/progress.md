@@ -7,7 +7,7 @@
 > **Approval:** approved
 > **Last Checkpoint:** 2026-06-10 01:17:16
 > **Branch:** main
-> **Last Known Commit:** aa0af72
+> **Last Known Commit:** cdf639f
 
 ## Resume Summary
 - Goal: 修复第六轮第一波验收发现的 manifest parity 与证据文字残留
@@ -47,7 +47,7 @@
 | B-019 | 2026-06-09 23:24:53 | 920b06d | Added bridge-lifecycle stopJobById helper and behavior smoke assertions for exact job.stop command/payload/options; npm --prefix frontend run test -> passed; npm --prefix frontend run build -> passed; pytest tests/test_vue_tauri_acceptance_gaps.py -q -> 6 passed. | 修复第三轮第一波 B-016 验收发现 |
 | B-020 | 2026-06-10 00:02:13 | 2e94534 | Handled current session job.failed as a terminal UI state and added frontend behavior smoke for current/foreign job.failed; npm --prefix frontend run test/build -> passed; pytest tests/test_vue_tauri_acceptance_gaps.py -q -> 6 passed; pytest tests/test_ui_backend_sessions.py tests/test_input_source_state.py tests/test_vue_tauri_acceptance_gaps.py -q -> 21 passed; pytest tests/test_ui_backend_models.py tests/test_vue_tauri_acceptance_gaps.py -q -> 13 passed; npm run verify:desktop -> 118 passed. | 修复第四轮第一波 B-003 验收发现 |
 | B-021 | 2026-06-10 00:39:35 | d98dba6 | Fixed early session job.failed race and concrete evidence records; npm --prefix frontend run test -> passed; npm --prefix frontend run build -> passed; pytest tests/test_ui_backend_sessions.py tests/test_input_source_state.py tests/test_vue_tauri_acceptance_gaps.py -q -> 21 passed; npm run verify:desktop -> 118 passed; safe PowerShell fixed-string grep -> no matches. | n/a |
-| B-022 | 2026-06-10 01:17:16 | aa0af72 | Added request nullable manifest parity for Python/Rust and removed stale B-013/B-018 wording; pytest tests/test_ui_backend_contract.py tests/test_windows_packaging_smoke.py -q -> 19 passed; npm --prefix frontend run test -> passed; C:\Users\ny\.cargo\bin\cargo.exe check -> passed; stale evidence grep -> no matches. | n/a |
+| B-022 | 2026-06-10 01:17:16 | cdf639f | Added request nullable manifest parity for Python/Rust and removed stale B-013/B-018 wording; pytest tests/test_ui_backend_contract.py tests/test_windows_packaging_smoke.py -q -> 19 passed; npm --prefix frontend run test -> passed; C:\Users\ny\.cargo\bin\cargo.exe check -> passed; stale evidence grep -> no matches. | n/a |
 
 ## Recovery Notes
 - Completed B-022
