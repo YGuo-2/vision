@@ -42,6 +42,10 @@ def test_rust_bridge_prefers_packaged_sidecar_and_keeps_dev_fallback() -> None:
     assert '"optional": {' in source
     assert '"request": ["jobId", "sessionId"]' in source
     assert '"nullable": {' in source
+    nullable_start = source.index('"nullable": {')
+    nullable_response_start = source.index('"response": ["jobId", "sessionId", "error"]', nullable_start)
+    nullable_request_block = source[nullable_start:nullable_response_start]
+    assert '"request": ["jobId", "sessionId"]' in nullable_request_block
     assert '"response": ["jobId", "sessionId", "error"]' in source
     assert '"event": "bridge.decode_error"' in source
     assert '"jobId": null' in source

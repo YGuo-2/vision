@@ -54,6 +54,10 @@ Spce workflow final acceptance 的第一轮与对抗审查发现：已提交的 
   本轮追加 B-021，让 response 只有在 pending `sessionId/jobId` 仍匹配时才可置为运行，并补充
   `shouldApplySessionStartResponse` 行为断言。同时将 B-019/B-020 证据固化为 `920b06d` / `2e94534`，
   修正 B-018 PowerShell grep 命令为单引号 `-Command`，并将 B-013 完成态证据改为 resume/pre-acceptance。
+- 第六轮第一波 B-014 复查发现 request-side `jobId/sessionId` nullable 语义未写入 Python/Rust
+  manifest；本轮追加 B-022，在两端 manifest 的 `nullable.request` 中显式声明 `jobId/sessionId`，
+  并用 Python contract test 和 Rust source smoke 锁定该契约。同时清理 B-013/B-018 详细任务证据中的
+  stale wording，避免最终验收继续把历史结构检查当成完成态证明。
 
 ### 验证方法
 
@@ -65,6 +69,8 @@ Spce workflow final acceptance 的第一轮与对抗审查发现：已提交的 
 - `pytest tests/test_ui_backend_models.py tests/test_vue_tauri_acceptance_gaps.py -q` → 13 passed。
 - `npm --prefix frontend run test` → Frontend behavior smoke checks passed；覆盖 B-021 的早到 failed 阻止 late response 复活运行态。
 - `npm run verify:desktop` → Desktop stack verification passed，含 118 条 Python desktop regression tests。
+- `pytest tests/test_ui_backend_contract.py tests/test_windows_packaging_smoke.py -q` → 19 passed；覆盖 B-022 request nullable manifest/parity。
+- `C:\Users\ny\.cargo\bin\cargo.exe check`（`frontend/src-tauri`）→ passed；覆盖 B-022 Rust manifest 更新。
 - `pytest tests/test_ui_backend_contract.py tests/test_windows_packaging_smoke.py -q` → 17 passed。
 - `pytest tests/test_ui_backend_contract.py tests/test_ui_backend_models.py tests/test_vue_tauri_acceptance_gaps.py tests/test_windows_packaging_smoke.py -q` → 29 passed（前序复验组合）。
 - `C:\Users\ny\.cargo\bin\cargo.exe check`（`frontend/src-tauri`）→ passed。

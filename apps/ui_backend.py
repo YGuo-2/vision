@@ -1503,6 +1503,7 @@ def protocol_manifest() -> JsonDict:
                 "event": ["jobId", "sessionId"],
             },
             "nullable": {
+                "request": ["jobId", "sessionId"],
                 "response": ["jobId", "sessionId", "error"],
                 "event": ["jobId", "sessionId", "error"],
             },

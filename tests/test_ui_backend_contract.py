@@ -48,9 +48,31 @@ def test_protocol_manifest_lists_required_message_fields():
         "event": ["jobId", "sessionId"],
     }
     assert manifest["message_contract"]["nullable"] == {
+        "request": ["jobId", "sessionId"],
         "response": ["jobId", "sessionId", "error"],
         "event": ["jobId", "sessionId", "error"],
     }
+
+
+def test_request_null_job_and_session_ids_match_manifest_contract():
+    manifest = ui_backend.protocol_manifest()["message_contract"]
+
+    assert manifest["optional"]["request"] == ["jobId", "sessionId"]
+    assert manifest["nullable"]["request"] == ["jobId", "sessionId"]
+
+    req = ui_backend.parse_command(
+        {
+            "type": "command",
+            "command": "job.stop",
+            "requestId": "req-null-ids",
+            "jobId": None,
+            "sessionId": None,
+            "payload": {},
+        }
+    )
+
+    assert req.job_id is None
+    assert req.session_id is None
 
 
 def test_parse_command_requires_known_command_and_object_payload():

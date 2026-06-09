@@ -4,9 +4,9 @@ mode: strict
 approval: approved
 risk_level: high
 current_task: n/a
-last_checkpoint: 2026-06-10 00:39:35
+last_checkpoint: 2026-06-10 01:17:16
 artifacts: bugfix.md, design.md, tasks.md, progress.md, spec.yml
 requirements: AC-005, AC-006, AC-008, BUG-001, BUG-002, BUG-003, BUG-004, BUG-005, BUG-006, FIX-001, FIX-002, FIX-003, FIX-004, FIX-005, FIX-006, NFR-002, NFR-005, SAFE-001, SAFE-002, SAFE-003, SAFE-004
-task_ids: B-001, B-002, B-003, B-004, B-005, B-006, B-007, B-008, B-009, B-010, B-011, B-012, B-013, B-014, B-015, B-016, B-017, B-018, B-019, B-020, B-021
-task_graph: B-001, B-001->B-002, B-002->B-003, B-003->B-004, B-002->B-005, B-002->B-006, B-003->B-007, B-004->B-007, B-005->B-007, B-006->B-007, B-007->B-008, B-008->B-009, B-009->B-010, B-010->B-011, B-011->B-012, B-012->B-013, B-013->B-014, B-014->B-015, B-015->B-016, B-016->B-017, B-017->B-018, B-018->B-019, B-019->B-020, B-020->B-021
-artifact_hashes: bugfix.md=54656ce8fd66, design.md=3ab9f4a56e8f
+task_ids: B-001, B-002, B-003, B-004, B-005, B-006, B-007, B-008, B-009, B-010, B-011, B-012, B-013, B-014, B-015, B-016, B-017, B-018, B-019, B-020, B-021, B-022
+task_graph: B-001, B-001->B-002, B-002->B-003, B-003->B-004, B-002->B-005, B-002->B-006, B-003->B-007, B-004->B-007, B-005->B-007, B-006->B-007, B-007->B-008, B-008->B-009, B-009->B-010, B-010->B-011, B-011->B-012, B-012->B-013, B-013->B-014, B-014->B-015, B-015->B-016, B-016->B-017, B-017->B-018, B-018->B-019, B-019->B-020, B-020->B-021, B-021->B-022
+artifact_hashes: bugfix.md=b01faf3b1e6d, design.md=f6c341458137

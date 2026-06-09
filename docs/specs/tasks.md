@@ -2,9 +2,9 @@
 
 > **问题名称：** Vue/Tauri 迁移最终验收缺口修复
 > **关联规范：** `docs/specs/bugfix.md` · `docs/specs/design.md`
-> **状态：** Completed
-> **当前任务：** n/a
-> **进度：** 21 / 21 已完成
+> **状态：** In Progress
+> **当前任务：** B-022
+> **进度：** 21 / 22 已完成
 > **最后更新：** 2026-06-09
 
 ---
@@ -213,11 +213,11 @@
 
 - [x] **B-013:** 固化第一波最终验收新增问题清单
   - 状态: done
-  - 验证证据: 新增 B-013..B-017 任务并在 bugfix/design 记录第一波 B-002/B-004/B-006/B-008/B-010 ACTIONABLE_ISSUES；validate_spec.py docs\specs --workflow bugfix -> 34 passed；git status 仅 docs/specs 变更。
+  - 验证证据: 新增 B-013..B-017 任务并在 bugfix/design 记录第一波 B-002/B-004/B-006/B-008/B-010 ACTIONABLE_ISSUES；任务新增时历史结构检查通过；完成态复查以后续 `--resume` / `--pre-acceptance` 通过结果为准。
   - 完成时间: 2026-06-09 21:51:10
   - 备注: 第一波存在 actionable issues，未启动对抗审查。
   - 涉及文件: `docs/specs/bugfix.md`, `docs/specs/design.md`, `docs/specs/tasks.md`, `docs/specs/progress.md`, `docs/specs/spec.yml`
-  - 验证命令: `python <plugin-root>\scripts\validate_spec.py docs\specs --workflow bugfix`; `python <plugin-root>\scripts\spec_progress.py resume docs\specs`
+  - 验证命令: `python <plugin-root>\scripts\validate_spec.py docs\specs --resume`; `python <plugin-root>\scripts\validate_spec.py docs\specs --pre-acceptance`
   - 依赖: B-012
   - 风险: medium
   - 覆盖: BUG-001, BUG-003, BUG-005, BUG-006, FIX-001, FIX-003, FIX-005, FIX-006
@@ -283,7 +283,7 @@
 
 - [x] **B-018:** 修复第一波 B-008 文档追踪复查缺口
   - 状态: done
-  - 验证证据: 记录 docs sync commit 3aa2578 并修复 B-017/B-018 grep 命令为完整 HEAD 字符串拼接，避免自匹配；PowerShell 单引号 `-Command` 构造 fixed-string 检查目标模式（`5526945..` + `HEAD`）-> no matches；change.md 已记录 B-018；validate_spec.py docs\specs --resume/--pre-acceptance 将在 docs-only 提交后重跑。
+  - 验证证据: 记录 docs sync commit 3aa2578 并修复 B-017/B-018 grep 命令为完整 HEAD 字符串拼接，避免自匹配；PowerShell 单引号 `-Command` 构造 fixed-string 检查目标模式（`5526945..` + `HEAD`）-> no matches；change.md 已记录 B-018；docs-only 证据提交后 validate_spec.py docs\specs --resume/--pre-acceptance 已重跑。
   - 完成时间: 2026-06-09 22:50:10
   - 备注: docs-only 证据提交 `90f9e54` 已复查，避免提交内容自引用 hash。
   - 涉及文件: `docs/specs/tasks.md`, `docs/specs/progress.md`, `docs/specs/spec.yml`, `change.md`
@@ -337,6 +337,20 @@
   - 验证标准: 早到 current `job.failed` 清理 pending job 后，后到 `session.start` response 不会把 UI 重新置为运行；B-019/B-020 使用具体 commit hash；B-018 grep 命令可在 PowerShell 直接执行；B-013 完成态证据改用 resume/pre-acceptance，而不再声称 `--workflow bugfix` 在完成态 34 passed。
   - 预估工程量: 1 小时
 
+- [x] **B-022:** 修复第六轮第一波验收发现的 manifest parity 与证据文字残留
+  - 状态: done
+  - 验证证据: Added request nullable manifest parity for Python/Rust and removed stale B-013/B-018 wording; pytest tests/test_ui_backend_contract.py tests/test_windows_packaging_smoke.py -q -> 19 passed; npm --prefix frontend run test -> passed; C:\Users\ny\.cargo\bin\cargo.exe check -> passed; stale evidence grep -> no matches.
+  - 完成时间: 2026-06-10 01:17:16
+  - 备注: n/a
+  - 涉及文件: `apps/ui_backend.py`, `frontend/src-tauri/src/lib.rs`, `tests/test_ui_backend_contract.py`, `tests/test_windows_packaging_smoke.py`, `docs/specs/`, `change.md`
+  - 验证命令: `.\.venv\Scripts\python.exe -m pytest tests\test_ui_backend_contract.py tests\test_windows_packaging_smoke.py -q`; `npm --prefix frontend run test`; `C:\Users\ny\.cargo\bin\cargo.exe check`; `.\.venv\Scripts\python.exe <plugin-root>\scripts\validate_spec.py docs\specs --resume`; `.\.venv\Scripts\python.exe <plugin-root>\scripts\validate_spec.py docs\specs --pre-acceptance`
+  - 依赖: B-021
+  - 风险: high
+  - 覆盖: BUG-001, BUG-006, FIX-001, FIX-006, SAFE-004
+  - 可并行: 否
+  - 验证标准: Python/Rust manifest 的 `nullable.request` 均显式声明 `jobId/sessionId`；Python contract test 验证 request null id 解析与 manifest 一致；Rust source smoke 锁定 nullable request marker；B-013/B-018 详细任务证据不再保留完成态 stale wording。
+  - 预估工程量: 0.5-1 小时
+
 ---
 
 ## 执行 Waves
@@ -362,6 +376,7 @@
 | 17 | B-019 | 模型下载卸载取消行为级回归 |
 | 18 | B-020 | 实时会话 job.failed 终态收口 |
 | 19 | B-021 | 早到 job.failed 竞态与证据固化 |
+| 20 | B-022 | manifest parity 与证据文字残留修复 |
 
 ---
 
@@ -386,6 +401,7 @@
 | B-019 | 下载/生命周期测试 | unmount 取消 active 模型下载若只有 marker 覆盖，可能让 `job.stop` payload 漂移而不被发现 | 需行为级前端 smoke |
 | B-020 | 状态一致性 | 当前实时识别 job 失败若不清运行态，UI 可能继续显示运行/停止可用 | 需 job.failed 终态行为测试 |
 | B-021 | 状态竞态/可追溯性 | 早到失败事件和后到 response 竞态可能复活运行态；非具体提交证据会让验收不可复查 | 需竞态 helper 测试和 docs grep |
+| B-022 | 协议/可追溯性 | request-side nullable 语义若未写入 manifest/parity 测试，三端契约可能再次漂移；stale wording 会阻塞最终验收 | 需 manifest parity 测试、resume/pre-acceptance |
 
 ---
 
@@ -398,7 +414,7 @@
 | B-010 | 2026-06-09 20:28:51 | `5526945` | `npm run verify:desktop -> 116 passed`、`npm run package:windows`、`pytest tests/test_windows_packaging_smoke.py -q -> 7 passed`、`pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q -> 31 passed`、`py_compile` passed、`git diff --check` 仅 CRLF warning。 | 补足 behavior smoke、sidecar ping 和文档证据 |
 | B-011 | 2026-06-09 21:03:12 | `5526945..3d6441b` | `npm --prefix frontend run test`、`npm --prefix frontend run build`、`pytest tests/test_ui_backend_contract.py tests/test_ui_backend_models.py tests/test_vue_tauri_acceptance_gaps.py tests/test_windows_packaging_smoke.py -q -> 29 passed`、`cargo check` passed。 | 修复复验协议、过滤、竞态和模型保护缺口 |
 | B-012 | 2026-06-09 21:14:41 | `5526945..3d6441b` | `npm run verify:desktop -> 117 passed`、`npm run package:windows`、`pytest tests/test_windows_packaging_smoke.py -q -> 7 passed`、`pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q -> 31 passed`、`py_compile` passed、`git diff --check` 仅 CRLF warning。 | 同步复验文档和 commit 证据 |
-| B-013 | 2026-06-09 21:51:10 | `3d6441b..8764f86` | 新增 B-013..B-017 任务并在 bugfix/design 记录第一波 B-002/B-004/B-006/B-008/B-010 ACTIONABLE_ISSUES；当时 `validate_spec.py docs\specs --workflow bugfix -> 34 passed`；完成态复查以后续 `--resume` / `--pre-acceptance` 为准。 | 第一波存在 actionable issues，未启动对抗审查。 |
+| B-013 | 2026-06-09 21:51:10 | `3d6441b..8764f86` | 新增 B-013..B-017 任务并在 bugfix/design 记录第一波 B-002/B-004/B-006/B-008/B-010 ACTIONABLE_ISSUES；任务新增时历史结构检查通过；完成态复查以后续 `--resume` / `--pre-acceptance` 为准。 | 第一波存在 actionable issues，未启动对抗审查。 |
 | B-014 | 2026-06-09 21:57:29 | `3d6441b..8764f86` | 补齐 Python/Rust manifest optional/nullable 元数据和 TS null envelope 类型；验证：pytest tests\test_ui_backend_contract.py tests\test_windows_packaging_smoke.py -q -> 17 passed；npm --prefix frontend run test -> Frontend behavior smoke checks passed；C:\Users\ny\.cargo\bin\cargo.exe check -> passed。 | cargo 未在当前 PATH，使用本机绝对路径 C:\Users\ny\.cargo\bin\cargo.exe。 |
 | B-015 | 2026-06-09 22:00:45 | `3d6441b..8764f86` | Rust Shell32 picker 增加 OleInitialize/OleUninitialize；MTA RPC_E_CHANGED_MODE 时禁用 BIF_NEWDIALOGSTYLE 降级；验证：C:\Users\ny\.cargo\bin\cargo.exe check -> passed；pytest tests/test_windows_packaging_smoke.py -q -> 8 passed；npm --prefix frontend run test -> Frontend behavior smoke checks passed。 | 依据 Microsoft SHBrowseForFolder COM 初始化要求修复。 |
 | B-016 | 2026-06-09 22:04:56 | `3d6441b..8764f86` | download_model 校验已知 Content-Length 的截断 EOF 并清理 .part；Vue onBeforeUnmount 复用 cancelModelDownload 停止 active 下载；验证：pytest tests/test_ui_backend_models.py tests/test_vue_tauri_acceptance_gaps.py -q -> 13 passed；npm --prefix frontend run test -> Frontend behavior smoke checks passed；npm --prefix frontend run build -> passed。 | 正式模型文件在中断和截断下载时均保持不变。 |

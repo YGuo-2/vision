@@ -91,6 +91,7 @@ fn bridge_protocol_manifest() -> serde_json::Value {
                 "event": ["jobId", "sessionId"]
             },
             "nullable": {
+                "request": ["jobId", "sessionId"],
                 "response": ["jobId", "sessionId", "error"],
                 "event": ["jobId", "sessionId", "error"]
             }

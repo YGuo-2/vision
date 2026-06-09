@@ -5,12 +5,12 @@
 > **Status:** Completed
 > **Current Task:** n/a
 > **Approval:** approved
-> **Last Checkpoint:** 2026-06-10 00:39:35
+> **Last Checkpoint:** 2026-06-10 01:17:16
 > **Branch:** main
-> **Last Known Commit:** d98dba6
+> **Last Known Commit:** aa0af72
 
 ## Resume Summary
-- Goal: 修复早到 `job.failed` 竞态并固化验收证据
+- Goal: 修复第六轮第一波验收发现的 manifest parity 与证据文字残留
 - Approved specs: bugfix.md, design.md, tasks.md
 - Current task: n/a
 - Next safe action: Run pre-acceptance, then final acceptance.
@@ -20,8 +20,8 @@
 - Task ID: n/a
 - Status: done
 - Started at: n/a
-- Verification needed: Fixed early session job.failed race and concrete evidence records; npm --prefix frontend run test -> passed; npm --prefix frontend run build -> passed; pytest tests/test_ui_backend_sessions.py tests/test_input_source_state.py tests/test_vue_tauri_acceptance_gaps.py -q -> 21 passed; npm run verify:desktop -> 118 passed; safe PowerShell fixed-string grep -> no matches.
-- Files expected to change: `frontend/src/App.vue`, `frontend/src/bridge-state.ts`, `frontend/scripts/frontend-smoke.mjs`, `tests/test_vue_tauri_acceptance_gaps.py`, `docs/specs/`, `change.md`
+- Verification needed: Added request nullable manifest parity for Python/Rust and removed stale B-013/B-018 wording; pytest tests/test_ui_backend_contract.py tests/test_windows_packaging_smoke.py -q -> 19 passed; npm --prefix frontend run test -> passed; C:\Users\ny\.cargo\bin\cargo.exe check -> passed; stale evidence grep -> no matches.
+- Files expected to change: `apps/ui_backend.py`, `frontend/src-tauri/src/lib.rs`, `tests/test_ui_backend_contract.py`, `tests/test_windows_packaging_smoke.py`, `docs/specs/`, `change.md`
 
 ## Completed Work Log
 | Task ID | Time | Commit/State | Verification | Notes |
@@ -38,7 +38,7 @@
 | B-010 | 2026-06-09 20:28:51 | 5526945 | 补足前端 behavior smoke、verify 文案、packaged sidecar ping 和文档证据；验证：npm run verify:desktop -> frontend build, Frontend behavior smoke, cargo check, py_compile, 116 desktop regression tests passed；py_compile apps/app_ui.py apps/ui_backend.py core/vision_pipeline.py passed；pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q -> 31 passed；git diff --check -> only CRLF warnings；npm run package:windows produced NSIS installer；pytest tests/test_windows_packaging_smoke.py -q -> 7 passed including generated sidecar bridge.ping. | 证据链收口 |
 | B-011 | 2026-06-09 21:03:12 | 5526945..3d6441b | 修复 manifest request optional jobId/sessionId、Rust decode_error envelope、strict scoped-event filtering、长任务预分配 job/session id 和既有模型文件保护测试；验证：npm --prefix frontend run test -> Frontend behavior smoke checks passed；npm --prefix frontend run build passed；pytest tests/test_ui_backend_contract.py tests/test_ui_backend_models.py tests/test_vue_tauri_acceptance_gaps.py tests/test_windows_packaging_smoke.py -q -> 29 passed；frontend/src-tauri cargo check passed。 | 复验修复 |
 | B-012 | 2026-06-09 21:14:41 | 5526945..3d6441b | 同步 requirements.md 状态/审批记录、README/AGENTS 最终验证结果、change.md 和 commit 证据；验证：rg 检查无草稿/非具体提交占位/旧完成日志占位；npm run verify:desktop -> 117 desktop regression tests passed；pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q -> 31 passed；py_compile apps/app_ui.py apps/ui_backend.py core/vision_pipeline.py passed；pytest tests/test_windows_packaging_smoke.py -q -> 7 passed；npm run package:windows produced NSIS installer；git diff --check -> only CRLF warnings。 | 复验证据同步 |
-| B-013 | 2026-06-09 21:51:10 | 3d6441b..8764f86 | 新增 B-013..B-017 任务并在 bugfix/design 记录第一波 B-002/B-004/B-006/B-008/B-010 ACTIONABLE_ISSUES；当时 `validate_spec.py docs\specs --workflow bugfix -> 34 passed`；完成态复查以后续 `--resume` / `--pre-acceptance` 为准。 | 第一波存在 actionable issues，未启动对抗审查。 |
+| B-013 | 2026-06-09 21:51:10 | 3d6441b..8764f86 | 新增 B-013..B-017 任务并在 bugfix/design 记录第一波 B-002/B-004/B-006/B-008/B-010 ACTIONABLE_ISSUES；任务新增时历史结构检查通过；完成态复查以后续 `--resume` / `--pre-acceptance` 为准。 | 第一波存在 actionable issues，未启动对抗审查。 |
 | B-014 | 2026-06-09 21:57:29 | 3d6441b..8764f86 | 补齐 Python/Rust manifest optional/nullable 元数据和 TS null envelope 类型；验证：pytest tests\test_ui_backend_contract.py tests\test_windows_packaging_smoke.py -q -> 17 passed；npm --prefix frontend run test -> Frontend behavior smoke checks passed；C:\Users\ny\.cargo\bin\cargo.exe check -> passed。 | cargo 未在当前 PATH，使用本机绝对路径 C:\Users\ny\.cargo\bin\cargo.exe。 |
 | B-015 | 2026-06-09 22:00:45 | 3d6441b..8764f86 | Rust Shell32 picker 增加 OleInitialize/OleUninitialize；MTA RPC_E_CHANGED_MODE 时禁用 BIF_NEWDIALOGSTYLE 降级；验证：C:\Users\ny\.cargo\bin\cargo.exe check -> passed；pytest tests\test_windows_packaging_smoke.py -q -> 8 passed；npm --prefix frontend run test -> Frontend behavior smoke checks passed。 | 依据 Microsoft SHBrowseForFolder COM 初始化要求修复。 |
 | B-016 | 2026-06-09 22:04:56 | 3d6441b..8764f86 | download_model 校验已知 Content-Length 的截断 EOF 并清理 .part；Vue onBeforeUnmount 复用 cancelModelDownload 停止 active 下载；验证：pytest tests\test_ui_backend_models.py tests\test_vue_tauri_acceptance_gaps.py -q -> 13 passed；npm --prefix frontend run test -> Frontend behavior smoke checks passed；npm --prefix frontend run build -> passed。 | 正式模型文件在中断和截断下载时均保持不变。 |
@@ -47,6 +47,7 @@
 | B-019 | 2026-06-09 23:24:53 | 920b06d | Added bridge-lifecycle stopJobById helper and behavior smoke assertions for exact job.stop command/payload/options; npm --prefix frontend run test -> passed; npm --prefix frontend run build -> passed; pytest tests/test_vue_tauri_acceptance_gaps.py -q -> 6 passed. | 修复第三轮第一波 B-016 验收发现 |
 | B-020 | 2026-06-10 00:02:13 | 2e94534 | Handled current session job.failed as a terminal UI state and added frontend behavior smoke for current/foreign job.failed; npm --prefix frontend run test/build -> passed; pytest tests/test_vue_tauri_acceptance_gaps.py -q -> 6 passed; pytest tests/test_ui_backend_sessions.py tests/test_input_source_state.py tests/test_vue_tauri_acceptance_gaps.py -q -> 21 passed; pytest tests/test_ui_backend_models.py tests/test_vue_tauri_acceptance_gaps.py -q -> 13 passed; npm run verify:desktop -> 118 passed. | 修复第四轮第一波 B-003 验收发现 |
 | B-021 | 2026-06-10 00:39:35 | d98dba6 | Fixed early session job.failed race and concrete evidence records; npm --prefix frontend run test -> passed; npm --prefix frontend run build -> passed; pytest tests/test_ui_backend_sessions.py tests/test_input_source_state.py tests/test_vue_tauri_acceptance_gaps.py -q -> 21 passed; npm run verify:desktop -> 118 passed; safe PowerShell fixed-string grep -> no matches. | n/a |
+| B-022 | 2026-06-10 01:17:16 | aa0af72 | Added request nullable manifest parity for Python/Rust and removed stale B-013/B-018 wording; pytest tests/test_ui_backend_contract.py tests/test_windows_packaging_smoke.py -q -> 19 passed; npm --prefix frontend run test -> passed; C:\Users\ny\.cargo\bin\cargo.exe check -> passed; stale evidence grep -> no matches. | n/a |
 
 ## Recovery Notes
-- Completed B-021
+- Completed B-022

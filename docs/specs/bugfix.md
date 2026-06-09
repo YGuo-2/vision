@@ -54,6 +54,7 @@ Vue + Tauri + Vite 前端迁移在 `docs/specs/tasks.md` 中已被标记为完�
 - 第三轮第一波 B-016 agent 发现 Vue unmount 取消 active 模型下载虽然已实现，但测试仍停留在 marker 覆盖，缺少真实 `job.stop` payload/options 行为断言。
 - 第四轮第一波 B-003 agent 发现当前实时识别 job 若异步发出 `job.failed`，Vue 只写错误文本，不会清理 `isRunning` 与运行态文案。
 - 第五轮第一波 B-003 agent 发现早到 `job.failed` 仍可能被后到 `session.start` response 覆盖为运行态；B-008/B-010/B-012/B-017/B-019 agent 发现 B-019/B-020 仍使用非具体 commit 证据；B-018 agent 发现 PowerShell `$p` 命令写法不可直接复现；B-013 agent 发现完成态继续记录 `--workflow bugfix -> 34 passed` 不可复现。
+- 第六轮第一波 B-013/B-017+B-018/B-021 agent 发现 B-013 与 B-018 的详细任务证据仍有 stale wording；B-014 agent 发现 `jobId/sessionId` 的 request-side nullable 语义未在 Python/Rust manifest 中声明，且缺少 parity 测试。
 
 ### 2.5 影响范围
 
