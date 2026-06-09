@@ -5,12 +5,12 @@
 > **Status:** Completed
 > **Current Task:** n/a
 > **Approval:** approved
-> **Last Checkpoint:** 2026-06-10 02:05:11
+> **Last Checkpoint:** 2026-06-10 03:13:12
 > **Branch:** main
-> **Last Known Commit:** 8b574b5
+> **Last Known Commit:** eab6894
 
 ## Resume Summary
-- Goal: 修复第七轮第一波验收发现的 analysis stop 与验证证据同步缺口
+- Goal: 修复第二波对抗审查发现的前端生命周期与覆盖缺口
 - Approved specs: bugfix.md, design.md, tasks.md
 - Current task: n/a
 - Next safe action: Run pre-acceptance, then final acceptance.
@@ -20,8 +20,8 @@
 - Task ID: n/a
 - Status: done
 - Started at: n/a
-- Verification needed: Fixed analysis.run stop after compare before tech eval/debug export and synchronized latest validation evidence; pytest tests/test_ui_backend_analysis.py -q -> 5 passed; pytest tests/test_ui_backend_analysis.py tests/test_ui_backend_contract.py tests/test_windows_packaging_smoke.py tests/test_vue_tauri_acceptance_gaps.py -q -> 30 passed; npm --prefix frontend run test -> passed; npm run verify:desktop -> 120 passed.
-- Files expected to change: `apps/ui_backend.py`, `tests/test_ui_backend_analysis.py`, `README.md`, `AGENTS.md`, `docs/specs/`, `change.md`
+- Verification needed: Fixed second-wave adversarial frontend lifecycle gaps: preview frame throttle behavior smoke, model.download early failed/stopped late-response guard, installed model redownload, and unmount analysis/template job.stop cleanup; npm --prefix frontend run test -> passed; npm --prefix frontend run build -> passed; pytest tests/test_vue_tauri_acceptance_gaps.py tests/test_ui_backend_models.py tests/test_ui_backend_sessions.py tests/test_input_source_state.py -q -> 28 passed; npm run verify:desktop -> 120 passed.
+- Files expected to change: `frontend/src/App.vue`, `frontend/src/bridge-state.ts`, `frontend/scripts/frontend-smoke.mjs`, `tests/test_vue_tauri_acceptance_gaps.py`, `docs/specs/`, `change.md`
 
 ## Completed Work Log
 | Task ID | Time | Commit/State | Verification | Notes |
@@ -49,6 +49,7 @@
 | B-021 | 2026-06-10 00:39:35 | d98dba6 | Fixed early session job.failed race and concrete evidence records; npm --prefix frontend run test -> passed; npm --prefix frontend run build -> passed; pytest tests/test_ui_backend_sessions.py tests/test_input_source_state.py tests/test_vue_tauri_acceptance_gaps.py -q -> 21 passed; npm run verify:desktop -> 118 passed; safe PowerShell fixed-string grep -> no matches. | n/a |
 | B-022 | 2026-06-10 01:17:16 | cdf639f | Added request nullable manifest parity for Python/Rust and removed stale B-013/B-018 wording; pytest tests/test_ui_backend_contract.py tests/test_windows_packaging_smoke.py -q -> 19 passed; npm --prefix frontend run test -> passed; C:\Users\ny\.cargo\bin\cargo.exe check -> passed; stale evidence grep -> no matches. | n/a |
 | B-023 | 2026-06-10 02:05:11 | b53b81a | Fixed analysis.run stop after compare before tech eval/debug export and synchronized latest validation evidence; pytest tests/test_ui_backend_analysis.py -q -> 5 passed; pytest tests/test_ui_backend_analysis.py tests/test_ui_backend_contract.py tests/test_windows_packaging_smoke.py tests/test_vue_tauri_acceptance_gaps.py -q -> 30 passed; npm --prefix frontend run test -> passed; npm run verify:desktop -> 120 passed. | docs-only evidence sync commit `8b574b5` recorded. |
+| B-024 | 2026-06-10 03:13:12 | eab6894 | Fixed second-wave adversarial frontend lifecycle gaps: preview frame throttle behavior smoke, model.download early failed/stopped late-response guard, installed model redownload, and unmount analysis/template job.stop cleanup; npm --prefix frontend run test -> passed; npm --prefix frontend run build -> passed; pytest tests/test_vue_tauri_acceptance_gaps.py tests/test_ui_backend_models.py tests/test_ui_backend_sessions.py tests/test_input_source_state.py -q -> 28 passed; npm run verify:desktop -> 120 passed; npm run package:windows -> NSIS installer generated. | Second-wave adversarial B-003/B-006/B-009/B-019+B-020 ACTIONABLE_ISSUES resolved. |
 
 ## Recovery Notes
-- Completed B-023
+- Completed B-024

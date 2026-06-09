@@ -80,6 +80,8 @@ Vue + Tauri + Vite 前端迁移在 `docs/specs/tasks.md` 中已被标记为完�
 
 - **WHEN** bridge 高频发送 `session.frame`
 - **THEN** Vue 每帧渲染，违反 NFR-002 的节流要求。
+- **WHEN** 最终验收需要证明预览节流行为
+- **THEN** 只有实现标记，缺少跳过快速帧并接受后续帧的行为级测试。
 - **WHEN** 旧会话或非当前 job 事件迟到
 - **THEN** Vue 可能更新当前预览、录制状态或运行态。
 - **WHEN** 摄像头或未知总帧输入运行
@@ -105,6 +107,12 @@ Vue + Tauri + Vite 前端迁移在 `docs/specs/tasks.md` 中已被标记为完�
 - **THEN** Vue 未提供 settings view/modal，且不展示模型目录、逐模型路径、文件大小和安装状态。
 - **WHEN** 用户下载单模型或全部缺失模型
 - **THEN** Vue 没有下载、下载全部、字节进度、完成/失败展示和取消入口。
+- **WHEN** 已安装模型需要重新下载
+- **THEN** Vue 禁用逐模型下载按钮，低于 Tkinter “重新下载”能力。
+- **WHEN** 模型下载 early failed/stopped 事件早于 start response
+- **THEN** 晚到 response 可能把状态覆盖回“下载中”。
+- **WHEN** 用户关闭窗口且 active analysis/template job 正在运行
+- **THEN** Vue 卸载路径未发送 `job.stop`，后台任务可能继续运行。
 
 ### BUG-006: 验证集合、Windows 启动证据和文档状态不同步
 
@@ -142,7 +150,7 @@ Vue + Tauri + Vite 前端迁移在 `docs/specs/tasks.md` 中已被标记为完�
 ### FIX-005: 设置窗口和模型下载流程可用
 
 - **WHEN** 用户打开设置
-- **THEN** Vue 展示模型目录、逐模型安装状态、路径、大小、缺失状态，并支持刷新、单模型下载、全部缺失下载、进度和取消。
+- **THEN** Vue 展示模型目录、逐模型安装状态、路径、大小、缺失状态，并支持刷新、单模型下载、已安装模型重新下载、全部缺失下载、进度、取消和窗口卸载时停止 active 模型/分析 job。
 
 ### FIX-006: 验证与文档证据可信
 

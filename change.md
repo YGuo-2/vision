@@ -62,6 +62,13 @@ Spce workflow final acceptance 的第一轮与对抗审查发现：已提交的 
   tech eval/debug export；本轮追加 B-023，在 compare 后和 tech eval/debug export 前检查停止标记，
   并补充 compare+tech eval 组合停止回归。同时将 README/AGENTS/change/specs 的最新桌面验证证据
   同步到当前 `npm run verify:desktop` 结果。
+- 第二波对抗审查发现 B-003/B-006/B-009/B-019+B-020 仍有四个前端生命周期和覆盖缺口：
+  预览帧节流缺少行为测试、模型下载 early failed/stopped 可能被 late start response 覆盖为“下载中”、
+  已安装模型无法像 Tkinter 一样“重新下载”、窗口卸载未停止 active analysis/template job。本轮追加
+  B-024（实现提交 `eab6894`）：抽出 `shouldRenderPreviewFrameAt` 与
+  `shouldApplyModelDownloadStartResponse` 行为 helper，Vue 只在 pending model job 仍匹配时应用
+  start response；已安装模型按钮显示“重新下载”并复用固定 `modelKey` 下载；unmount 复用
+  `stopJobById` 停止 active analysis/template job；frontend smoke 增加对应行为断言。
 
 ### 验证方法
 
@@ -73,6 +80,12 @@ Spce workflow final acceptance 的第一轮与对抗审查发现：已提交的 
 - `pytest tests/test_ui_backend_models.py tests/test_vue_tauri_acceptance_gaps.py -q` → 13 passed。
 - `npm --prefix frontend run test` → Frontend behavior smoke checks passed；覆盖 B-021 的早到 failed 阻止 late response 复活运行态。
 - `npm run verify:desktop` → Desktop stack verification passed，含 120 条 Python desktop regression tests。
+- `npm --prefix frontend run test` → Frontend behavior smoke checks passed；覆盖 B-024 的预览帧节流、
+  模型下载 early terminal late response guard、已安装模型重新下载 marker 和 analysis/template unmount stop helper。
+- `npm --prefix frontend run build` → passed（B-024 后重新验证）。
+- `pytest tests/test_vue_tauri_acceptance_gaps.py tests/test_ui_backend_models.py tests/test_ui_backend_sessions.py tests/test_input_source_state.py -q` → 28 passed。
+- `npm run package:windows` → 重新生成 NSIS 安装包：
+  `frontend/src-tauri/target/release/bundle/nsis/Vision 动作识别与评分_0.1.0_x64-setup.exe`。
 - `pytest tests/test_ui_backend_contract.py tests/test_windows_packaging_smoke.py -q` → 19 passed；覆盖 B-022 request nullable manifest/parity。
 - `C:\Users\ny\.cargo\bin\cargo.exe check`（`frontend/src-tauri`）→ passed；覆盖 B-022 Rust manifest 更新。
 - `pytest tests/test_ui_backend_contract.py tests/test_windows_packaging_smoke.py -q` → 17 passed。

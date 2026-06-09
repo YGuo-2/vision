@@ -4,8 +4,8 @@
 > **关联规范：** `docs/specs/bugfix.md` · `docs/specs/design.md`
 > **状态：** Completed
 > **当前任务：** n/a
-> **进度：** 23 / 23 已完成
-> **最后更新：** 2026-06-09
+> **进度：** 24 / 24 已完成
+> **最后更新：** 2026-06-10
 
 ---
 
@@ -365,6 +365,20 @@
   - 验证标准: `analysis.run` 的 compare+tech eval 组合任务在 compare 后收到 `job.stop` 时不再继续 tech eval/debug export，最终 payload/state 为 stopped；新增回归能复现该停止语义；README/AGENTS/change/specs 记录当前 HEAD 的最新 `verify:desktop` 结果。
   - 预估工程量: 1-2 小时
 
+- [x] **B-024:** 修复第二波对抗审查发现的前端生命周期与覆盖缺口
+  - 状态: done
+  - 验证证据: Fixed second-wave adversarial frontend lifecycle gaps: preview frame throttle behavior smoke, model.download early failed/stopped late-response guard, installed model redownload, and unmount analysis/template job.stop cleanup; npm --prefix frontend run test -> passed; npm --prefix frontend run build -> passed; pytest tests/test_vue_tauri_acceptance_gaps.py tests/test_ui_backend_models.py tests/test_ui_backend_sessions.py tests/test_input_source_state.py -q -> 28 passed; npm run verify:desktop -> 120 passed.
+  - 完成时间: 2026-06-10 03:13:12
+  - 备注: Second-wave adversarial B-003/B-006/B-009/B-019+B-020 ACTIONABLE_ISSUES resolved.
+  - 涉及文件: `frontend/src/App.vue`, `frontend/src/bridge-state.ts`, `frontend/scripts/frontend-smoke.mjs`, `tests/test_vue_tauri_acceptance_gaps.py`, `docs/specs/`, `change.md`
+  - 验证命令: `npm --prefix frontend run test`; `npm --prefix frontend run build`; `.\.venv\Scripts\python.exe -m pytest tests\test_vue_tauri_acceptance_gaps.py tests\test_ui_backend_models.py tests\test_ui_backend_sessions.py tests\test_input_source_state.py -q`; `npm run verify:desktop`
+  - 依赖: B-023
+  - 风险: high
+  - 覆盖: BUG-002, BUG-005, FIX-002, FIX-005, SAFE-004
+  - 可并行: 否
+  - 验证标准: 前端行为 smoke 断言预览帧节流会跳过快速帧并接受后续帧；模型下载 early failed/stopped 事件不会被晚到 `model.download` start response 覆盖为下载中；已安装模型仍可点击“重新下载”；窗口卸载会通过同一 `job.stop` helper 停止 active analysis/template job，且 payload/options 均携带相同 `jobId`。
+  - 预估工程量: 1 小时
+
 ---
 
 ## 执行 Waves
@@ -392,6 +406,7 @@
 | 19 | B-021 | 早到 job.failed 竞态与证据固化 |
 | 20 | B-022 | manifest parity 与证据文字残留修复 |
 | 21 | B-023 | analysis stop 与验证证据同步 |
+| 22 | B-024 | 第二波对抗审查前端生命周期与覆盖缺口修复 |
 
 ---
 
@@ -418,6 +433,7 @@
 | B-021 | 状态竞态/可追溯性 | 早到失败事件和后到 response 竞态可能复活运行态；非具体提交证据会让验收不可复查 | 需竞态 helper 测试和 docs grep |
 | B-022 | 协议/可追溯性 | request-side nullable 语义若未写入 manifest/parity 测试，三端契约可能再次漂移；stale wording 会阻塞最终验收 | 需 manifest parity 测试、resume/pre-acceptance |
 | B-023 | 生命周期/可追溯性 | 用户停止组合动作分析后若继续 tech eval/debug export，会违反 job.stop 语义并浪费算力；最新验证数字若不同步会阻塞最终验收 | 需组合 stop 回归、verify:desktop、docs grep |
+| B-024 | 状态一致性/生命周期 | 第二波对抗审查发现预览帧节流缺少行为测试、模型下载 early terminal 可能被 late response 覆盖、已安装模型无法重下、unmount 未停 active analysis job | 需前端 behavior smoke、模型/会话 gap 测试、verify:desktop |
 
 ---
 
@@ -441,3 +457,4 @@
 | B-021 | 2026-06-10 00:39:35 | `d98dba6` | Fixed early session job.failed race and concrete evidence records; npm --prefix frontend run test -> passed; npm --prefix frontend run build -> passed; pytest tests/test_ui_backend_sessions.py tests/test_input_source_state.py tests/test_vue_tauri_acceptance_gaps.py -q -> 21 passed; npm run verify:desktop -> 118 passed; safe PowerShell fixed-string grep -> no matches. | 实现提交为 `d98dba6`。 |
 | B-022 | 2026-06-10 01:17:16 | `cdf639f` | Added request nullable manifest parity for Python/Rust and removed stale B-013/B-018 wording; pytest tests/test_ui_backend_contract.py tests/test_windows_packaging_smoke.py -q -> 19 passed; npm --prefix frontend run test/build -> passed; C:\Users\ny\.cargo\bin\cargo.exe check -> passed; pytest tests/test_ui_backend_contract.py tests/test_windows_packaging_smoke.py tests/test_vue_tauri_acceptance_gaps.py -q -> 25 passed; stale evidence grep -> no matches. | 实现提交为 `cdf639f`。 |
 | B-023 | 2026-06-10 02:05:11 | `b53b81a` | Fixed analysis.run stop after compare before tech eval/debug export and synchronized latest validation evidence; pytest tests/test_ui_backend_analysis.py -q -> 5 passed; pytest tests/test_ui_backend_analysis.py tests/test_ui_backend_contract.py tests/test_windows_packaging_smoke.py tests/test_vue_tauri_acceptance_gaps.py -q -> 30 passed; npm --prefix frontend run test -> passed; npm run verify:desktop -> 120 passed. | 实现提交为 `b53b81a`；docs-only 证据同步提交为 `8b574b5`。 |
+| B-024 | 2026-06-10 03:13:12 | `eab6894` | Fixed second-wave adversarial frontend lifecycle gaps: preview frame throttle behavior smoke, model.download early failed/stopped late-response guard, installed model redownload, and unmount analysis/template job.stop cleanup; npm --prefix frontend run test -> passed; npm --prefix frontend run build -> passed; pytest tests/test_vue_tauri_acceptance_gaps.py tests/test_ui_backend_models.py tests/test_ui_backend_sessions.py tests/test_input_source_state.py -q -> 28 passed; npm run verify:desktop -> 120 passed; npm run package:windows -> NSIS installer generated. | Second-wave adversarial B-003/B-006/B-009/B-019+B-020 ACTIONABLE_ISSUES resolved; 实现提交为 `eab6894`。 |
