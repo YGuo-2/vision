@@ -486,9 +486,14 @@ class TemplateAnalysisService:
         options = normalize_analysis_run_options(ctx.payload)
         ctx.progress("analysis.status", {"state": "running", **options.to_payload()})
         payload: JsonDict = {
-            "state": "stopped" if ctx.stopped() else "completed",
+            "state": "running",
             "videoPath": options.video_path,
         }
+
+        def finish() -> JsonDict:
+            payload["state"] = "stopped" if ctx.stopped() else "completed"
+            ctx.progress("analysis.status", payload)
+            return _to_jsonable(payload)
 
         if options.do_compare:
             if not options.template_path:
@@ -505,13 +510,18 @@ class TemplateAnalysisService:
             payload["compare"] = _compare_result_payload(result)
             if options.template_path:
                 payload["compare"]["templateMeta"] = _load_template_meta(Path(options.template_path))
+            if ctx.stopped():
+                return finish()
 
         if options.do_tech_eval:
+            if ctx.stopped():
+                return finish()
             ctx.progress("analysis.progress", {"stage": "技术评估中", "done": 0, "total": 0, "percent": None})
+            if ctx.stopped():
+                return finish()
             payload["techEval"] = self._run_tech_eval(options)
 
-        ctx.progress("analysis.status", payload)
-        return _to_jsonable(payload)
+        return finish()
 
     def _run_tech_eval(self, options: AnalysisRunOptions) -> JsonDict:
         video = Path(options.video_path)

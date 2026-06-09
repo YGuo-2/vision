@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -141,6 +142,74 @@ def test_analysis_run_command_returns_template_compare_payload(tmp_path: Path) -
         assert "帧 10..20" in compare["matchText"]
         assert any(event["event"] == "analysis.progress" for event in events)
     finally:
+        ui_backend.DEFAULT_ANALYSIS_SERVICE = previous
+
+
+def test_analysis_run_stop_after_compare_skips_tech_eval(tmp_path: Path) -> None:
+    events: list[dict] = []
+    manager = ui_backend.BridgeJobManager(events.append)
+    template_path = tmp_path / "template.npz"
+    _write_template(template_path)
+    compare_started = threading.Event()
+    compare_can_finish = threading.Event()
+    tech_eval_called = threading.Event()
+
+    def fake_compare(template, video, **kwargs):
+        compare_started.set()
+        assert compare_can_finish.wait(2.0)
+        return SimpleNamespace(
+            template_path=Path(template),
+            video_path=Path(video),
+            pose_variant="full",
+            fps=30.0,
+            start_frame=1,
+            end_frame=2,
+            cost=1.0,
+            avg_cost=0.5,
+            score=0.9,
+            preview_path=None,
+            workers_used=1,
+        )
+
+    def fake_evaluate_detail(*args, **kwargs):
+        tech_eval_called.set()
+        raise AssertionError("tech eval must not run after analysis job.stop")
+
+    service = ui_backend.TemplateAnalysisService(
+        job_manager=manager,
+        compare_template=fake_compare,
+        evaluate_detail=fake_evaluate_detail,
+    )
+    previous = _install_analysis_service(service)
+    try:
+        response = ui_backend.handle_command(
+            ui_backend.CommandRequest(
+                command="analysis.run",
+                request_id="req-analysis-stop",
+                payload={
+                    "videoPath": "student.mp4",
+                    "templatePath": str(template_path),
+                    "doCompare": True,
+                    "doTechEval": True,
+                },
+            )
+        )
+        assert response["ok"] is True
+        assert compare_started.wait(2.0)
+
+        assert manager.stop(response["jobId"]) is True
+        compare_can_finish.set()
+        final = manager.wait(response["jobId"], 2.0)
+
+        assert final is not None
+        assert final.status == "stopped"
+        assert final.result["state"] == "stopped"
+        assert "compare" in final.result
+        assert "techEval" not in final.result
+        assert not tech_eval_called.is_set()
+        assert any(event["event"] == "job.stopped" for event in events)
+    finally:
+        compare_can_finish.set()
         ui_backend.DEFAULT_ANALYSIS_SERVICE = previous
 
 

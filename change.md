@@ -58,6 +58,10 @@ Spce workflow final acceptance 的第一轮与对抗审查发现：已提交的 
   manifest；本轮追加 B-022，在两端 manifest 的 `nullable.request` 中显式声明 `jobId/sessionId`，
   并用 Python contract test 和 Rust source smoke 锁定该契约。同时清理 B-013/B-018 详细任务证据中的
   stale wording，避免最终验收继续把历史结构检查当成完成态证明。
+- 第七轮第一波 B-005 复查发现组合 `analysis.run` 在 compare 后收到 `job.stop` 仍会继续执行
+  tech eval/debug export；本轮追加 B-023，在 compare 后和 tech eval/debug export 前检查停止标记，
+  并补充 compare+tech eval 组合停止回归。同时将 README/AGENTS/change/specs 的最新桌面验证证据
+  同步到当前 `npm run verify:desktop` 结果。
 
 ### 验证方法
 
@@ -68,7 +72,7 @@ Spce workflow final acceptance 的第一轮与对抗审查发现：已提交的 
 - `pytest tests/test_ui_backend_sessions.py tests/test_input_source_state.py tests/test_vue_tauri_acceptance_gaps.py -q` → 21 passed。
 - `pytest tests/test_ui_backend_models.py tests/test_vue_tauri_acceptance_gaps.py -q` → 13 passed。
 - `npm --prefix frontend run test` → Frontend behavior smoke checks passed；覆盖 B-021 的早到 failed 阻止 late response 复活运行态。
-- `npm run verify:desktop` → Desktop stack verification passed，含 118 条 Python desktop regression tests。
+- `npm run verify:desktop` → Desktop stack verification passed，含 120 条 Python desktop regression tests。
 - `pytest tests/test_ui_backend_contract.py tests/test_windows_packaging_smoke.py -q` → 19 passed；覆盖 B-022 request nullable manifest/parity。
 - `C:\Users\ny\.cargo\bin\cargo.exe check`（`frontend/src-tauri`）→ passed；覆盖 B-022 Rust manifest 更新。
 - `pytest tests/test_ui_backend_contract.py tests/test_windows_packaging_smoke.py -q` → 17 passed。
@@ -76,7 +80,9 @@ Spce workflow final acceptance 的第一轮与对抗审查发现：已提交的 
 - `C:\Users\ny\.cargo\bin\cargo.exe check`（`frontend/src-tauri`）→ passed。
 - `py_compile apps/app_ui.py apps/ui_backend.py core/vision_pipeline.py` → passed。
 - `pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q` → 31 passed。
-- `npm run verify:desktop` → 前端 build/test、Tauri `cargo check`、Python py_compile、118 个桌面回归测试通过。
+- `pytest tests/test_ui_backend_analysis.py -q` → 5 passed；覆盖 B-023 组合动作分析停止后跳过 tech eval/debug export。
+- `pytest tests/test_ui_backend_analysis.py tests/test_ui_backend_contract.py tests/test_windows_packaging_smoke.py tests/test_vue_tauri_acceptance_gaps.py -q` → 30 passed。
+- `npm run verify:desktop` → 前端 build/test、Tauri `cargo check`、Python py_compile、120 个桌面回归测试通过。
 - `pytest tests/test_windows_packaging_smoke.py -q` → 8 passed；其中 `frontend/src-tauri/resources/vision-ui-backend.exe`
   实际响应 `bridge.ping`，返回 bridge version `1.0` 且包含 `model.download` 命令。
 - `npm run package:windows` → 生成

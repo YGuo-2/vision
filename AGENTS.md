@@ -81,11 +81,11 @@ npm run package:windows
 ```
 
 Latest desktop migration validation (2026-06-09, after first-wave final-acceptance fixes):
-- `npm run verify:desktop`: frontend build, Frontend behavior smoke, Tauri `cargo check`, Python `py_compile`, and 118 desktop regressions passed.
+- `npm run verify:desktop`: frontend build, Frontend behavior smoke, Tauri `cargo check`, Python `py_compile`, and 120 desktop regressions passed.
 - `npm run package:windows`: NSIS installer generated.
 - `pytest tests/test_windows_packaging_smoke.py -q`: 8 passed, including packaged sidecar `bridge.ping` and Shell32 COM initialization coverage.
 - `pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q`: 31 passed.
-- Regression coverage now includes bridge optional/nullable manifest semantics, TS null envelope typing, short HTTP model-download protection, and unmount-time model download cancellation.
+- Regression coverage now includes bridge optional/nullable manifest semantics, TS null envelope typing, short HTTP model-download protection, unmount-time model download cancellation, and stopped combined analysis skipping tech eval.
 
 Run CLI (camera `0`):
 ```powershell

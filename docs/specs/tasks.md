@@ -4,7 +4,7 @@
 > **关联规范：** `docs/specs/bugfix.md` · `docs/specs/design.md`
 > **状态：** Completed
 > **当前任务：** n/a
-> **进度：** 22 / 22 已完成
+> **进度：** 23 / 23 已完成
 > **最后更新：** 2026-06-09
 
 ---
@@ -351,6 +351,20 @@
   - 验证标准: Python/Rust manifest 的 `nullable.request` 均显式声明 `jobId/sessionId`；Python contract test 验证 request null id 解析与 manifest 一致；Rust source smoke 锁定 nullable request marker；B-013/B-018 详细任务证据不再保留完成态 stale wording。
   - 预估工程量: 0.5-1 小时
 
+- [x] **B-023:** 修复第七轮第一波验收发现的 analysis stop 与验证证据同步缺口
+  - 状态: done
+  - 验证证据: Fixed analysis.run stop after compare before tech eval/debug export and synchronized latest validation evidence; pytest tests/test_ui_backend_analysis.py -q -> 5 passed; pytest tests/test_ui_backend_analysis.py tests/test_ui_backend_contract.py tests/test_windows_packaging_smoke.py tests/test_vue_tauri_acceptance_gaps.py -q -> 30 passed; npm --prefix frontend run test -> passed; npm run verify:desktop -> 120 passed.
+  - 完成时间: 2026-06-10 02:05:11
+  - 备注: n/a
+  - 涉及文件: `apps/ui_backend.py`, `tests/test_ui_backend_analysis.py`, `README.md`, `AGENTS.md`, `docs/specs/`, `change.md`
+  - 验证命令: `.\.venv\Scripts\python.exe -m pytest tests\test_ui_backend_analysis.py tests\test_ui_backend_contract.py tests\test_windows_packaging_smoke.py tests\test_vue_tauri_acceptance_gaps.py -q`; `npm --prefix frontend run test`; `npm run verify:desktop`; `.\.venv\Scripts\python.exe <plugin-root>\scripts\validate_spec.py docs\specs --resume`; `.\.venv\Scripts\python.exe <plugin-root>\scripts\validate_spec.py docs\specs --pre-acceptance`
+  - 依赖: B-022
+  - 风险: high
+  - 覆盖: BUG-004, BUG-006, FIX-004, FIX-006, SAFE-002, SAFE-004
+  - 可并行: 否
+  - 验证标准: `analysis.run` 的 compare+tech eval 组合任务在 compare 后收到 `job.stop` 时不再继续 tech eval/debug export，最终 payload/state 为 stopped；新增回归能复现该停止语义；README/AGENTS/change/specs 记录当前 HEAD 的最新 `verify:desktop` 结果。
+  - 预估工程量: 1-2 小时
+
 ---
 
 ## 执行 Waves
@@ -377,6 +391,7 @@
 | 18 | B-020 | 实时会话 job.failed 终态收口 |
 | 19 | B-021 | 早到 job.failed 竞态与证据固化 |
 | 20 | B-022 | manifest parity 与证据文字残留修复 |
+| 21 | B-023 | analysis stop 与验证证据同步 |
 
 ---
 
@@ -402,6 +417,7 @@
 | B-020 | 状态一致性 | 当前实时识别 job 失败若不清运行态，UI 可能继续显示运行/停止可用 | 需 job.failed 终态行为测试 |
 | B-021 | 状态竞态/可追溯性 | 早到失败事件和后到 response 竞态可能复活运行态；非具体提交证据会让验收不可复查 | 需竞态 helper 测试和 docs grep |
 | B-022 | 协议/可追溯性 | request-side nullable 语义若未写入 manifest/parity 测试，三端契约可能再次漂移；stale wording 会阻塞最终验收 | 需 manifest parity 测试、resume/pre-acceptance |
+| B-023 | 生命周期/可追溯性 | 用户停止组合动作分析后若继续 tech eval/debug export，会违反 job.stop 语义并浪费算力；最新验证数字若不同步会阻塞最终验收 | 需组合 stop 回归、verify:desktop、docs grep |
 
 ---
 
