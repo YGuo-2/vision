@@ -2,9 +2,9 @@
 
 > **问题名称：** Vue/Tauri 迁移最终验收缺口修复
 > **关联规范：** `docs/specs/bugfix.md` · `docs/specs/design.md`
-> **状态：** In Progress
-> **当前任务：** B-013
-> **进度：** 12 / 17 已完成
+> **状态：** Completed
+> **当前任务：** n/a
+> **进度：** 17 / 17 已完成
 > **最后更新：** 2026-06-09
 
 ---
@@ -271,7 +271,7 @@
   - 状态: done
   - 验证证据: README/AGENTS/change.md 与 docs/specs 已同步；rg '5526945\\.\\.HEAD' docs/specs README.md AGENTS.md change.md -> no matches；npm run verify:desktop -> 118 passed；pytest tests/test_windows_packaging_smoke.py -q -> 8 passed；pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q -> 31 passed；npm run package:windows -> NSIS installer generated；git diff --check -> only LF/CRLF warnings。
   - 完成时间: 2026-06-09 22:17:40
-  - 备注: pre-acceptance 将在提交后用干净工作树重跑。
+  - 备注: pre-acceptance 已在实现提交 8764f86 后用干净工作树通过；文档证据提交后需再次复查。
   - 涉及文件: `docs/specs/`, `README.md`, `AGENTS.md`, `change.md`
   - 验证命令: `rg "5526945\.\.HE" docs\specs README.md AGENTS.md change.md`; `npm run verify:desktop`; `python <plugin-root>\scripts\validate_spec.py docs\specs --pre-acceptance`
   - 依赖: B-016
@@ -334,3 +334,8 @@
 | B-010 | 2026-06-09 20:28:51 | `5526945` | `npm run verify:desktop -> 116 passed`、`npm run package:windows`、`pytest tests/test_windows_packaging_smoke.py -q -> 7 passed`、`pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q -> 31 passed`、`py_compile` passed、`git diff --check` 仅 CRLF warning。 | 补足 behavior smoke、sidecar ping 和文档证据 |
 | B-011 | 2026-06-09 21:03:12 | `5526945..3d6441b` | `npm --prefix frontend run test`、`npm --prefix frontend run build`、`pytest tests/test_ui_backend_contract.py tests/test_ui_backend_models.py tests/test_vue_tauri_acceptance_gaps.py tests/test_windows_packaging_smoke.py -q -> 29 passed`、`cargo check` passed。 | 修复复验协议、过滤、竞态和模型保护缺口 |
 | B-012 | 2026-06-09 21:14:41 | `5526945..3d6441b` | `npm run verify:desktop -> 117 passed`、`npm run package:windows`、`pytest tests/test_windows_packaging_smoke.py -q -> 7 passed`、`pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q -> 31 passed`、`py_compile` passed、`git diff --check` 仅 CRLF warning。 | 同步复验文档和 commit 证据 |
+| B-013 | 2026-06-09 21:51:10 | `3d6441b..8764f86` | 新增 B-013..B-017 任务并在 bugfix/design 记录第一波 B-002/B-004/B-006/B-008/B-010 ACTIONABLE_ISSUES；validate_spec.py docs\specs --workflow bugfix -> 34 passed；git status 仅 docs/specs 变更。 | 第一波存在 actionable issues，未启动对抗审查。 |
+| B-014 | 2026-06-09 21:57:29 | `3d6441b..8764f86` | 补齐 Python/Rust manifest optional/nullable 元数据和 TS null envelope 类型；验证：pytest tests\test_ui_backend_contract.py tests\test_windows_packaging_smoke.py -q -> 17 passed；npm --prefix frontend run test -> Frontend behavior smoke checks passed；C:\Users\ny\.cargo\bin\cargo.exe check -> passed。 | cargo 未在当前 PATH，使用本机绝对路径 C:\Users\ny\.cargo\bin\cargo.exe。 |
+| B-015 | 2026-06-09 22:00:45 | `3d6441b..8764f86` | Rust Shell32 picker 增加 OleInitialize/OleUninitialize；MTA RPC_E_CHANGED_MODE 时禁用 BIF_NEWDIALOGSTYLE 降级；验证：C:\Users\ny\.cargo\bin\cargo.exe check -> passed；pytest tests/test_windows_packaging_smoke.py -q -> 8 passed；npm --prefix frontend run test -> Frontend behavior smoke checks passed。 | 依据 Microsoft SHBrowseForFolder COM 初始化要求修复。 |
+| B-016 | 2026-06-09 22:04:56 | `3d6441b..8764f86` | download_model 校验已知 Content-Length 的截断 EOF 并清理 .part；Vue onBeforeUnmount 复用 cancelModelDownload 停止 active 下载；验证：pytest tests/test_ui_backend_models.py tests/test_vue_tauri_acceptance_gaps.py -q -> 13 passed；npm --prefix frontend run test -> Frontend behavior smoke checks passed；npm --prefix frontend run build -> passed。 | 正式模型文件在中断和截断下载时均保持不变。 |
+| B-017 | 2026-06-09 22:17:40 | `3d6441b..8764f86` | README/AGENTS/change.md 与 docs/specs 已同步；rg '5526945\\.\\.HEAD' docs/specs README.md AGENTS.md change.md -> no matches；npm run verify:desktop -> 118 passed；pytest tests/test_windows_packaging_smoke.py -q -> 8 passed；pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q -> 31 passed；npm run package:windows -> NSIS installer generated；validate_spec.py docs\specs --resume 和 --pre-acceptance -> OK。 | 文档证据提交后再次复查 resume/pre-acceptance。 |

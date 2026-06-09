@@ -41,6 +41,7 @@ Spce workflow final acceptance 的第一轮与对抗审查发现：已提交的 
 - 将 `requirements.md`、README、AGENTS、`docs/specs/` 与 `change.md` 同步到复验后的最终证据链，
   并将旧的 moving HEAD 证据固化为 `5526945..3d6441b`。
 - 将 `docs/specs/` 切换到 Bugfix 工作流并记录 B-001 至 B-017 的受控执行证据。
+- 第一波最终验收回路修复实现范围：`3d6441b..8764f86`。
 
 ### 验证方法
 
