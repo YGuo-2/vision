@@ -4,7 +4,7 @@
 > **关联规范：** `docs/specs/bugfix.md` · `docs/specs/design.md`
 > **状态：** Completed
 > **当前任务：** n/a
-> **进度：** 18 / 18 已完成
+> **进度：** 19 / 19 已完成
 > **最后更新：** 2026-06-09
 
 ---
@@ -295,6 +295,20 @@
   - 验证标准: active docs 明确记录 docs sync commit `3aa2578`；B-017/B-018 证据说明当前 docs-only 证据提交通过 `git log -1` 复查；检查命令不再使用不完整 grep 写法且不造成自匹配。
   - 预估工程量: 0.5 小时
 
+- [x] **B-019:** 补充模型下载卸载取消的行为级回归测试
+  - 状态: done
+  - 验证证据: Added bridge-lifecycle stopJobById helper and behavior smoke assertions for exact job.stop command/payload/options; npm --prefix frontend run test -> passed; npm --prefix frontend run build -> passed; pytest tests/test_vue_tauri_acceptance_gaps.py -q -> 6 passed.
+  - 完成时间: 2026-06-09 23:24:53
+  - 备注: n/a
+  - 涉及文件: `frontend/src/App.vue`, `frontend/src/bridge-lifecycle.ts`, `frontend/scripts/frontend-smoke.mjs`, `tests/test_vue_tauri_acceptance_gaps.py`, `docs/specs/`, `change.md`
+  - 验证命令: `npm --prefix frontend run test`; `npm --prefix frontend run build`; `.\.venv\Scripts\python.exe -m pytest tests\test_vue_tauri_acceptance_gaps.py -q`
+  - 依赖: B-018
+  - 风险: medium
+  - 覆盖: BUG-005, FIX-005, SAFE-004
+  - 可并行: 否
+  - 验证标准: 前端行为测试用 stub 直接断言 active `modelDownloadJobId` 会调用 `job.stop`，且 payload 和 options 均携带相同 `jobId`；空 job 不发送停止命令；`App.vue` 卸载路径复用该行为助手。
+  - 预估工程量: 0.5-1 小时
+
 ---
 
 ## 执行 Waves
@@ -317,6 +331,7 @@
 | 14 | B-016 | 模型下载完整性和卸载取消 |
 | 15 | B-017 | 验证、文档和 commit 证据同步 |
 | 16 | B-018 | B-008 文档追踪复查缺口修复 |
+| 17 | B-019 | 模型下载卸载取消行为级回归 |
 
 ---
 
@@ -338,6 +353,7 @@
 | B-016 | 下载/文件完整性 | HTTP 截断或关闭窗口可能导致半成品模型被误安装或下载任务泄漏 | 需截断下载和 unmount 取消回归 |
 | B-017 | 文档/可追溯性 | 移动 `HEAD` 证据会让最终验收不可复查 | 需 docs grep、pre-acceptance |
 | B-018 | 文档/可追溯性 | docs sync commit 未纳入证据链会让最终验收无法重建当前文档状态 | 需 docs grep、resume/pre-acceptance |
+| B-019 | 下载/生命周期测试 | unmount 取消 active 模型下载若只有 marker 覆盖，可能让 `job.stop` payload 漂移而不被发现 | 需行为级前端 smoke |
 
 ---
 
@@ -356,3 +372,4 @@
 | B-016 | 2026-06-09 22:04:56 | `3d6441b..8764f86` | download_model 校验已知 Content-Length 的截断 EOF 并清理 .part；Vue onBeforeUnmount 复用 cancelModelDownload 停止 active 下载；验证：pytest tests/test_ui_backend_models.py tests/test_vue_tauri_acceptance_gaps.py -q -> 13 passed；npm --prefix frontend run test -> Frontend behavior smoke checks passed；npm --prefix frontend run build -> passed。 | 正式模型文件在中断和截断下载时均保持不变。 |
 | B-017 | 2026-06-09 22:17:40 | `3d6441b..8764f86` | README/AGENTS/change.md 与 docs/specs 已同步；rg '5526945\\.\\.HEAD' docs/specs README.md AGENTS.md change.md -> no matches；npm run verify:desktop -> 118 passed；pytest tests/test_windows_packaging_smoke.py -q -> 8 passed；pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q -> 31 passed；npm run package:windows -> NSIS installer generated；validate_spec.py docs\specs --resume 和 --pre-acceptance -> OK。 | 文档证据提交后再次复查 resume/pre-acceptance。 |
 | B-018 | 2026-06-09 22:50:10 | `3aa2578` | 记录 docs sync commit 3aa2578 并修复 B-017/B-018 grep 命令为完整 HEAD 字符串拼接，避免自匹配；PowerShell 构造 fixed-string 检查目标模式（`5526945..` + `HEAD`）-> no matches；change.md 已记录 B-018。 | 当前 docs-only 证据提交的最终 hash 通过 git log -1 复查，避免提交内容自引用 hash。 |
+| B-019 | 2026-06-09 23:24:53 | 当前实现提交通过 `git log -1` 复查 | Added bridge-lifecycle stopJobById helper and behavior smoke assertions for exact job.stop command/payload/options; npm --prefix frontend run test -> passed; npm --prefix frontend run build -> passed; pytest tests/test_vue_tauri_acceptance_gaps.py -q -> 6 passed. | 修复第三轮第一波 B-016 验收发现 |

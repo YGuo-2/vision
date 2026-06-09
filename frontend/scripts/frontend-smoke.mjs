@@ -42,10 +42,12 @@ async function importTypeScriptModule(path) {
 
 const app = read("src/App.vue");
 const bridge = read("src/bridge.ts");
+const bridgeLifecycleSource = read("src/bridge-lifecycle.ts");
 const bridgeStateSource = read("src/bridge-state.ts");
 const tauri = read("src-tauri/src/lib.rs");
 const { descriptor } = parse(app, { filename: "App.vue" });
 const template = descriptor.template?.content ?? "";
+const bridgeLifecycle = await importTypeScriptModule("src/bridge-lifecycle.ts");
 const bridgeState = await importTypeScriptModule("src/bridge-state.ts");
 
 for (const marker of [
@@ -61,7 +63,8 @@ for (const marker of [
   "选择目录",
   "downloadAllMissing",
   "cancelModelDownload",
-  "stopActiveJobsBeforeUnmount"
+  "stopActiveJobsBeforeUnmount",
+  "stopJobById(sendBridgeCommand, modelDownloadJobId.value)"
 ]) {
   assertIncludes(app, marker, "App.vue");
 }
@@ -98,6 +101,10 @@ for (const marker of [
   "JOB_SCOPED_STATUS_EVENTS"
 ]) {
   assertIncludes(bridgeStateSource, marker, "bridge-state.ts");
+}
+
+for (const marker of ["stopJobById", "command: \"job.stop\"", "payload: { jobId: string }"]) {
+  assertIncludes(bridgeLifecycleSource, marker, "bridge-lifecycle.ts");
 }
 
 const currentState = {
@@ -198,6 +205,33 @@ const failedDownload = bridgeState.modelDownloadStatusFromJobEvent({
 });
 assert(failedDownload.status.includes("下载失败"), "failed model download must be shown as failed");
 assert(!failedDownload.status.includes("下载完成"), "failed model download must not be shown as completed");
+
+const stopCalls = [];
+const stoppedEnvelope = await bridgeLifecycle.stopJobById(async (command, payload, options) => {
+  stopCalls.push({ command, payload, options });
+  return {
+    type: "response",
+    requestId: "req-stop",
+    ok: true,
+    jobId: options.jobId,
+    payload: { stopped: true },
+    error: null,
+    timestamp: ""
+  };
+}, "job-model");
+assert(stopCalls.length === 1, "active model download unmount helper must send exactly one stop command");
+assert(stopCalls[0].command === "job.stop", "active model download unmount helper must call job.stop");
+assert(stopCalls[0].payload.jobId === "job-model", "active model download unmount helper must stop exact job payload");
+assert(stopCalls[0].options.jobId === "job-model", "active model download unmount helper must stop exact job options");
+assert(stoppedEnvelope?.jobId === "job-model", "active model download unmount helper must return stop envelope");
+
+let emptyStopCalled = false;
+const skippedStop = await bridgeLifecycle.stopJobById(async () => {
+  emptyStopCalled = true;
+  throw new Error("empty job id must not call job.stop");
+}, undefined);
+assert(skippedStop === null, "empty model download job id must skip stop command");
+assert(emptyStopCalled === false, "empty model download job id must not call bridge");
 
 const rawEnvelope = {
   type: "event",

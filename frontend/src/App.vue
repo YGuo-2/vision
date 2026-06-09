@@ -9,6 +9,7 @@ import {
   selectDirectory,
   sendBridgeCommand
 } from "./bridge";
+import { stopJobById } from "./bridge-lifecycle";
 import {
   initialSessionProgressText,
   isBridgeEventForCurrentState,
@@ -255,8 +256,8 @@ async function downloadAllMissing(): Promise<void> {
 }
 
 async function cancelModelDownload(): Promise<void> {
-  if (!modelDownloadJobId.value) return;
-  const response = await sendBridgeCommand("job.stop", { jobId: modelDownloadJobId.value }, { jobId: modelDownloadJobId.value });
+  const response = await stopJobById(sendBridgeCommand, modelDownloadJobId.value);
+  if (!response) return;
   setRawJson(response);
   if (!response.ok) {
     errorText.value = response.error?.message ?? "取消模型下载失败";

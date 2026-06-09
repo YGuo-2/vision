@@ -44,11 +44,15 @@ Spce workflow final acceptance 的第一轮与对抗审查发现：已提交的 
 - 第一波最终验收回路修复实现范围：`3d6441b..8764f86`。
 - 第一波重跑 B-008 复查发现 docs sync commit `3aa2578` 未纳入 active 证据链；本轮追加
   B-018 文档修复，记录 `3aa2578` 并将 grep 命令改为完整 HEAD 字符串拼接，避免自匹配。
+- 第三轮第一波 B-016 复查发现卸载取消模型下载仅有 marker 覆盖；本轮追加 B-019，
+  新增 `frontend/src/bridge-lifecycle.ts`，让 `App.vue` 卸载路径复用 `stopJobById`，
+  并在 frontend behavior smoke 中用 stub 断言 `job.stop` 的 command、payload 和 options。
 
 ### 验证方法
 
-- `npm --prefix frontend run test` → Frontend behavior smoke checks passed。
-- `pytest tests/test_vue_tauri_acceptance_gaps.py -q` → 6 passed（前序），第一波新增修复后随组合测试为 13 passed。
+- `npm --prefix frontend run test` → Frontend behavior smoke checks passed；覆盖 B-019 的 active model download unmount helper 精确 `job.stop` 断言。
+- `pytest tests/test_vue_tauri_acceptance_gaps.py -q` → 6 passed（B-019），第一波新增修复后随组合测试为 13 passed。
+- `npm --prefix frontend run build` → passed。
 - `pytest tests/test_ui_backend_models.py tests/test_vue_tauri_acceptance_gaps.py -q` → 13 passed。
 - `pytest tests/test_ui_backend_contract.py tests/test_windows_packaging_smoke.py -q` → 17 passed。
 - `pytest tests/test_ui_backend_contract.py tests/test_ui_backend_models.py tests/test_vue_tauri_acceptance_gaps.py tests/test_windows_packaging_smoke.py -q` → 29 passed（前序复验组合）。

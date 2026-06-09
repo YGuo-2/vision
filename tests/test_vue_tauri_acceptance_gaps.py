@@ -49,6 +49,7 @@ def test_vue_frontend_exposes_settings_model_download_flow():
         "downloadAllMissing",
         "cancelModelDownload",
         "stopActiveJobsBeforeUnmount",
+        "stopJobById",
         "modelsDir",
         "sizeMb",
         "path",
@@ -96,6 +97,8 @@ def test_frontend_smoke_exercises_behavior_not_only_static_markers():
         "null-id job.completed must be ignored",
         "preassigned current analysis.status must be accepted before response",
         "failed model download must be shown as failed",
+        "active model download unmount helper must stop exact job payload",
+        "empty model download job id must not call bridge",
         "raw JSON must keep jobId",
     ):
         assert required in smoke
