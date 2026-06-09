@@ -50,6 +50,10 @@ Spce workflow final acceptance 的第一轮与对抗审查发现：已提交的 
 - 第四轮第一波 B-003 复查发现当前实时识别 job 异步失败后 UI 仍可能保持运行态；本轮追加
   B-020，让当前 session `job.failed` 映射为“运行失败”终态并清理运行状态，同时补充
   current/foreign failed event 的 behavior smoke 断言。
+- 第五轮第一波 B-003 复查发现早到 `job.failed` 会被后到 `session.start` response 覆盖为运行态；
+  本轮追加 B-021，让 response 只有在 pending `sessionId/jobId` 仍匹配时才可置为运行，并补充
+  `shouldApplySessionStartResponse` 行为断言。同时将 B-019/B-020 证据固化为 `920b06d` / `2e94534`，
+  修正 B-018 PowerShell grep 命令为单引号 `-Command`，并将 B-013 完成态证据改为 resume/pre-acceptance。
 
 ### 验证方法
 
@@ -59,6 +63,7 @@ Spce workflow final acceptance 的第一轮与对抗审查发现：已提交的 
 - `npm --prefix frontend run test` → Frontend behavior smoke checks passed；覆盖 B-020 的 current/foreign `job.failed` 和 session failed terminal status。
 - `pytest tests/test_ui_backend_sessions.py tests/test_input_source_state.py tests/test_vue_tauri_acceptance_gaps.py -q` → 21 passed。
 - `pytest tests/test_ui_backend_models.py tests/test_vue_tauri_acceptance_gaps.py -q` → 13 passed。
+- `npm --prefix frontend run test` → Frontend behavior smoke checks passed；覆盖 B-021 的早到 failed 阻止 late response 复活运行态。
 - `pytest tests/test_ui_backend_contract.py tests/test_windows_packaging_smoke.py -q` → 17 passed。
 - `pytest tests/test_ui_backend_contract.py tests/test_ui_backend_models.py tests/test_vue_tauri_acceptance_gaps.py tests/test_windows_packaging_smoke.py -q` → 29 passed（前序复验组合）。
 - `C:\Users\ny\.cargo\bin\cargo.exe check`（`frontend/src-tauri`）→ passed。

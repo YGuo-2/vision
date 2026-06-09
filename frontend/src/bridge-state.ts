@@ -35,6 +35,14 @@ export function isBridgeEventForCurrentState(event: BridgeEnvelope, state: Curre
   return true;
 }
 
+export function shouldApplySessionStartResponse(
+  state: CurrentBridgeState,
+  pendingSessionId: string,
+  pendingJobId: string
+): boolean {
+  return state.sessionId === pendingSessionId && state.sessionJobId === pendingJobId;
+}
+
 export function progressTextForSessionStatus(payload: JsonRecord): string | null {
   if (String(payload.state ?? "") !== "running") {
     return null;

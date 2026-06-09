@@ -99,6 +99,7 @@ for (const marker of [
   "progressTextForSessionStatus",
   "modelDownloadStatusFromJobEvent",
   "sessionStatusFromJobEvent",
+  "shouldApplySessionStartResponse",
   "JOB_SCOPED_STATUS_EVENTS"
 ]) {
   assertIncludes(bridgeStateSource, marker, "bridge-state.ts");
@@ -253,6 +254,30 @@ assert(
     timestamp: ""
   }) === "已停止",
   "current session job.stopped must map to stopped terminal status"
+);
+assert(
+  bridgeState.shouldApplySessionStartResponse(
+    { sessionId: "session-current", sessionJobId: "job-session" },
+    "session-current",
+    "job-session"
+  ) === true,
+  "matching session.start response must be allowed to mark running"
+);
+assert(
+  bridgeState.shouldApplySessionStartResponse(
+    { sessionId: undefined, sessionJobId: undefined },
+    "session-current",
+    "job-session"
+  ) === false,
+  "early session job.failed must prevent late session.start response from marking running"
+);
+assert(
+  bridgeState.shouldApplySessionStartResponse(
+    { sessionId: "session-current", sessionJobId: "job-other" },
+    "session-current",
+    "job-session"
+  ) === false,
+  "foreign late session.start response must not mark running"
 );
 
 const stopCalls = [];

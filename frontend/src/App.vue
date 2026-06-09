@@ -17,6 +17,7 @@ import {
   modelDownloadStatusFromPayload,
   progressTextForFrameProgress,
   progressTextForSessionStatus,
+  shouldApplySessionStartResponse,
   sessionStatusFromJobEvent
 } from "./bridge-state";
 
@@ -310,6 +311,9 @@ async function startSession(): Promise<void> {
     errorText.value = response.error?.message ?? "启动失败";
     return;
   }
+  if (!shouldApplySessionStartResponse({ sessionId: sessionId.value, sessionJobId: jobId.value }, pendingSessionId, pendingJobId)) {
+    return;
+  }
   isRunning.value = true;
   sessionId.value = response.sessionId ?? pendingSessionId;
   jobId.value = response.jobId ?? pendingJobId;
@@ -523,6 +527,10 @@ function handleBridgeEvent(event: BridgeEnvelope): void {
     if (sessionTerminalStatus && (!event.jobId || event.jobId === jobId.value)) {
       isRunning.value = false;
       statusText.value = sessionTerminalStatus;
+      jobId.value = undefined;
+      if (event.event === "job.failed") {
+        sessionId.value = undefined;
+      }
     }
   }
   if (event.error) {
