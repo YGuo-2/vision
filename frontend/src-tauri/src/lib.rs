@@ -15,6 +15,9 @@ use tauri::{ipc::Response, AppHandle, Emitter, State};
 use std::os::windows::process::CommandExt;
 
 #[cfg(not(debug_assertions))]
+use tauri::Manager;
+
+#[cfg(not(debug_assertions))]
 const BRIDGE_SIDECAR_NAME: &str = "vision-ui-backend.exe";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -2,10 +2,10 @@
 
 > **功能名称:** Vue/Tauri 高速帧通道与 MediaPipe/YOLO 后端路由架构
 > **关联规范:** `docs/specs/design.md` · `docs/specs/requirements.md`
-> **状态:** In Progress
-> **当前任务:** T-010
-> **进度:** 9 / 10 已完成
-> **最后更新:** 2026-06-11 15:52:42
+> **状态:** Completed
+> **当前任务:** n/a
+> **进度:** 10 / 10 已完成
+> **最后更新:** 2026-06-11 16:10:57
 
 ---
 
@@ -161,11 +161,13 @@
 
 ## 阶段 4：验收、打包和文档同步
 
-- [ ] **T-010:** 完成桌面栈、打包和迁移文档验收
-  - 状态: pending
+- [x] **T-010:** 完成桌面栈、打包和迁移文档验收
+  - 状态: done
+  - 验证证据: cmd: npm run verify:desktop => exit 0, frontend build + frontend smoke + cargo check + py_compile + desktop regression 133 passed; cmd: npm run package:windows => exit 0, NSIS installer generated at frontend/src-tauri/target/release/bundle/nsis/Vision 动作识别与评分_0.1.0_x64-setup.exe; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_windows_packaging_smoke.py tests/test_yolo_landmark_mapping.py tests/test_yolo_backend_contract.py tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q => exit 0, 73 passed; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py tests/test_yolo_backend_contract.py tests/test_yolo_landmark_mapping.py tests/test_rule_availability.py tests/test_tech_eval_contract.py -q => exit 0, 82 passed; cmd: git diff --check => exit 0 (line-ending warnings only)
+  - 完成时间: 2026-06-11 16:10:57
+  - 备注: 修复 packaged release Manager import 和 sidecar router 对 YOLO runtime 的硬依赖；同步 yolo_default_switch_decision 与 yolo_migration_issues 最终口径；更新 change.md。
   - 涉及文件: `scripts/verify-desktop-stack.ps1`, `scripts/build-tauri-sidecar.ps1`, `frontend/src-tauri/tauri.conf.json`, `docs/yolo_default_switch_decision.md`, `docs/yolo_migration_issues.md`, `change.md`
   - 验证命令: 分步运行 `npm run verify:desktop`、`npm run package:windows`、`.\.venv\Scripts\python.exe -m pytest tests/test_windows_packaging_smoke.py tests/test_yolo_landmark_mapping.py tests/test_yolo_backend_contract.py tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q`，每步必须退出码 0
-  - 验证证据: pending
   - 依赖: T-005, T-006, T-007, T-008, T-009
   - 风险: high
   - 覆盖: REQ-001, REQ-004, REQ-006, REQ-007, REQ-008, AC-008.2, AC-008.3, NFR-004, NFR-005
@@ -218,3 +220,4 @@
 | T-007 | 2026-06-11 15:28:06 | 38474bf | cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_backend_routing_contract.py tests/test_yolo_backend_contract.py -q => exit 0, 33 passed; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q => exit 0, 31 passed; cmd: git diff --check => exit 0 (line-ending warnings only) | 接入 YOLO26n/s realtime body-only preview pipeline；session.frame 透传 YOLO 授权/多人 meta；保持 MediaPipe 旧默认路径和正式评分边界；更新 change.md。 |
 | T-008 | 2026-06-11 15:48:36 | 2e5051e | cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_body_core_layout.py tests/test_batch_backend_args.py tests/test_s3_calibration.py -q => exit 0, 40 passed; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q => exit 0, 31 passed; cmd: git diff --check => exit 0 (line-ending warnings only) | 接入 analysis.run YOLO26L high_quality body-only 内部分析 payload；batch/benchmark 默认 YOLO body_core 模型收敛到 yolo26l-pose.pt；保持 scoreAuthorized=false、calibration_status=unvalidated、displayScope=internal；更新 change.md。 |
 | T-009 | 2026-06-11 15:52:42 | 0ac08d6 | cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py tests/test_tech_eval_contract.py tests/test_rule_availability.py -q => exit 0, 49 passed | 回归确认 formal score/full tech_eval 仍走 MediaPipe；enableHands=false + fingers 为 pose-only partial/skippedCapabilities，不启用 hands；未发现 YOLO 越界进入正式评分或 full tech_eval，更新 change.md。 |
+| T-010 | 2026-06-11 16:10:57 | 3c41f33 | cmd: npm run verify:desktop => exit 0, frontend build + frontend smoke + cargo check + py_compile + desktop regression 133 passed; cmd: npm run package:windows => exit 0, NSIS installer generated at frontend/src-tauri/target/release/bundle/nsis/Vision 动作识别与评分_0.1.0_x64-setup.exe; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_windows_packaging_smoke.py tests/test_yolo_landmark_mapping.py tests/test_yolo_backend_contract.py tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q => exit 0, 73 passed; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py tests/test_yolo_backend_contract.py tests/test_yolo_landmark_mapping.py tests/test_rule_availability.py tests/test_tech_eval_contract.py -q => exit 0, 82 passed; cmd: git diff --check => exit 0 (line-ending warnings only) | 修复 packaged release Manager import 和 sidecar router 对 YOLO runtime 的硬依赖；同步 yolo_default_switch_decision 与 yolo_migration_issues 最终口径；更新 change.md。 |

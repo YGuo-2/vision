@@ -301,7 +301,8 @@ S1 后续会改 `_extract_pose_features()`、`mirror_pose_features()`、`_select
 - [ ] `tests/test_body_core_layout.py`：`body_core_v1` 的 shape / mirror pairs / joint names / layout mismatch 行为正确。
 - [ ] 能生成 YOLO `body_core_v1` 模板并匹配同一视频，产出分数，且该分数 metadata 标 `calibration_status=unvalidated`、未进入对外报告。
 - [ ] MediaPipe 旧 `pose33_v3` 模板仍能正常比对（golden 全绿）。
-- [ ] 不实现 UI 后端选择 / Hybrid / 默认切换（范围守住）。
+- [x] 不实现 CLI / Tkinter UI 默认切换 / Hybrid；Vue/Tauri 新桌面仅允许受控 body-only
+  预览与内部分析入口，且 `score_authorized=False`、不进入正式评分。
 - [ ] `change.md` 已记录。
 
 ---
@@ -407,12 +408,18 @@ S1 后续会改 `_extract_pose_features()`、`mirror_pose_features()`、`_select
 - #23 GPU 复测决策门：CUDA 环境已修复并完成 6/6 样本复测，但真实实时阈值未达标，仍 no-go。
 - #24 batch backend/layout 参数：保留离线调试 / 标定入口，`score_authorized=False`。
 - #25 CLI 实时预览：按 #23 CUDA 实测 no-go 继续关闭 / 不实现。
-- #26 UI 后端选择：按 #23 / #25 结论继续关闭 / 不实现。
+- #26 Tkinter UI 后端选择：按 #23 / #25 结论继续关闭 / 不实现。
+- 2026-06-11 Vue/Tauri 桌面迁移补充：新桌面 bridge 使用 `core/backend_router.py`
+  允许 `enableHands=false` 下的受控 YOLO26n/s body-only 实时预览和 YOLO26L 离线
+  high-quality body-only 内部分析；安装版 sidecar 当前仍声明不打包 YOLO runtime。
+  这些入口均输出 `scoreAuthorized=false` / `displayScope=limited|internal`，不进入正式评分或
+  full tech_eval。
 - #27 Hybrid：默认不实现 `yolo_body_mp_pose_supplement`。
 
 ### S6 — 默认切换决策
 已拆为 #28 并关闭。当前 S6 决策见 `docs/yolo_default_switch_decision.md`：
-**全部不切默认，仅保留离线 / 实验入口**。
+**正式评分 / full tech_eval / CLI / Tkinter 默认路径全部不切 YOLO；Vue/Tauri 仅保留受控
+body-only 预览与内部分析入口，且不授权对外评分**。
 
 ---
 

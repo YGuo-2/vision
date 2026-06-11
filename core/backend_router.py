@@ -14,13 +14,6 @@ from enum import Enum
 from typing import Any
 
 from .feature_layout import BODY_CORE_V1, POSE33_V3
-from .yolo_adapter import (
-    DEFAULT_YOLO_MODEL_NAME,
-    DEFAULT_YOLO_VALID_CONF_THR,
-    YOLO_CALIBRATION_STATUS,
-    YOLO_CONFIDENCE_KIND,
-    YOLO_VALIDITY_POLICY,
-)
 
 
 BACKEND_MEDIAPIPE = "mediapipe"
@@ -49,6 +42,12 @@ EVAL_COMPLETENESS_FULL = "full"
 EVAL_COMPLETENESS_PARTIAL = "partial"
 EVAL_COMPLETENESS_BODY_ONLY = "body_only"
 EVAL_COMPLETENESS_UNAVAILABLE = "unavailable"
+
+DEFAULT_YOLO_MODEL_NAME = "yolo11n-pose.pt"
+DEFAULT_YOLO_VALID_CONF_THR = 0.6
+YOLO_CALIBRATION_STATUS = "unvalidated"
+YOLO_CONFIDENCE_KIND = "yolo_conf"
+YOLO_VALIDITY_POLICY = "confidence_thr"
 
 
 class TaskType(str, Enum):
@@ -599,4 +598,3 @@ def _structured_error(
         error_code="yolo26l_unavailable",
         user_message=user_message,
     )
-

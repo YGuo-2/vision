@@ -1,3 +1,39 @@
+## 2026-06-11: T-010 完成桌面栈、打包和迁移文档验收
+
+### 问题描述
+
+T-010 收口验证要求桌面栈、Windows 打包、packaged sidecar 和迁移文档都反映最终行为。
+首次 `npm run package:windows` 暴露 release build 中 `AppHandle::path()` 缺少 `tauri::Manager`
+trait import；packaging smoke 随后暴露安装版 sidecar 仍排除 `core.yolo_adapter`，但
+`core.backend_router` 顶层依赖 YOLO 常量，导致 packaged `bridge.ping` 启动失败。旧 S6 文档也仍写着
+“无 YOLO 实时 / UI 入口”，与 Vue/Tauri 受控 body-only 路由不一致。
+
+### 修改内容
+
+- `frontend/src-tauri/src/lib.rs` 在 release build 下引入 `tauri::Manager`，修复 packaged build
+  对 `resource_dir()` 的 trait 解析问题，同时保持 dev build 无多余 warning。
+- `core/backend_router.py` 移除对 `core.yolo_adapter` 的顶层 import，把路由所需 YOLO 纯常量留在
+  router 内部；安装版 sidecar 继续排除 `torch` / `ultralytics` / `core.yolo_adapter`，但基础
+  JSON bridge 与 `model.status` / `bridge.ping` 可正常启动。
+- `docs/yolo_default_switch_decision.md` 同步最终口径：正式评分、full tech_eval、CLI 和 Tkinter
+  默认路径仍不切 YOLO；Vue/Tauri 只保留受控 YOLO26n/s body-only 预览与 YOLO26L body-only
+  内部分析入口，且 `scoreAuthorized=false`、`displayScope=limited|internal`。
+- `docs/yolo_migration_issues.md` 同步 M4/S6 收尾说明，区分 Tkinter 旧入口关闭和 Vue/Tauri 新桌面
+  受控入口已落地，明确安装版 sidecar 当前仍不打包 YOLO runtime。
+
+### 验证方法
+
+- `npm run verify:desktop`
+  → frontend build、frontend smoke、Tauri cargo check、Python py_compile、desktop regression 133 passed
+- `npm run package:windows`
+  → 产出 `frontend/src-tauri/target/release/bundle/nsis/Vision 动作识别与评分_0.1.0_x64-setup.exe`
+- `.\.venv\Scripts\python.exe -m pytest tests/test_windows_packaging_smoke.py tests/test_yolo_landmark_mapping.py tests/test_yolo_backend_contract.py tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q`
+  → 73 passed
+- `.\.venv\Scripts\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py tests/test_yolo_backend_contract.py tests/test_yolo_landmark_mapping.py tests/test_rule_availability.py tests/test_tech_eval_contract.py -q`
+  → 82 passed
+- `git diff --check`
+  → 退出码 0（仅 Windows 换行提示，无空白错误）
+
 ## 2026-06-11: T-009 保持 MediaPipe 正式评分和 full tech_eval 默认边界
 
 ### 问题描述
