@@ -3,9 +3,9 @@
 > **功能名称:** Vue/Tauri 高速帧通道与 MediaPipe/YOLO 后端路由架构
 > **关联规范:** `docs/specs/design.md` · `docs/specs/requirements.md`
 > **状态:** In Progress
-> **当前任务:** T-004
-> **进度:** 2 / 10 已完成
-> **最后更新:** 2026-06-11 14:12:26
+> **当前任务:** T-005
+> **进度:** 3 / 10 已完成
+> **最后更新:** 2026-06-11 14:35:56
 
 ---
 
@@ -67,11 +67,13 @@
 
 ## 阶段 2：高速帧通道和前端渲染
 
-- [ ] **T-004:** 设计并实现二进制 latest-frame 预览帧通道
-  - 状态: pending
+- [x] **T-004:** 设计并实现二进制 latest-frame 预览帧通道
+  - 状态: done
+  - 验证证据: cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_ui_backend_sessions.py tests/test_windows_packaging_smoke.py -q => exit 0, 16 passed; cmd: npm run verify:tauri => exit 0, cargo check passed; cmd: npm --prefix frontend run test => exit 0, Frontend behavior smoke checks passed; cmd: git diff --check => exit 0 (line-ending warnings only)
+  - 完成时间: 2026-06-11 14:35:56
+  - 备注: 实现 Python 127.0.0.1 TCP length-prefixed latest-frame 通道与 Tauri raw IPC latest_frame；session.frame JSON 不再携带 image/base64/bytes，仅传 frame handle、token 和指标；更新 change.md 基线记录。
   - 涉及文件: `frontend/src-tauri/src/lib.rs`, `apps/ui_backend.py`, `tests/test_ui_backend_sessions.py`, `tests/test_windows_packaging_smoke.py`, `frontend/scripts/frontend-smoke.mjs`
   - 验证命令: 分步运行 `.\.venv\Scripts\python.exe -m pytest tests/test_ui_backend_sessions.py tests/test_windows_packaging_smoke.py -q`、`npm run verify:tauri` 和 `npm --prefix frontend run test`，每步必须退出码 0
-  - 验证证据: pending
   - 依赖: T-001
   - 风险: high
   - 覆盖: REQ-004, AC-004.1, AC-004.2, AC-004.3, NFR-001, NFR-006
@@ -197,3 +199,4 @@
 |:---|:---|:---|:---|:---|
 | T-001 | 2026-06-11 13:58:19 | 60f3a66 | cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_backend_routing_contract.py tests/test_ui_backend_contract.py tests/test_batch_backend_args.py -q => exit 0, 35 passed; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q => exit 0, 31 passed; cmd: git diff --check => exit 0 (line-ending warnings only) | 新增 core/backend_router.py 唯一路由决策点；UI bridge 和 batch helper 消费共享 router；更新 change.md。 |
 | T-002 | 2026-06-11 14:12:26 | 4541e61 | cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_yolo_backend_contract.py tests/test_yolo_landmark_mapping.py tests/test_rule_availability.py tests/test_ui_backend_analysis.py -q => exit 0, 46 passed; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q => exit 0, 31 passed; cmd: git diff --check => exit 0 (line-ending warnings only) | YOLO adapter 边界层与序列 artifact 统一补齐 raw_layout/feature_layout/capability/score_authorized/display_scope；UI camelCase route 与 COCO17 missing capability 测试上锁；更新 change.md。 |
+| T-004 | 2026-06-11 14:35:56 | f3e50db | cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_ui_backend_sessions.py tests/test_windows_packaging_smoke.py -q => exit 0, 16 passed; cmd: npm run verify:tauri => exit 0, cargo check passed; cmd: npm --prefix frontend run test => exit 0, Frontend behavior smoke checks passed; cmd: git diff --check => exit 0 (line-ending warnings only) | 实现 Python 127.0.0.1 TCP length-prefixed latest-frame 通道与 Tauri raw IPC latest_frame；session.frame JSON 不再携带 image/base64/bytes，仅传 frame handle、token 和指标；更新 change.md 基线记录。 |

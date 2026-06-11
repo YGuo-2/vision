@@ -3,12 +3,13 @@ use std::collections::HashMap;
 use std::env;
 use std::ffi::c_void;
 use std::ffi::OsString;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{ipc::Response, AppHandle, Emitter, State};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -64,6 +65,14 @@ struct BridgeLaunch {
 #[derive(Default)]
 struct BridgeState {
     process: Mutex<Option<BridgeProcess>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LatestFrameRequest {
+    pub session_id: String,
+    pub frame_port: u16,
+    pub frame_token: String,
 }
 
 #[tauri::command]
@@ -246,6 +255,35 @@ fn bridge_command(
         .map_err(|err| format!("bridge response timeout for {request_id}: {err}"))
 }
 
+#[tauri::command]
+fn latest_frame(request: LatestFrameRequest) -> Result<Response, String> {
+    let mut stream = TcpStream::connect(("127.0.0.1", request.frame_port))
+        .map_err(|err| format!("failed to connect latest-frame channel: {err}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .map_err(|err| format!("failed to set latest-frame read timeout: {err}"))?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .map_err(|err| format!("failed to set latest-frame write timeout: {err}"))?;
+    let line = format!("GET {} {}\n", request.session_id, request.frame_token);
+    stream
+        .write_all(line.as_bytes())
+        .map_err(|err| format!("failed to request latest frame: {err}"))?;
+    let mut len_buf = [0u8; 4];
+    stream
+        .read_exact(&mut len_buf)
+        .map_err(|err| format!("failed to read latest-frame length: {err}"))?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+    if len == 0 {
+        return Err("latest-frame channel returned no bytes".to_string());
+    }
+    let mut bytes = vec![0u8; len];
+    stream
+        .read_exact(&mut bytes)
+        .map_err(|err| format!("failed to read latest-frame bytes: {err}"))?;
+    Ok(Response::new(bytes))
+}
+
 fn bridge_needs_start(process: Option<&mut BridgeProcess>) -> bool {
     match process {
         None => true,
@@ -419,6 +457,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             bridge_protocol_manifest,
             bridge_command,
+            latest_frame,
             select_directory
         ])
         .run(tauri::generate_context!())

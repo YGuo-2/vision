@@ -8,9 +8,11 @@ message shape before UI work depends on it.
 
 from __future__ import annotations
 
-import base64
 import json
 import os
+import secrets
+import socket
+import struct
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -68,6 +70,9 @@ PREVIEW_JPEG_QUALITY = 70
 PREVIEW_MAX_EDGE = 960
 PREVIEW_FRAME_EVENT_MIN_INTERVAL_S = 1.0 / 30.0
 PREVIEW_CAPTURE_IDLE_SLEEP_S = 0.001
+FRAME_CHANNEL_HOST = "127.0.0.1"
+FRAME_CHANNEL_TOKEN_BYTES = 16
+FRAME_CHANNEL_ACCEPT_TIMEOUT_S = 0.2
 
 
 COMMANDS: dict[str, JsonDict] = {
@@ -383,6 +388,7 @@ class ActivePreviewSession:
     job_id: str
     recorder: Any
     emit: Callable[[str, JsonDict], None]
+    frame_channel: "LatestFrameChannel | None" = None
     last_record_error: str | None = None
 
 
@@ -436,6 +442,99 @@ class _LatestPreviewFrameBuffer:
                 "droppedFrames": self._dropped,
                 "hasPendingFrame": self._latest is not None,
             }
+
+
+class LatestFrameChannel:
+    """Localhost latest-frame byte channel for Rust raw IPC fetches."""
+
+    def __init__(self, *, session_id: str, host: str = FRAME_CHANNEL_HOST) -> None:
+        self.session_id = session_id
+        self.host = host
+        self.token = secrets.token_hex(FRAME_CHANNEL_TOKEN_BYTES)
+        self._lock = threading.Lock()
+        self._latest: bytes = b""
+        self._frame_id = 0
+        self._payload_bytes = 0
+        self._served = 0
+        self._closed = threading.Event()
+        self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._socket.bind((self.host, 0))
+        self.port = int(self._socket.getsockname()[1])
+        self._socket.listen(4)
+        self._thread = threading.Thread(
+            target=self._serve,
+            name=f"preview-frame-channel-{session_id}",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def publish(self, payload: bytes) -> JsonDict:
+        data = bytes(payload)
+        with self._lock:
+            self._frame_id += 1
+            self._latest = data
+            self._payload_bytes = len(data)
+            frame_id = self._frame_id
+        return {
+            "sessionId": self.session_id,
+            "frameHandle": f"{self.session_id}:{frame_id}",
+            "frameHost": self.host,
+            "framePort": self.port,
+            "frameToken": self.token,
+            "frameId": frame_id,
+            "frameBytes": len(data),
+            "frameTransport": "tcp-length-prefixed",
+        }
+
+    def snapshot(self) -> JsonDict:
+        with self._lock:
+            return {
+                "frameHost": self.host,
+                "framePort": self.port,
+                "frameToken": self.token,
+                "frameId": self._frame_id,
+                "frameBytes": self._payload_bytes,
+                "framesServed": self._served,
+                "frameTransport": "tcp-length-prefixed",
+            }
+
+    def close(self) -> None:
+        self._closed.set()
+        try:
+            self._socket.close()
+        except OSError:
+            pass
+        self._thread.join(timeout=1.0)
+
+    def _serve(self) -> None:
+        while not self._closed.is_set():
+            try:
+                self._socket.settimeout(FRAME_CHANNEL_ACCEPT_TIMEOUT_S)
+                conn, _addr = self._socket.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            with conn:
+                try:
+                    conn.settimeout(1.0)
+                    request = conn.recv(512).decode("utf-8", errors="replace").strip().split()
+                    if len(request) < 3 or request[0] != "GET":
+                        conn.sendall(struct.pack(">I", 0))
+                        continue
+                    session_id, token = request[1], request[2]
+                    if session_id != self.session_id or token != self.token:
+                        conn.sendall(struct.pack(">I", 0))
+                        continue
+                    with self._lock:
+                        payload = self._latest
+                        self._served += 1
+                    conn.sendall(struct.pack(">I", len(payload)))
+                    if payload:
+                        conn.sendall(payload)
+                except OSError:
+                    continue
 
 
 @dataclass(frozen=True)
@@ -835,7 +934,7 @@ class PreviewSessionService:
         job_manager: BridgeJobManager | None = None,
         capture_factory: Callable[[str], Any] | None = None,
         pipeline_factory: Callable[[PreviewSessionOptions], Any] | None = None,
-        frame_encoder: Callable[[Any], str] | None = None,
+        frame_encoder: Callable[[Any], bytes] | None = None,
         recording_factory: Callable[[PreviewSessionOptions], Any] | None = None,
         monotonic: Callable[[], float] | None = None,
     ) -> None:
@@ -1069,6 +1168,7 @@ class PreviewSessionService:
         pipe = None
         pipe_cached = False
         recorder = self._recording_factory(options)
+        frame_channel: LatestFrameChannel | None = None
         frame_count = 0
         total = 0
         fps_for_ts = 30.0
@@ -1095,10 +1195,13 @@ class PreviewSessionService:
             width = int(_capture_float(cap, CAP_PROP_FRAME_WIDTH, 1280.0))
             height = int(_capture_float(cap, CAP_PROP_FRAME_HEIGHT, 720.0))
             recorder.begin_session(fps=fps_for_ts, size=(width, height))
+            if ctx.session_id:
+                frame_channel = LatestFrameChannel(session_id=ctx.session_id)
             active = ActivePreviewSession(
                 session_id=ctx.session_id or "",
                 job_id=ctx.job_id,
                 recorder=recorder,
+                frame_channel=frame_channel,
                 emit=lambda event, payload: ctx.progress(event, payload),
             )
             self._register_active_session(active)
@@ -1114,6 +1217,7 @@ class PreviewSessionService:
                     "fpsForTimestamp": fps_for_ts,
                     "totalFrames": total,
                     "size": {"width": width, "height": height},
+                    "frameChannel": None if frame_channel is None else frame_channel.snapshot(),
                     "backendRoute": options.backend_route,
                 },
             )
@@ -1155,6 +1259,8 @@ class PreviewSessionService:
                 "totalFrames": total,
                 "backendRoute": options.backend_route,
             }
+            if frame_channel is not None:
+                status_payload["frameChannel"] = frame_channel.snapshot()
             status_payload.update(realtime_stats)
             ctx.progress(
                 "session.status",
@@ -1168,6 +1274,8 @@ class PreviewSessionService:
                 "sourceKind": options.source_kind,
                 "backendRoute": options.backend_route,
             }
+            if frame_channel is not None:
+                result["frameChannel"] = frame_channel.snapshot()
             result.update(realtime_stats)
             return result
         finally:
@@ -1177,6 +1285,8 @@ class PreviewSessionService:
             finally:
                 if ctx.session_id:
                     self._unregister_active_session(ctx.session_id)
+                if frame_channel is not None:
+                    frame_channel.close()
             ctx.progress(
                 "record.status",
                 _recording_payload(
@@ -1315,7 +1425,10 @@ class PreviewSessionService:
                         width=width,
                         height=height,
                         started_at=started_at,
-                        extra_payload={"sourceFrameIndex": item.index},
+                        extra_payload={
+                            "sourceFrameIndex": item.index,
+                            "sourceFrameAgeMs": int(max(0.0, (now - item.captured_at) * 1000.0)),
+                        },
                     )
                     last_frame_event_at = now
 
@@ -1327,7 +1440,9 @@ class PreviewSessionService:
 
             if capture_errors and not ctx.stopped():
                 raise RuntimeError(f"摄像头采集失败：{capture_errors[0]}")
-            return frame_count, buffer.snapshot()
+            stats = buffer.snapshot()
+            stats["renderedFrames"] = frame_count
+            return frame_count, stats
         finally:
             capture_stop.set()
             buffer.close()
@@ -1350,8 +1465,14 @@ class PreviewSessionService:
         fps = frame_count / max(1e-6, elapsed)
         actions_zh = [ACTION_LABELS_ZH.get(str(action), str(action)) for action in actions]
         frame_width, frame_height = _frame_size(annotated, fallback=(width, height))
+        encoded = self._frame_encoder(annotated)
+        if isinstance(encoded, str):
+            encoded = encoded.encode("utf-8")
+        channel_payload: JsonDict = {}
+        active = None if ctx.session_id is None else self._active_session(ctx.session_id)
+        if active is not None and active.frame_channel is not None:
+            channel_payload = active.frame_channel.publish(bytes(encoded))
         frame_payload: JsonDict = {
-            "image": self._frame_encoder(annotated),
             "actions": list(actions),
             "actionsZh": actions_zh,
             "actionsText": ", ".join(actions_zh) if actions_zh else "-",
@@ -1359,7 +1480,10 @@ class PreviewSessionService:
             "fps": fps,
             "progress": _progress_payload(frame_count, total),
             "size": {"width": frame_width, "height": frame_height},
+            "payloadBytes": len(encoded),
+            "frameTransport": "tcp-length-prefixed",
         }
+        frame_payload.update(channel_payload)
         if extra_payload:
             frame_payload.update(extra_payload)
         ctx.progress("session.frame", frame_payload)
@@ -1368,6 +1492,9 @@ class PreviewSessionService:
         session_id = str(request.payload.get("sessionId") or request.session_id or "").strip()
         if not session_id:
             return None
+        return self._active_session(session_id)
+
+    def _active_session(self, session_id: str) -> ActivePreviewSession | None:
         with self._sessions_lock:
             return self._sessions.get(session_id)
 
@@ -1841,7 +1968,7 @@ def _to_jsonable(value: Any) -> Any:
         return value
 
 
-def _default_frame_encoder(frame: Any) -> str:
+def _default_frame_encoder(frame: Any) -> bytes:
     import cv2
 
     # 预览帧瘦身:仅作用于送往前端的副本，不影响录制（recorder 写的是原始 annotated）。
@@ -1859,7 +1986,7 @@ def _default_frame_encoder(frame: Any) -> str:
     ok, encoded = cv2.imencode(".jpg", preview, [cv2.IMWRITE_JPEG_QUALITY, PREVIEW_JPEG_QUALITY])
     if not ok:
         raise RuntimeError("无法编码预览帧")
-    return "data:image/jpeg;base64," + base64.b64encode(encoded.tobytes()).decode("ascii")
+    return encoded.tobytes()
 
 
 def _capture_is_opened(cap: Any) -> bool:

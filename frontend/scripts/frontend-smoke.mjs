@@ -108,7 +108,20 @@ for (const marker of ["selectDirectory", "invoke<string | null>(\"select_directo
   assertIncludes(bridge, marker, "bridge.ts");
 }
 
+for (const marker of ["fetchLatestFrameBytes", "invoke<ArrayBuffer>(\"latest_frame\""]) {
+  assertIncludes(bridge, marker, "bridge.ts");
+}
+
+for (const marker of ["fetchLatestFrameBytes(payload)", "URL.createObjectURL", "URL.revokeObjectURL"]) {
+  assertIncludes(app, marker, "App.vue");
+}
+assert(!app.includes("payload.image"), "session.frame JSON payload must not carry image/base64 data");
+
 for (const marker of ["select_directory", "OleInitialize", "OleUninitialize", "SHBrowseForFolderW", "SHGetPathFromIDListW"]) {
+  assertIncludes(tauri, marker, "src-tauri lib.rs");
+}
+
+for (const marker of ["fn latest_frame", "TcpStream::connect", "Response::new(bytes)"]) {
   assertIncludes(tauri, marker, "src-tauri lib.rs");
 }
 

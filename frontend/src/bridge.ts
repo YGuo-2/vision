@@ -90,6 +90,25 @@ export async function selectDirectory(): Promise<string | null> {
   return invoke<string | null>("select_directory");
 }
 
+export async function fetchLatestFrameBytes(payload: JsonRecord): Promise<ArrayBuffer | null> {
+  const sessionId = typeof payload.sessionId === "string" ? payload.sessionId : "";
+  const frameToken = typeof payload.frameToken === "string" ? payload.frameToken : "";
+  const framePort = Number(payload.framePort ?? 0);
+  if (!sessionId || !frameToken || !Number.isFinite(framePort) || framePort <= 0) {
+    return null;
+  }
+  if (!isTauriRuntime()) {
+    return new ArrayBuffer(0);
+  }
+  return invoke<ArrayBuffer>("latest_frame", {
+    request: {
+      sessionId,
+      framePort,
+      frameToken
+    }
+  });
+}
+
 function nextRequestId(): string {
   const cryptoApi = globalThis.crypto;
   if (cryptoApi && "randomUUID" in cryptoApi) {
@@ -165,7 +184,13 @@ async function mockBridgeCommand<TPayload extends JsonRecord>(
         jobId,
         sessionId,
         payload: {
-          image: "",
+          sessionId,
+          framePort: 0,
+          frameToken: "mock",
+          frameId: 1,
+          frameHandle: `${sessionId}:1`,
+          frameTransport: "tcp-length-prefixed",
+          payloadBytes: 0,
           actions: ["HANDS_UP"],
           actionsZh: ["双手举起"],
           actionsText: "双手举起",

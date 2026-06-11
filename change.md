@@ -1,3 +1,41 @@
+## 2026-06-11: T-004 设计并实现二进制 latest-frame 预览帧通道
+
+### 问题描述
+
+Vue/Tauri 预览帧仍通过 `session.frame` JSON event 携带 `image=data:image/jpeg;base64,...`，
+大图帧会进入 stdout JSON bridge、Rust event 和 Vue reactive 状态，容易造成 IPC payload 膨胀、旧帧积压、
+前端内存压力和 session 串线风险。T-004 要求大帧改走本机二进制 latest-frame 通道，JSON bridge
+只保留帧句柄、token、指标和业务状态。
+
+### 修改内容
+
+- 在 `apps/ui_backend.py` 新增 `LatestFrameChannel`：每个 preview session 绑定 `127.0.0.1` 随机端口，
+  生成会话 token，通过长度前缀 TCP 协议按需返回最新 JPEG bytes；`session.frame` 不再写 `image`、
+  base64 或图片 bytes，只写 `frameHost/framePort/frameToken/frameId/frameHandle/payloadBytes` 等小字段。
+- 预览 session 的 running/status/result payload 增加 `frameChannel` 快照；摄像头实时路径继续 latest-frame
+  丢旧帧策略，并记录 `capturedFrames/droppedFrames/renderedFrames/sourceFrameAgeMs/payloadBytes`。
+- 在 `frontend/src-tauri/src/lib.rs` 新增 `latest_frame` Tauri command，Rust 只连接本机帧通道并用
+  `tauri::ipc::Response` 返回 `ArrayBuffer` bytes；没有改视觉算法，也没有把算法搬进 Rust/TS。
+- 在 `frontend/src/bridge.ts` 增加 `fetchLatestFrameBytes()`；`frontend/src/App.vue` 收到 `session.frame`
+  后用 raw IPC 拉 bytes 生成 blob URL，并在卸载/换帧时释放旧 URL。T-005 会继续迁移到 Canvas/bitmap。
+- 扩展 session、packaging 和 frontend smoke：测试实际从 TCP 通道读取 fake frame bytes，静态阻断
+  `payload.image`，并锁定 Rust `latest_frame`/`Response::new(bytes)` 路径。
+
+### 迁移前后记录型基线
+
+- 丢帧率：同源合成摄像头样本采集 20 帧、渲染 2 帧，`droppedFrames > 0`，保持 latest-frame 丢旧帧策略。
+- 渲染帧率：后端 `fps` 仍按已处理帧/耗时输出；T-004 未改前端绘制节流，T-005 Canvas 阶段继续记录真实渲染侧 fps。
+- 前端内存增长：T-004 已移除 JSON/base64 大图进入 reactive 状态，前端仅保存当前 blob URL 并释放旧 URL；真实浏览器内存增长留到 T-005 Canvas 验证记录。
+- IPC payload 大小：迁移前 `session.frame` JSON 含整帧 data URL/base64；迁移后 JSON 图片负载为 0，
+  只含端口/token/handle/指标，实际 JPEG bytes 通过本机 TCP + Tauri raw IPC `ArrayBuffer` 按需获取。
+
+### 验证方法
+
+- `.\.venv\Scripts\python.exe -m pytest tests/test_ui_backend_sessions.py tests/test_windows_packaging_smoke.py -q` → 16 passed
+- `npm run verify:tauri` → cargo check passed
+- `npm --prefix frontend run test` → Frontend behavior smoke checks passed
+- `git diff --check` → 退出码 0（仅 Windows 换行提示，无空白错误）
+
 ## 2026-06-11: T-002 补齐 YOLO 能力和评分授权元数据
 
 ### 问题描述

@@ -55,6 +55,9 @@ def test_rust_bridge_prefers_packaged_sidecar_and_keeps_dev_fallback() -> None:
     assert '"event": "bridge.decode_error"' in source
     assert '"jobId": null' in source
     assert '"sessionId": null' in source
+    assert "latest_frame" in source
+    assert "TcpStream::connect((\"127.0.0.1\", request.frame_port))" in source
+    assert "Response::new(bytes)" in source
 
 
 def test_rust_directory_picker_initializes_com_for_shell32_dialog() -> None:

@@ -5,6 +5,7 @@ import {
   type CameraEntry,
   type JsonRecord,
   type RecordState,
+  fetchLatestFrameBytes,
   listenBridgeEvents,
   selectDirectory,
   sendBridgeCommand
@@ -36,7 +37,11 @@ type ModelItem = {
 };
 
 type SessionFramePayload = JsonRecord & {
-  image?: string;
+  sessionId?: string;
+  framePort?: number;
+  frameToken?: string;
+  frameId?: number;
+  frameHandle?: string;
   actionsText?: string;
   fps?: number;
   frameIndex?: number;
@@ -188,6 +193,7 @@ const techIndicatorRows = computed<TechIndicatorRow[]>(() => {
 
 let unlisten: (() => void) | undefined;
 let lastPreviewFrameAt = 0;
+let previewObjectUrl: string | undefined;
 // 上限保护:仅在后端异常突发时限速,正常 30fps(帧间隔 ~33ms)不受影响。
 // 取 16ms(~60fps 上限)而非 33ms,避免与 30fps 帧到达相位抖动导致周期性丢帧。
 const PREVIEW_FRAME_MIN_INTERVAL_MS = 16;
@@ -236,6 +242,7 @@ watch([poseVariant, enableHands], () => {
 
 onBeforeUnmount(() => {
   stopActiveJobsBeforeUnmount();
+  clearPreviewObjectUrl();
   if (unlisten) unlisten();
 });
 
@@ -338,6 +345,7 @@ async function startSession(): Promise<void> {
   fpsText.value = "--";
   progressText.value = initialSessionProgressText();
   previewImage.value = "";
+  clearPreviewObjectUrl();
   frameIndex.value = 0;
   lastPreviewFrameAt = Number.NEGATIVE_INFINITY;
   const pendingSessionId = nextBridgeId("session");
@@ -532,7 +540,7 @@ function handleBridgeEvent(event: BridgeEnvelope): void {
       return;
     }
     const payload = event.payload as SessionFramePayload;
-    previewImage.value = String(payload.image ?? "");
+    void renderLatestFrame(payload, event.sessionId ?? null, event.jobId ?? null);
     actionsText.value = String(payload.actionsText ?? "-");
     frameIndex.value = Number(payload.frameIndex ?? 0);
     fpsText.value = Number(payload.fps ?? 0).toFixed(1);
@@ -597,6 +605,27 @@ function handleBridgeEvent(event: BridgeEnvelope): void {
   }
 }
 
+async function renderLatestFrame(
+  payload: SessionFramePayload,
+  eventSessionId: string | null,
+  eventJobId: string | null
+): Promise<void> {
+  try {
+    const bytes = await fetchLatestFrameBytes(payload);
+    if (!bytes) return;
+    if (eventSessionId !== sessionId.value || eventJobId !== jobId.value) {
+      return;
+    }
+    const blob = new Blob([bytes], { type: "image/jpeg" });
+    const nextUrl = URL.createObjectURL(blob);
+    clearPreviewObjectUrl();
+    previewObjectUrl = nextUrl;
+    previewImage.value = nextUrl;
+  } catch (error) {
+    errorText.value = errorMessage(error, "读取最新预览帧失败");
+  }
+}
+
 function setRawJson(envelope: BridgeEnvelope): void {
   rawJson.value = JSON.stringify(envelope, null, 2);
 }
@@ -617,6 +646,13 @@ function shouldRenderPreviewFrame(): boolean {
   }
   lastPreviewFrameAt = now;
   return true;
+}
+
+function clearPreviewObjectUrl(): void {
+  if (previewObjectUrl) {
+    URL.revokeObjectURL(previewObjectUrl);
+    previewObjectUrl = undefined;
+  }
 }
 
 function applyAnalysisProgress(payload: JsonRecord): void {

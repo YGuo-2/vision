@@ -3,6 +3,8 @@ from __future__ import annotations
 import sys
 import threading
 import time
+import socket
+import struct
 from pathlib import Path
 from typing import Any
 
@@ -118,6 +120,23 @@ def _install_preview_service(service: ui_backend.PreviewSessionService):
     return previous
 
 
+def _fetch_frame_payload(payload: dict[str, Any]) -> bytes:
+    with socket.create_connection(("127.0.0.1", int(payload["framePort"])), timeout=1.0) as conn:
+        conn.sendall(
+            f"GET {payload['sessionId']} {payload['frameToken']}\n".encode("utf-8")
+        )
+        length = struct.unpack(">I", conn.recv(4))[0]
+        chunks: list[bytes] = []
+        remaining = length
+        while remaining:
+            chunk = conn.recv(remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+
+
 def test_camera_list_command_uses_camera_enumerator(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_enumerate_cameras(*, scan_limit: int):
         assert scan_limit == 3
@@ -148,12 +167,13 @@ def test_session_start_emits_frame_events_and_releases_capture() -> None:
     events: list[dict] = []
     manager = ui_backend.BridgeJobManager(events.append)
     cap = FakeCapture([{"frame": 1}, {"frame": 2}, {"frame": 3}])
-    pipe = FakePipeline(["V_SIGN", "SQUAT"])
+    pipe = StepPipeline(steps=2)
+    pipe.actions = ["V_SIGN", "SQUAT"]
     service = ui_backend.PreviewSessionService(
         job_manager=manager,
         capture_factory=lambda source: cap,
         pipeline_factory=lambda options: pipe,
-        frame_encoder=lambda frame: "data:image/jpeg;base64,fake-frame",
+        frame_encoder=lambda frame: b"fake-frame-bytes",
     )
     previous = _install_preview_service(service)
     try:
@@ -173,6 +193,13 @@ def test_session_start_emits_frame_events_and_releases_capture() -> None:
         )
         assert response["ok"] is True
         assert response["sessionId"]
+        assert pipe.annotating[0].wait(1.0)
+        pipe.release[0].set()
+        assert pipe.annotating[1].wait(1.0)
+        frame_events = [event for event in events if event["event"] == "session.frame"]
+        assert frame_events
+        assert _fetch_frame_payload(frame_events[0]["payload"]) == b"fake-frame-bytes"
+        pipe.release[1].set()
 
         final = manager.wait(response["jobId"], 2.0)
 
@@ -182,13 +209,22 @@ def test_session_start_emits_frame_events_and_releases_capture() -> None:
         assert final.result["frames"] == 2
         assert cap.released is True
         assert pipe.closed is False
-        frame_events = [event for event in events if event["event"] == "session.frame"]
-        assert frame_events
         assert frame_events[0]["payload"]["actions"] == ["V_SIGN", "SQUAT"]
         assert frame_events[0]["payload"]["actionsZh"] == ["✌（V 手势）", "下蹲"]
-        assert frame_events[0]["payload"]["image"].startswith("data:image/jpeg;base64,")
+        assert "image" not in frame_events[0]["payload"]
+        assert frame_events[0]["payload"]["frameTransport"] == "tcp-length-prefixed"
+        assert frame_events[0]["payload"]["frameHost"] == "127.0.0.1"
+        assert frame_events[0]["payload"]["framePort"] > 0
+        assert frame_events[0]["payload"]["frameToken"]
+        assert frame_events[0]["payload"]["payloadBytes"] == len(b"fake-frame-bytes")
+        running_status = next(
+            event for event in events if event["event"] == "session.status" and event["payload"]["state"] == "running"
+        )
+        assert running_status["payload"]["frameChannel"]["frameToken"] == frame_events[0]["payload"]["frameToken"]
         assert any(event["event"] == "session.status" for event in events)
     finally:
+        pipe.release[0].set()
+        pipe.release[1].set()
         ui_backend.DEFAULT_PREVIEW_SERVICE = previous
 
 
@@ -210,7 +246,7 @@ def test_session_stop_by_session_id_requests_running_job_stop() -> None:
         job_manager=manager,
         capture_factory=lambda source: cap,
         pipeline_factory=lambda options: pipe,
-        frame_encoder=lambda frame: "data:image/jpeg;base64,slow-frame",
+        frame_encoder=lambda frame: b"slow-frame",
     )
     previous = _install_preview_service(service)
     try:
@@ -291,7 +327,7 @@ def test_camera_preview_drops_stale_frames_when_inference_is_slow() -> None:
         job_manager=manager,
         capture_factory=lambda source: cap,
         pipeline_factory=lambda options: pipe,
-        frame_encoder=lambda frame: "data:image/jpeg;base64,realtime-frame",
+        frame_encoder=lambda frame: b"realtime-frame",
     )
     previous = _install_preview_service(service)
     try:
@@ -312,9 +348,13 @@ def test_camera_preview_drops_stale_frames_when_inference_is_slow() -> None:
         assert final.result["frames"] == 2
         assert final.result["capturedFrames"] == 20
         assert final.result["droppedFrames"] > 0
+        assert final.result["renderedFrames"] == 2
         assert pipe.seen_frames == [1, 20]
         frame_events = [event for event in events if event["event"] == "session.frame"]
         assert frame_events[0]["payload"]["sourceFrameIndex"] == 1
+        assert frame_events[0]["payload"]["sourceFrameAgeMs"] >= 0
+        assert "image" not in frame_events[0]["payload"]
+        assert frame_events[0]["payload"]["payloadBytes"] == len(b"realtime-frame")
     finally:
         ui_backend.DEFAULT_PREVIEW_SERVICE = previous
 
@@ -344,7 +384,7 @@ def test_record_toggle_and_stop_share_session_recording_controller() -> None:
         job_manager=manager,
         capture_factory=lambda source: cap,
         pipeline_factory=lambda options: pipe,
-        frame_encoder=lambda frame: "data:image/jpeg;base64,record-frame",
+        frame_encoder=lambda frame: b"record-frame",
         recording_factory=lambda options: RecordingController(
             writer_factory=writer_factory,
             path_provider=lambda: Path("fake_outputs") / "record_requested.mp4",
@@ -417,7 +457,7 @@ def test_recording_write_error_is_reported_as_record_status() -> None:
         job_manager=manager,
         capture_factory=lambda source: cap,
         pipeline_factory=lambda options: pipe,
-        frame_encoder=lambda frame: "data:image/jpeg;base64,error-frame",
+        frame_encoder=lambda frame: b"error-frame",
         recording_factory=lambda options: RecordingController(
             writer_factory=FakeWriterFactory(writer),
             path_provider=lambda: Path("fake_outputs") / "record_requested.mp4",
