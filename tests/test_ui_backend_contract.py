@@ -266,6 +266,26 @@ def test_handle_line_preserves_request_id_on_bad_payload_shape():
     assert response["error"]["code"] == "bad_request"
 
 
+def test_job_stop_returns_structured_errors_for_missing_or_unknown_job():
+    missing = ui_backend.handle_command(
+        ui_backend.CommandRequest(command="job.stop", request_id="req-stop-missing", payload={})
+    )
+    assert missing["ok"] is False
+    assert missing["error"]["code"] == "bad_request"
+    assert missing["requestId"] == "req-stop-missing"
+
+    unknown = ui_backend.handle_command(
+        ui_backend.CommandRequest(
+            command="job.stop",
+            request_id="req-stop-unknown",
+            payload={"jobId": "job-does-not-exist"},
+        )
+    )
+    assert unknown["ok"] is False
+    assert unknown["error"]["code"] == "not_found"
+    assert unknown["error"]["detail"] == {"jobId": "job-does-not-exist"}
+
+
 def test_model_status_known_command_dispatches_successfully():
     req = ui_backend.parse_command(
         {

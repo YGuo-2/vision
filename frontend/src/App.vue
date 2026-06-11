@@ -329,7 +329,11 @@ async function cancelModelDownload(): Promise<void> {
   setRawJson(response);
   if (!response.ok) {
     errorText.value = response.error?.message ?? "取消模型下载失败";
+    return;
   }
+  modelDownloadStatus.value = "已取消";
+  modelDownloadJobId.value = undefined;
+  modelDownloadProgress.value = null;
 }
 
 function stopActiveJobsBeforeUnmount(): void {
@@ -403,7 +407,9 @@ async function stopSession(): Promise<void> {
   setRawJson(response);
   if (!response.ok) {
     errorText.value = response.error?.message ?? "停止失败";
+    return;
   }
+  markSessionStopped("已停止");
 }
 
 async function toggleRecord(): Promise<void> {
@@ -519,7 +525,11 @@ async function stopAnalysisJob(): Promise<void> {
   setRawJson(response);
   if (!response.ok) {
     errorText.value = response.error?.message ?? "停止动作分析失败";
+    return;
   }
+  analysisStatus.value = "已停止";
+  analysisJobId.value = undefined;
+  analysisProgress.value = null;
 }
 
 function handleBridgeEvent(event: BridgeEnvelope): void {
@@ -599,11 +609,10 @@ function handleBridgeEvent(event: BridgeEnvelope): void {
     }
     const sessionTerminalStatus = sessionStatusFromJobEvent(event);
     if (sessionTerminalStatus && (!event.jobId || event.jobId === jobId.value)) {
-      isRunning.value = false;
-      statusText.value = sessionTerminalStatus;
-      jobId.value = undefined;
+      markSessionStopped(sessionTerminalStatus, { clearSession: event.event === "job.failed" });
       if (event.event === "job.failed") {
-        sessionId.value = undefined;
+        cancelPendingFrameRender();
+        clearPreviewCanvas();
       }
     }
   }
@@ -681,6 +690,19 @@ function cancelPendingFrameRender(): void {
   if (frameRenderRaf != null) {
     window.cancelAnimationFrame(frameRenderRaf);
     frameRenderRaf = null;
+  }
+}
+
+function markSessionStopped(nextStatus: string, options: { clearSession?: boolean } = {}): void {
+  isRunning.value = false;
+  statusText.value = nextStatus;
+  jobId.value = undefined;
+  if (options.clearSession ?? true) {
+    sessionId.value = undefined;
+  }
+  cancelPendingFrameRender();
+  if (nextStatus !== "运行失败") {
+    clearPreviewCanvas();
   }
 }
 

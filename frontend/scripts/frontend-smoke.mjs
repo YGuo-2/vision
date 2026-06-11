@@ -64,6 +64,7 @@ for (const marker of [
   "downloadAllMissing",
   "cancelModelDownload",
   "stopActiveJobsBeforeUnmount",
+  "markSessionStopped",
   "stopJobById(sendBridgeCommand, modelDownloadJobId.value)",
   "stopJobById(sendBridgeCommand, analysisJobId.value)",
   "重新下载"
@@ -430,6 +431,8 @@ assert(stopCalls[0].command === "job.stop", "active model download unmount helpe
 assert(stopCalls[0].payload.jobId === "job-model", "active model download unmount helper must stop exact job payload");
 assert(stopCalls[0].options.jobId === "job-model", "active model download unmount helper must stop exact job options");
 assert(stoppedEnvelope?.jobId === "job-model", "active model download unmount helper must return stop envelope");
+assertIncludes(app, "modelDownloadStatus.value = \"已取消\"", "App.vue");
+assertIncludes(app, "modelDownloadJobId.value = undefined", "App.vue");
 
 let emptyStopCalled = false;
 const skippedStop = await bridgeLifecycle.stopJobById(async () => {
@@ -457,6 +460,10 @@ assert(analysisStopCalls[0].command === "job.stop", "active analysis unmount hel
 assert(analysisStopCalls[0].payload.jobId === "job-analysis", "active analysis unmount helper must stop exact job payload");
 assert(analysisStopCalls[0].options.jobId === "job-analysis", "active analysis unmount helper must stop exact job options");
 assert(stoppedAnalysisEnvelope?.jobId === "job-analysis", "active analysis unmount helper must return stop envelope");
+assertIncludes(app, "analysisStatus.value = \"已停止\"", "App.vue");
+assertIncludes(app, "analysisJobId.value = undefined", "App.vue");
+assertIncludes(app, "markSessionStopped(\"已停止\")", "App.vue");
+assertIncludes(app, "cancelPendingFrameRender()", "App.vue");
 
 const rawEnvelope = {
   type: "event",

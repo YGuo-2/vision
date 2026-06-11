@@ -1,3 +1,29 @@
+## 2026-06-11: T-006 打通 Rust/Python 双侧任务状态机和取消语义
+
+### 问题描述
+
+T-004/T-005 引入了独立帧通道和前端异步渲染队列后，session、analysis、model download 的主动停止
+与晚到事件处理需要进一步收口：停止响应成功后若前端仍保留 active job/session id，后续晚到 job event
+可能再次改写 UI；pending frame / canvas 也需要在停止和失败时明确清理。
+
+### 修改内容
+
+- 在 `frontend/src/App.vue` 增加 `markSessionStopped()`，统一主动 `session.stop`、`job.completed`、
+  `job.stopped`、`job.failed` 下的 running/job/session/pending frame/canvas 清理；失败路径保留错误状态，
+  正常停止清空 canvas。
+- 主动取消模型下载成功后立即置 `modelDownloadStatus=已取消` 并清空 `modelDownloadJobId`/progress；
+  主动停止 analysis 成功后立即置 `analysisStatus=已停止` 并清空 `analysisJobId`/progress。
+- 扩展 frontend smoke，锁定卸载/主动停止会调用 `job.stop`，并要求 session/model/analysis 停止后清理
+  active id 与 pending frame。
+- 扩展 `tests/test_ui_backend_contract.py`，锁定 `job.stop` 缺失或未知 jobId 时返回结构化 `bad_request` /
+  `not_found` envelope，不抛未包装异常。
+
+### 验证方法
+
+- `.\.venv\Scripts\python.exe -m pytest tests/test_ui_backend_sessions.py tests/test_ui_backend_contract.py -q` → 24 passed
+- `npm --prefix frontend run test` → Frontend behavior smoke checks passed
+- `git diff --check` → 退出码 0（仅 Windows 换行提示，无空白错误）
+
 ## 2026-06-11: T-005 将 Vue 预览迁移到 Canvas/bitmap 渲染
 
 ### 问题描述
