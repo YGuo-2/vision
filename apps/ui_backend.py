@@ -842,6 +842,16 @@ class ModelManagementService:
         for spec in specs:
             if ctx.stopped():
                 break
+            if not bool(getattr(spec, "downloadable", True)):
+                failed.append(
+                    {
+                        "key": _spec_key(spec),
+                        "error": str(getattr(spec, "note", "") or "该模型暂不支持自动下载"),
+                        "interrupted": False,
+                        "manualInstallRequired": True,
+                    }
+                )
+                continue
             ctx.progress("model.status", {"state": "downloading", "modelKey": _spec_key(spec), "label": _spec_label(spec)})
             try:
                 path = self._download(
@@ -875,19 +885,26 @@ class ModelManagementService:
         models = []
         missing = []
         for spec in self.specs:
+            key = _spec_key(spec)
             installed = bool(self._is_installed(spec))
             item = {
-                "key": _spec_key(spec),
+                "key": key,
                 "filename": str(getattr(spec, "filename", "")),
                 "label": _spec_label(spec),
                 "approxMb": getattr(spec, "approx_mb", None),
                 "path": str(self._model_path(spec)),
                 "installed": installed,
                 "sizeMb": self._installed_size(spec),
-                "active": _spec_key(spec) in active_keys,
+                "active": key in active_keys,
+                "category": str(getattr(spec, "category", "mediapipe")),
+                "profile": str(getattr(spec, "profile", key)),
+                "downloadable": bool(getattr(spec, "downloadable", True)),
+                "installedSupported": bool(getattr(spec, "installed_supported", True)),
+                "defaultRouteEligible": bool(getattr(spec, "default_route_eligible", True)),
+                "note": str(getattr(spec, "note", "")),
             }
-            if not installed:
-                missing.append(_spec_key(spec))
+            if not installed and bool(getattr(spec, "downloadable", True)):
+                missing.append(key)
             models.append(item)
         return {
             "modelsDir": str(self._models_dir_func()),
@@ -896,6 +913,11 @@ class ModelManagementService:
             "activeKeys": sorted(active_keys),
             "missingKeys": missing,
             "backendRoute": route.to_camel_dict(),
+            "yoloRuntime": {
+                "supported": False,
+                "packaged": False,
+                "message": "当前安装版 sidecar 不打包 YOLO runtime；YOLO 档位仅展示状态，不进入正式评分默认路由。",
+            },
             "models": models,
         }
 
@@ -1773,9 +1795,9 @@ def _default_export_debug(*args: Any, **kwargs: Any) -> Path:
 
 
 def _default_model_specs() -> tuple[Any, ...]:
-    from core.model_manager import MEDIAPIPE_MODELS
+    from core.model_manager import MODEL_SPECS
 
-    return MEDIAPIPE_MODELS
+    return MODEL_SPECS
 
 
 def _default_models_dir() -> Path:

@@ -1,3 +1,37 @@
+## 2026-06-11: T-003 建立模型档清单与配置状态
+
+### 问题描述
+
+桌面模型管理仍只展示 MediaPipe 可下载模型，缺少 YOLO26n/s、YOLO26L、YOLO26X 分档状态、
+默认路由资格、安装版 sidecar 能力边界和开发侧代理下载约束。若模型清单继续缺位，后续
+T-007/T-008 的 YOLO 路由会缺少可复用的模型状态、下载/安装错误和 UI 提示基础。
+
+### 修改内容
+
+- 在 `core/model_manager.py` 扩展 `ModelSpec` 元数据，新增 `category`、`profile`、`downloadable`、
+  `installed_supported`、`default_route_eligible`、`note` 字段；统一导出 `MODEL_SPECS`。
+- 补齐 YOLO26n、YOLO26s、YOLO26L、YOLO26X 模型档清单：YOLO26n/s 为实时 body-only 预览档，
+  YOLO26L 为离线高质量 body-only 分析档，YOLO26X 标记为实验档且不进入默认路由。
+- MediaPipe 模型下载默认走 `http://127.0.0.1:7890`，并支持 `VISION_MODEL_PROXY` 覆盖或置空；
+  不可自动下载的 YOLO 档在下载入口直接返回结构化手动安装错误。
+- `apps/ui_backend.py` 的 `model.status` 返回模型档元数据、只把可下载缺失项纳入 `missingKeys`，
+  并暴露当前安装版 `yoloRuntime.supported=false` / `packaged=false` 提示。
+- `frontend/src/App.vue` 展示 YOLO runtime 提示、模型分类/profile/默认路由资格和手动安装按钮；
+  `frontend/scripts/frontend-smoke.mjs` 锁定这些前端契约。
+- `tests/test_windows_packaging_smoke.py` 明确断言安装版 sidecar 未把 `torch`、`ultralytics`、
+  `core.yolo_adapter` 放入 hiddenimports，而是保留在 heavy excludes 中。
+
+### 验证方法
+
+- `.\.venv\Scripts\python.exe -m pytest tests/test_ui_backend_models.py tests/test_windows_packaging_smoke.py -q`
+  → 20 passed
+- `npm --prefix frontend run test`
+  → Frontend behavior smoke checks passed
+- `.\.venv\Scripts\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q`
+  → 31 passed
+- `git diff --check`
+  → 退出码 0（仅 Windows 换行提示，无空白错误）
+
 ## 2026-06-11: T-006 打通 Rust/Python 双侧任务状态机和取消语义
 
 ### 问题描述

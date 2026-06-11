@@ -83,9 +83,15 @@ def test_sidecar_spec_targets_bridge_without_yolo_or_tkinter_entry() -> None:
     assert '["apps/ui_backend.py"]' in source
     assert 'name="vision-ui-backend"' in source
     assert '"apps.app_ui"' not in source
-    assert '"core.yolo_adapter"' in source
-    assert '"ultralytics"' in source
-    assert '"torch"' in source
+    hiddenimports = source[source.index("hiddenimports += [") : source.index("heavy_excludes = [")]
+    heavy_excludes = source[source.index("heavy_excludes = [") : source.index("a = Analysis(")]
+    assert '"core.yolo_adapter"' not in hiddenimports
+    assert '"ultralytics"' not in hiddenimports
+    assert '"torch"' not in hiddenimports
+    assert '"core.yolo_adapter"' in heavy_excludes
+    assert '"ultralytics"' in heavy_excludes
+    assert '"torch"' in heavy_excludes
+    assert 'excludes=heavy_excludes + ["nvidia"]' in source
     assert '"analysis.tech_eval"' in source
     assert '"core.model_manager"' in source
     assert '"apps.camera_enum"' in source

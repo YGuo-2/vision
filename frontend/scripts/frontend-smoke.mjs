@@ -59,6 +59,7 @@ for (const marker of [
   "model.download",
   "model.progress",
   "model.status",
+  "yoloRuntimeMessage",
   "selectRecordDir",
   "选择目录",
   "downloadAllMissing",
@@ -67,7 +68,11 @@ for (const marker of [
   "markSessionStopped",
   "stopJobById(sendBridgeCommand, modelDownloadJobId.value)",
   "stopJobById(sendBridgeCommand, analysisJobId.value)",
-  "重新下载"
+  "重新下载",
+  "手动安装",
+  "model.downloadable === false",
+  "model.defaultRouteEligible",
+  "payload.yoloRuntime?.message"
 ]) {
   assertIncludes(app, marker, "App.vue");
 }

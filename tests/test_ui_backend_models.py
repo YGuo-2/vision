@@ -28,6 +28,30 @@ def _spec(key: str, filename: str, label: str):
     )
 
 
+def _yolo_spec(key: str, filename: str, label: str):
+    return SimpleNamespace(
+        key=key,
+        filename=filename,
+        label=label,
+        approx_mb=None,
+        url="",
+        category="yolo",
+        profile=key,
+        downloadable=False,
+        installed_supported=False,
+        default_route_eligible=key != "yolo26x",
+        note="当前安装版 sidecar 不打包 YOLO runtime",
+    )
+
+
+def _install_fake_url_opener(monkeypatch: pytest.MonkeyPatch, response) -> None:
+    class FakeOpener:
+        def open(self, req, timeout):
+            return response
+
+    monkeypatch.setattr(model_manager, "_url_opener", lambda *, proxy: FakeOpener())
+
+
 def test_model_status_returns_active_missing_and_path_payload(tmp_path: Path) -> None:
     specs = (
         _spec("pose_full", "pose.task", "Pose Full"),
@@ -58,6 +82,43 @@ def test_model_status_returns_active_missing_and_path_payload(tmp_path: Path) ->
         assert payload["missingKeys"] == ["hand"]
         assert payload["models"][0]["installed"] is True
         assert payload["models"][1]["installed"] is False
+    finally:
+        ui_backend.DEFAULT_MODEL_SERVICE = previous
+
+
+def test_model_status_lists_yolo_profiles_without_marking_them_download_missing(tmp_path: Path) -> None:
+    service = ui_backend.ModelManagementService(
+        specs=(
+            _spec("pose_full", "pose.task", "Pose Full"),
+            _yolo_spec("yolo26n", "yolo26n-pose.pt", "YOLO26n"),
+            _yolo_spec("yolo26l", "yolo26l-pose.pt", "YOLO26L"),
+            _yolo_spec("yolo26x", "yolo26x-pose.pt", "YOLO26X"),
+        ),
+        models_dir_func=lambda: tmp_path,
+        is_installed_func=lambda spec: False,
+        installed_size_func=lambda spec: None,
+        model_path_func=lambda spec: tmp_path / spec.filename,
+    )
+    previous = _install_model_service(service)
+    try:
+        response = ui_backend.handle_command(
+            ui_backend.CommandRequest(
+                command="model.status",
+                request_id="req-yolo-model-status",
+                payload={"poseVariant": "full", "enableHands": False},
+            )
+        )
+
+        assert response["ok"] is True
+        payload = response["payload"]
+        by_key = {item["key"]: item for item in payload["models"]}
+        assert payload["missingKeys"] == ["pose_full"]
+        assert by_key["yolo26n"]["category"] == "yolo"
+        assert by_key["yolo26n"]["downloadable"] is False
+        assert by_key["yolo26l"]["installedSupported"] is False
+        assert by_key["yolo26x"]["defaultRouteEligible"] is False
+        assert payload["yoloRuntime"]["supported"] is False
+        assert "不打包 YOLO runtime" in payload["yoloRuntime"]["message"]
     finally:
         ui_backend.DEFAULT_MODEL_SERVICE = previous
 
@@ -188,6 +249,77 @@ def test_model_download_reports_failed_state_on_download_exception(tmp_path: Pat
         ui_backend.DEFAULT_MODEL_SERVICE = previous
 
 
+def test_model_download_yolo_profile_reports_manual_install_required(tmp_path: Path) -> None:
+    events: list[dict] = []
+    manager = ui_backend.BridgeJobManager(events.append)
+    specs = (_yolo_spec("yolo26l", "yolo26l-pose.pt", "YOLO26L"),)
+    service = ui_backend.ModelManagementService(
+        job_manager=manager,
+        specs=specs,
+        models_dir_func=lambda: tmp_path,
+        is_installed_func=lambda spec: False,
+        installed_size_func=lambda spec: None,
+        model_path_func=lambda spec: tmp_path / spec.filename,
+    )
+    previous = _install_model_service(service)
+    try:
+        response = ui_backend.handle_command(
+            ui_backend.CommandRequest(
+                command="model.download",
+                request_id="req-yolo-download",
+                payload={"modelKey": "yolo26l"},
+            )
+        )
+        final = manager.wait(response["jobId"], 2.0)
+
+        assert final is not None
+        assert final.status == "succeeded"
+        assert final.result["state"] == "failed"
+        assert final.result["failed"][0]["key"] == "yolo26l"
+        assert final.result["failed"][0]["manualInstallRequired"] is True
+    finally:
+        ui_backend.DEFAULT_MODEL_SERVICE = previous
+
+
+def test_model_download_proxy_defaults_to_local_proxy_and_allows_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("VISION_MODEL_PROXY", raising=False)
+    assert model_manager.model_download_proxy() == "http://127.0.0.1:7890"
+
+    monkeypatch.setenv("VISION_MODEL_PROXY", " http://127.0.0.1:9999 ")
+    assert model_manager.model_download_proxy() == "http://127.0.0.1:9999"
+
+    monkeypatch.setenv("VISION_MODEL_PROXY", "")
+    assert model_manager.model_download_proxy() == ""
+
+
+def test_url_opener_uses_proxy_handler_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeProxyHandler:
+        def __init__(self, proxies):
+            captured["proxies"] = proxies
+
+    class FakeOpener:
+        pass
+
+    def fake_build_opener(*handlers):
+        captured["handler_count"] = len(handlers)
+        return FakeOpener()
+
+    monkeypatch.delenv("VISION_MODEL_PROXY", raising=False)
+    monkeypatch.setattr(model_manager.urllib.request, "ProxyHandler", FakeProxyHandler)
+    monkeypatch.setattr(model_manager.urllib.request, "build_opener", fake_build_opener)
+
+    opener = model_manager._url_opener(proxy=None)
+
+    assert isinstance(opener, FakeOpener)
+    assert captured["handler_count"] == 1
+    assert captured["proxies"] == {
+        "http": "http://127.0.0.1:7890",
+        "https": "http://127.0.0.1:7890",
+    }
+
+
 def test_download_model_interruption_removes_part_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     spec = model_manager.ModelSpec(
         key="fake",
@@ -213,7 +345,7 @@ def test_download_model_interruption_removes_part_file(tmp_path: Path, monkeypat
             self.read_calls += 1
             return b"12345" if self.read_calls == 1 else b""
 
-    monkeypatch.setattr(model_manager.urllib.request, "urlopen", lambda req, timeout: FakeResponse())
+    _install_fake_url_opener(monkeypatch, FakeResponse())
     progress_calls = 0
 
     def progress(downloaded: int, total: int | None) -> None:
@@ -259,7 +391,7 @@ def test_download_model_interruption_preserves_existing_model_file(
             self.read_calls += 1
             return b"12345" if self.read_calls == 1 else b""
 
-    monkeypatch.setattr(model_manager.urllib.request, "urlopen", lambda req, timeout: FakeResponse())
+    _install_fake_url_opener(monkeypatch, FakeResponse())
     progress_calls = 0
 
     def progress(downloaded: int, total: int | None) -> None:
@@ -305,7 +437,7 @@ def test_download_model_short_content_length_removes_part_and_preserves_existing
             self.read_calls += 1
             return b"12345" if self.read_calls == 1 else b""
 
-    monkeypatch.setattr(model_manager.urllib.request, "urlopen", lambda req, timeout: FakeResponse())
+    _install_fake_url_opener(monkeypatch, FakeResponse())
 
     with pytest.raises(OSError, match="下载不完整"):
         model_manager.download_model(spec)

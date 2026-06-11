@@ -32,6 +32,12 @@ type ModelItem = {
   label: string;
   installed: boolean;
   active: boolean;
+  category?: string;
+  profile?: string;
+  downloadable?: boolean;
+  installedSupported?: boolean;
+  defaultRouteEligible?: boolean;
+  note?: string;
   path?: string;
   sizeMb?: number | null;
 };
@@ -127,6 +133,7 @@ const recordState = ref<RecordState>({
 const models = ref<ModelItem[]>([]);
 const missingModelKeys = ref<string[]>([]);
 const modelsDir = ref("");
+const yoloRuntimeMessage = ref("");
 const showSettingsPanel = ref(false);
 const modelDownloadJobId = ref<string | undefined>();
 const modelDownloadStatus = ref("未下载");
@@ -277,10 +284,16 @@ async function refreshModels(): Promise<void> {
     errorText.value = response.error?.message ?? "刷新模型状态失败";
     return;
   }
-  const payload = response.payload as unknown as { modelsDir: string; models: ModelItem[]; missingKeys: string[] };
+  const payload = response.payload as unknown as {
+    modelsDir: string;
+    models: ModelItem[];
+    missingKeys: string[];
+    yoloRuntime?: { message?: string };
+  };
   modelsDir.value = payload.modelsDir ?? "";
   models.value = payload.models ?? [];
   missingModelKeys.value = payload.missingKeys ?? [];
+  yoloRuntimeMessage.value = String(payload.yoloRuntime?.message ?? "");
 }
 
 async function downloadModel(modelKey: string): Promise<void> {
@@ -997,6 +1010,7 @@ function applyRecordPayload(payload: RecordState): void {
         <button class="secondary-button" @click="showSettingsPanel = !showSettingsPanel">设置</button>
         <div v-if="showSettingsPanel" class="settings-panel">
           <p class="hint-text">模型目录：{{ modelsDir || "-" }}</p>
+          <p v-if="yoloRuntimeMessage" class="hint-text">{{ yoloRuntimeMessage }}</p>
           <div class="button-row">
             <button class="secondary-button" @click="refreshModels">刷新状态</button>
             <button class="primary-button" :disabled="missingModelKeys.length === 0 || Boolean(modelDownloadJobId)" @click="downloadAllMissing">
@@ -1010,12 +1024,13 @@ function applyRecordPayload(payload: RecordState): void {
           <div v-for="model in models" :key="model.key" class="model-row">
             <div>
               <strong>{{ model.label }}</strong>
-              <span>{{ model.key }} · {{ model.installed ? "已安装" : "缺失" }} · {{ model.active ? "当前启用" : "未启用" }}</span>
+              <span>{{ model.key }} · {{ model.category ?? "mediapipe" }} · {{ model.profile ?? model.key }} · {{ model.defaultRouteEligible === false ? "不进默认路由" : "可进默认路由" }} · {{ model.installed ? "已安装" : "缺失" }} · {{ model.active ? "当前启用" : "未启用" }}</span>
               <span>大小：{{ model.sizeMb ?? "-" }} MB</span>
               <span>path：{{ model.path ?? "-" }}</span>
+              <span v-if="model.note">{{ model.note }}</span>
             </div>
-            <button class="secondary-button" :disabled="Boolean(modelDownloadJobId)" @click="downloadModel(model.key)">
-              {{ model.installed ? "重新下载" : "下载" }}
+            <button class="secondary-button" :disabled="Boolean(modelDownloadJobId) || model.downloadable === false" @click="downloadModel(model.key)">
+              {{ model.downloadable === false ? "手动安装" : (model.installed ? "重新下载" : "下载") }}
             </button>
           </div>
         </div>

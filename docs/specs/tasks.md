@@ -3,9 +3,9 @@
 > **功能名称:** Vue/Tauri 高速帧通道与 MediaPipe/YOLO 后端路由架构
 > **关联规范:** `docs/specs/design.md` · `docs/specs/requirements.md`
 > **状态:** In Progress
-> **当前任务:** T-003
-> **进度:** 5 / 10 已完成
-> **最后更新:** 2026-06-11 14:54:00
+> **当前任务:** T-007
+> **进度:** 6 / 10 已完成
+> **最后更新:** 2026-06-11 15:13:21
 
 ---
 
@@ -51,11 +51,13 @@
   - 验证标准: 任意 YOLO payload/artifact 均显式标识 `backend=yolo`、raw layout、`featureLayout=body_core_v1`、`capability=body_only`、`calibrationStatus=unvalidated`、布尔 `scoreAuthorized=false`；受限显示只使用 `displayScope=limited|internal` / `display_scope=limited|internal`，不得引入等价字段；Python snake_case 与前端 camelCase 字段一一映射；缺失点继续通过 `valid_mask=False` 和 missing capability 呈现。
   - 预估工程量: 2-4 小时
 
-- [ ] **T-003:** 建立模型档清单与配置状态
-  - 状态: pending
+- [x] **T-003:** 建立模型档清单与配置状态
+  - 状态: done
+  - 验证证据: cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_ui_backend_models.py tests/test_windows_packaging_smoke.py -q => exit 0, 20 passed; cmd: npm --prefix frontend run test => exit 0, Frontend behavior smoke checks passed; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q => exit 0, 31 passed; cmd: git diff --check => exit 0 (line-ending warnings only)
+  - 完成时间: 2026-06-11 15:13:21
+  - 备注: 补齐 MediaPipe/YOLO26 模型档元数据、默认代理下载、YOLO 手动安装错误、安装版 sidecar YOLO runtime 排除边界和前端展示；更新 change.md。
   - 涉及文件: `apps/ui_backend.py`, `core/model_manager.py`, `ui_backend_sidecar.spec`, `frontend/src/App.vue`, `frontend/src/bridge-state.ts`, `tests/test_ui_backend_models.py`, `tests/test_windows_packaging_smoke.py`, `frontend/scripts/frontend-smoke.mjs`
   - 验证命令: 分步运行 `.\.venv\Scripts\python.exe -m pytest tests/test_ui_backend_models.py tests/test_windows_packaging_smoke.py -q` 和 `npm --prefix frontend run test`，每步必须退出码 0
-  - 验证证据: pending
   - 依赖: T-001
   - 风险: medium
   - 覆盖: REQ-007, AC-007.1, AC-007.2, AC-007.3
@@ -206,3 +208,4 @@
 | T-004 | 2026-06-11 14:35:56 | f3e50db | cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_ui_backend_sessions.py tests/test_windows_packaging_smoke.py -q => exit 0, 16 passed; cmd: npm run verify:tauri => exit 0, cargo check passed; cmd: npm --prefix frontend run test => exit 0, Frontend behavior smoke checks passed; cmd: git diff --check => exit 0 (line-ending warnings only) | 实现 Python 127.0.0.1 TCP length-prefixed latest-frame 通道与 Tauri raw IPC latest_frame；session.frame JSON 不再携带 image/base64/bytes，仅传 frame handle、token 和指标；更新 change.md 基线记录。 |
 | T-005 | 2026-06-11 14:44:51 | 7bfe692 | cmd: npm --prefix frontend run test => exit 0, Frontend behavior smoke checks passed; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_vue_tauri_acceptance_gaps.py -q => exit 0, 7 passed; cmd: git diff --check => exit 0 (line-ending warnings only) | Vue 预览迁移到 Canvas/ImageBitmap；requestAnimationFrame 合并 latest frame；移除 previewImage、object URL 和 img 帧展示路径；更新 change.md 基线记录。 |
 | T-006 | 2026-06-11 14:54:00 | b795674 | cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_ui_backend_sessions.py tests/test_ui_backend_contract.py -q => exit 0, 24 passed; cmd: npm --prefix frontend run test => exit 0, Frontend behavior smoke checks passed; cmd: git diff --check => exit 0 (line-ending warnings only) | 统一 session/model download/analysis 主动停止和晚到事件清理；job.stop 缺失/未知 jobId 结构化错误测试；更新 change.md。 |
+| T-003 | 2026-06-11 15:13:21 | 7a1390e | cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_ui_backend_models.py tests/test_windows_packaging_smoke.py -q => exit 0, 20 passed; cmd: npm --prefix frontend run test => exit 0, Frontend behavior smoke checks passed; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q => exit 0, 31 passed; cmd: git diff --check => exit 0 (line-ending warnings only) | 补齐 MediaPipe/YOLO26 模型档元数据、默认代理下载、YOLO 手动安装错误、安装版 sidecar YOLO runtime 排除边界和前端展示；更新 change.md。 |
