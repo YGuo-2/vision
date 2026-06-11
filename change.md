@@ -1,3 +1,27 @@
+## 2026-06-11: T-009 保持 MediaPipe 正式评分和 full tech_eval 默认边界
+
+### 问题描述
+
+T-007/T-008 已接入 YOLO realtime preview 与 YOLO26L 离线 high_quality body-only 路由后，
+需要回归确认正式评分、完整技术评估和手指指标冲突场景仍停留在 MediaPipe 生产路径；
+YOLO body_core 结果不得进入 full tech_eval、规则评分正式成绩或对外 pass/fail 判定。
+
+### 修改内容
+
+- 本任务按规范定位为回归门：复核 `core/backend_router.py` 中 formal score / full tech_eval 分支，
+  `enableHands=false` 时仍返回 MediaPipe pose-only partial，并通过 `skippedCapabilities=fingers`
+  标注手指指标跳过，不启用 hand landmarker，也不路由到 YOLO。
+- 复核 `analysis/tech_eval.py` 与 `core/rule_scoring.py` 现有结构化状态测试覆盖：
+  full tech_eval 主链路后端保持 MediaPipe，COCO17/YOLO 缺失能力只进入 skipped/missing_landmarks，
+  不贡献正式扣分或合格/不合格判定。
+- 未发现 YOLO 可进入正式评分或 full tech_eval 的缺口，因此未新增业务代码守卫，避免扰动
+  MediaPipe `pose33_v3` golden 行为。
+
+### 验证方法
+
+- `.\.venv\Scripts\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py tests/test_tech_eval_contract.py tests/test_rule_availability.py -q`
+  → 49 passed
+
 ## 2026-06-11: T-008 接入 YOLO26L 离线高质量 body-only 分析路径
 
 ### 问题描述
