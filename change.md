@@ -1,3 +1,38 @@
+## 2026-06-11: T-008 接入 YOLO26L 离线高质量 body-only 分析路径
+
+### 问题描述
+
+T-001/T-003 已经规定 `enableHands=false` + `qualityProfile=high_quality` + YOLO26L 可用时必须选择
+YOLO26L 离线高质量 body-only 路由；但 `analysis.run` 运行时还没有真正执行该内部分析路径，
+batch/benchmark 侧显式 YOLO body_core 入口也仍容易沿用旧实验默认模型名，导致 YOLO26L 任务边界
+只停留在路由 metadata，缺少可复现执行证据。
+
+### 修改内容
+
+- `apps/ui_backend.py` 为 `TemplateAnalysisService` 增加 YOLO body_core 内部分析分支：
+  high_quality body-only YOLO 路由只返回 `bodyCoreAnalysis`，不生成 `compare` 或 `techEval`；
+  payload 固定标识 `backend=yolo`、`rawLayout=pose33_like_coco17`、`featureLayout=body_core_v1`、
+  `calibrationStatus=unvalidated`、`scoreAuthorized=false`、`displayScope=internal` 和 `score=null`。
+- 默认 YOLO26L 分析调用 `core.body_core_compare.extract_body_core_features()`，模型档映射到
+  `models/yolo26l-pose.pt`；YOLO26L 缺失/安装版不支持时继续由 router 返回
+  `yolo26l_unavailable` 结构化错误，不静默回退 MediaPipe。
+- `core/body_core_compare.py` 新增 `DEFAULT_YOLO26L_MODEL_NAME`，`batch/backend_options.py` 和
+  `batch/batch_dual_compare.py` 的显式 YOLO body_core batch 默认使用 YOLO26L，同时保持
+  `score_authorized=False` 与 `display_scope=internal`。
+- `analysis/bench_annotate_fps.py` 的未显式 `--yolo-model` 默认改为 `models/yolo26l-pose.pt`，
+  便于离线高质量 body-only 分析性能复核与任务路由一致。
+- `tests/test_batch_backend_args.py` 和 `tests/test_s3_calibration.py` 增加 T-008 契约测试，覆盖
+  UI 成功路径、缺模型结构化错误、batch 默认 YOLO26L 和 benchmark 默认模型。
+
+### 验证方法
+
+- `.\.venv\Scripts\python.exe -m pytest tests/test_body_core_layout.py tests/test_batch_backend_args.py tests/test_s3_calibration.py -q`
+  → 40 passed
+- `.\.venv\Scripts\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q`
+  → 31 passed
+- `git diff --check`
+  → 退出码 0（仅 Windows 换行提示，无空白错误）
+
 ## 2026-06-11: T-007 接入 YOLO26n/s 实时 body-only 预览路径
 
 ### 问题描述

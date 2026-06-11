@@ -330,19 +330,33 @@ def _run_body_core_batch(*, args, backend: str, front_video: Path, side_video: P
     if backend == BACKEND_YOLO and args.rules:
         print("YOLO body_core_v1 不支持规则评分；本批次仅输出调试/标定分数。")
 
+    yolo_model_name = None
+    if backend == BACKEND_YOLO:
+        from core.body_core_compare import DEFAULT_YOLO26L_MODEL_NAME
+        from core.paths import models_dir
+
+        yolo_model_name = DEFAULT_YOLO26L_MODEL_NAME
+        yolo_model = models_dir() / DEFAULT_YOLO26L_MODEL_NAME
+    else:
+        yolo_model = None
+
     front_tpl = create_body_core_template(
         front_video,
         backend=backend,
         pose_variant=args.pose,
         out_path=out_dir / "templates" / f"standard_front_{backend}_{FEATURE_LAYOUT_BODY_CORE}.npz",
+        yolo_model=yolo_model,
     )
     side_tpl = create_body_core_template(
         side_video,
         backend=backend,
         pose_variant=args.pose,
         out_path=out_dir / "templates" / f"standard_side_{backend}_{FEATURE_LAYOUT_BODY_CORE}.npz",
+        yolo_model=yolo_model,
     )
     template_meta = _load_npz_meta(front_tpl)
+    if yolo_model_name:
+        template_meta.setdefault("model_name", yolo_model_name)
     batch_meta = meta_for_backend(backend, template_meta, pose_variant=args.pose)
 
     student_videos = sorted([p for p in student_dir.iterdir() if p.is_file() and p.suffix.lower() in {".mp4", ".mov", ".avi"}])
@@ -359,6 +373,7 @@ def _run_body_core_batch(*, args, backend: str, front_video: Path, side_video: P
                 backend=backend,
                 pose_variant=args.pose,
                 reject_multi_person=False,
+                yolo_model=yolo_model,
             )
             side_res = match_body_core_template(
                 side_tpl,
@@ -366,6 +381,7 @@ def _run_body_core_batch(*, args, backend: str, front_video: Path, side_video: P
                 backend=backend,
                 pose_variant=args.pose,
                 reject_multi_person=False,
+                yolo_model=yolo_model,
             )
             row = _body_core_row(v, front_res, side_res, meta=batch_meta)
             rows.append(row)

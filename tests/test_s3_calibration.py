@@ -36,6 +36,7 @@ from core.yolo_adapter import (  # noqa: E402
     DEFAULT_YOLO_VALID_CONF_THR,
     YOLO_CALIBRATION_STATUS,
 )
+from analysis import bench_annotate_fps  # noqa: E402
 
 CALIB_BASELINE = 1.2826
 CALIB_YOLO_CONF_THR = 0.6
@@ -62,6 +63,10 @@ def test_yolo_valid_conf_thr_calibrated():
     assert DEFAULT_YOLO_VALID_CONF_THR == CALIB_YOLO_CONF_THR
     # 占位 0.5 已移除（YOLO 侧不再等于 MediaPipe 的 0.5）。
     assert DEFAULT_YOLO_VALID_CONF_THR != 0.5
+
+
+def test_offline_benchmark_default_model_is_yolo26l(tmp_path):
+    assert bench_annotate_fps._default_yolo_model_path(tmp_path) == tmp_path / "yolo26l-pose.pt"
 
 
 # --------------------------------------------------------------------------- #

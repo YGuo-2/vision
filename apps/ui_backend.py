@@ -606,6 +606,7 @@ class TemplateAnalysisService:
         evaluate_detail: Callable[..., Any] | None = None,
         evaluate_assets: Callable[..., Any] | None = None,
         export_debug: Callable[..., Path] | None = None,
+        body_core_analysis: Callable[..., tuple[Any, float, JsonDict]] | None = None,
     ) -> None:
         self._job_manager = job_manager
         self._create_template = create_template or _default_create_template
@@ -613,6 +614,7 @@ class TemplateAnalysisService:
         self._evaluate_detail = evaluate_detail or _default_evaluate_detail
         self._evaluate_assets = evaluate_assets or _default_evaluate_assets
         self._export_debug = export_debug or _default_export_debug
+        self._body_core_analysis = body_core_analysis or _default_body_core_analysis
 
     @property
     def manager(self) -> BridgeJobManager:
@@ -711,6 +713,16 @@ class TemplateAnalysisService:
             ctx.progress("analysis.status", payload)
             return _to_jsonable(payload)
 
+        if _is_yolo_body_analysis_route(options):
+            if ctx.stopped():
+                return finish()
+            ctx.progress(
+                "analysis.progress",
+                {"stage": "YOLO26L body-only 内部分析中", "done": 0, "total": 0, "percent": None},
+            )
+            payload["bodyCoreAnalysis"] = self._run_body_core_analysis(options)
+            return finish()
+
         if options.do_compare:
             if not options.template_path:
                 raise ValueError("templatePath is required when doCompare is true")
@@ -738,6 +750,22 @@ class TemplateAnalysisService:
             payload["techEval"] = self._run_tech_eval(options)
 
         return finish()
+
+    def _run_body_core_analysis(self, options: AnalysisRunOptions) -> JsonDict:
+        route = options.backend_route or {}
+        features, fps, meta = self._body_core_analysis(
+            options.video_path,
+            backend=BACKEND_YOLO,
+            pose_variant=options.pose_variant,
+            model_profile=str(route.get("modelProfile") or "yolo26l"),
+        )
+        return _body_core_analysis_payload(
+            video_path=options.video_path,
+            route=route,
+            features=features,
+            fps=fps,
+            meta=meta,
+        )
 
     def _run_tech_eval(self, options: AnalysisRunOptions) -> JsonDict:
         video = Path(options.video_path)
@@ -1878,6 +1906,14 @@ def _default_export_debug(*args: Any, **kwargs: Any) -> Path:
     return export_debug_video(*args, **kwargs)
 
 
+def _default_body_core_analysis(*args: Any, model_profile: str = "yolo26l", **kwargs: Any) -> tuple[Any, float, JsonDict]:
+    from core.body_core_compare import extract_body_core_features
+    from core.paths import models_dir
+
+    yolo_model = models_dir() / _yolo_model_name_for_profile(model_profile)
+    return extract_body_core_features(*args, yolo_model=yolo_model, **kwargs)
+
+
 def _default_model_specs() -> tuple[Any, ...]:
     from core.model_manager import MODEL_SPECS
 
@@ -2055,6 +2091,55 @@ def _compare_result_payload(result: Any) -> JsonDict:
             f"匹配片段：帧 {start_frame}..{end_frame}  "
             f"时间 {start_frame / fps:.2f}s ~ {end_frame / fps:.2f}s"
         ),
+    }
+    return _to_jsonable(payload)
+
+
+def _is_yolo_body_analysis_route(options: AnalysisRunOptions) -> bool:
+    route = options.backend_route or {}
+    return (
+        str(route.get("backend") or "").lower() == BACKEND_YOLO
+        and str(route.get("featureLayout") or route.get("feature_layout") or "") == "body_core_v1"
+        and str(route.get("displayScope") or route.get("display_scope") or "") == "internal"
+        and not bool(options.do_tech_eval)
+        and not bool(options.do_compare)
+    )
+
+
+def _body_core_analysis_payload(
+    *,
+    video_path: str,
+    route: JsonDict,
+    features: Any,
+    fps: float,
+    meta: JsonDict,
+) -> JsonDict:
+    shape = tuple(int(v) for v in getattr(features, "shape", ()) or ())
+    frame_count = int(shape[0]) if shape else int(meta.get("frame_count") or 0)
+    valid_ratio = meta.get("body_core_valid_frame_ratio")
+    payload: JsonDict = {
+        "videoPath": str(video_path),
+        "backend": BACKEND_YOLO,
+        "requestedBackend": str(route.get("requestedBackend") or route.get("requested_backend") or BACKEND_YOLO),
+        "modelProfile": str(route.get("modelProfile") or route.get("model_profile") or "yolo26l"),
+        "modelName": str(meta.get("model_name") or _yolo_model_name_for_profile(str(route.get("modelProfile") or "yolo26l"))),
+        "rawLayout": str(route.get("rawLayout") or route.get("raw_layout") or meta.get("raw_layout") or "pose33_like_coco17"),
+        "featureLayout": "body_core_v1",
+        "capability": "body_only",
+        "calibrationStatus": "unvalidated",
+        "scoreAuthorized": False,
+        "displayScope": "internal",
+        "evalCompleteness": str(route.get("evalCompleteness") or route.get("eval_completeness") or "body_only"),
+        "frameCount": frame_count,
+        "fps": float(fps),
+        "featureShape": list(shape),
+        "validFrameRatio": None if valid_ratio in (None, "") else float(valid_ratio),
+        "multiPersonDetected": bool(meta.get("multi_person_detected", False)),
+        "personCount": int(meta.get("max_persons", meta.get("person_count", 0)) or 0),
+        "reviewRequired": bool(meta.get("review_required", False)),
+        "targetPolicy": str(route.get("targetPolicy") or route.get("target_policy") or ""),
+        "calibrationNote": str(meta.get("calibration_note") or ""),
+        "score": None,
     }
     return _to_jsonable(payload)
 

@@ -29,6 +29,7 @@ os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 os.environ.setdefault("GLOG_minloglevel", "3")
 
 from core.paths import models_dir as repo_models_dir  # noqa: E402
+from core.body_core_compare import DEFAULT_YOLO26L_MODEL_NAME  # noqa: E402
 from core.vision_pipeline import MediaPipePipeline, PipelineConfig  # noqa: E402
 from core.yolo_adapter import (  # noqa: E402
     BODY_CORE_V1_VALID_INDICES,
@@ -195,6 +196,10 @@ def _infer_yolo_delegate(model_path: Path) -> str:
     if suffix == ".engine":
         return "tensorrt"
     return "pytorch"
+
+
+def _default_yolo_model_path(models_dir: Path) -> Path:
+    return Path(models_dir) / DEFAULT_YOLO26L_MODEL_NAME
 
 
 def _default_cases(
@@ -839,7 +844,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--samples", default="docs/yolo_eval_samples.json")
     parser.add_argument("--asset-root", default=None, help="Root for ignored local videos when samples paths are relative")
     parser.add_argument("--models-dir", default=None)
-    parser.add_argument("--yolo-model", default=None)
+    parser.add_argument(
+        "--yolo-model",
+        default=None,
+        help=f"YOLO model path (default: models/{DEFAULT_YOLO26L_MODEL_NAME})",
+    )
     parser.add_argument("--pose-variant", default="full", choices=["lite", "full", "heavy"])
     parser.add_argument("--device", default="cuda", help="YOLO device, e.g. cuda, 0, cpu")
     parser.add_argument("--yolo-delegate", default=None, help="Optional benchmark label, e.g. pytorch, onnxruntime, tensorrt")
@@ -869,7 +878,7 @@ def main(argv: list[str] | None = None) -> int:
     asset_root = Path(args.asset_root).resolve() if args.asset_root else None
     samples = load_samples(Path(args.samples), asset_root=asset_root)
     models_dir = Path(args.models_dir).resolve() if args.models_dir else repo_models_dir()
-    yolo_model = Path(args.yolo_model).resolve() if args.yolo_model else models_dir / "yolo11n-pose.pt"
+    yolo_model = Path(args.yolo_model).resolve() if args.yolo_model else _default_yolo_model_path(models_dir)
     yolo_delegate = str(args.yolo_delegate) if args.yolo_delegate else _infer_yolo_delegate(yolo_model)
     bench_cases = _default_cases(
         args.device,

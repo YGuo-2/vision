@@ -15,6 +15,7 @@ from core.backend_router import (
     validate_backend_layout,
     yolo_metadata,
 )
+from core.body_core_compare import DEFAULT_YOLO26L_MODEL_NAME
 
 BATCH_META_FIELDS: tuple[str, ...] = (
     "backend",
@@ -61,6 +62,8 @@ def is_default_pose33_path(backend: str, feature_layout: str) -> bool:
 
 
 def yolo_batch_meta(source_meta: dict[str, Any] | None = None) -> dict[str, Any]:
+    source_meta = dict(source_meta or {})
+    source_meta.setdefault("model_name", DEFAULT_YOLO26L_MODEL_NAME)
     return yolo_metadata(source_meta)
 
 

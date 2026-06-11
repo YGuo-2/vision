@@ -3,9 +3,9 @@
 > **功能名称:** Vue/Tauri 高速帧通道与 MediaPipe/YOLO 后端路由架构
 > **关联规范:** `docs/specs/design.md` · `docs/specs/requirements.md`
 > **状态:** In Progress
-> **当前任务:** T-008
-> **进度:** 7 / 10 已完成
-> **最后更新:** 2026-06-11 15:28:06
+> **当前任务:** T-009
+> **进度:** 8 / 10 已完成
+> **最后更新:** 2026-06-11 15:48:36
 
 ---
 
@@ -129,11 +129,13 @@
   - 验证标准: 无手部实时预览在 YOLO26n/s 可用时必须选择 YOLO26n/s；模型不可用或安装版不支持时必须回退 MediaPipe 并输出 `fallbackReason/requestedBackend` 与 UI fallback 提示；实时多人时沿用 `core/yolo_adapter.py` 既有 `select_main_person` 最大框/最高分策略，只渲染 primary target，输出 `multiPersonDetected/personCount/reviewRequired/targetPolicy`；完整 track 延续/中心最近/tie-break 策略本期不做；需要手部或缺失关键点时回退 MediaPipe 或 partial，不得启用 YOLO。
   - 预估工程量: 4-6 小时
 
-- [ ] **T-008:** 接入 YOLO26L 离线高质量 body-only 分析路径
-  - 状态: pending
+- [x] **T-008:** 接入 YOLO26L 离线高质量 body-only 分析路径
+  - 状态: done
+  - 验证证据: cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_body_core_layout.py tests/test_batch_backend_args.py tests/test_s3_calibration.py -q => exit 0, 40 passed; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q => exit 0, 31 passed; cmd: git diff --check => exit 0 (line-ending warnings only)
+  - 完成时间: 2026-06-11 15:48:36
+  - 备注: 接入 analysis.run YOLO26L high_quality body-only 内部分析 payload；batch/benchmark 默认 YOLO body_core 模型收敛到 yolo26l-pose.pt；保持 scoreAuthorized=false、calibration_status=unvalidated、displayScope=internal；更新 change.md。
   - 涉及文件: `apps/ui_backend.py`, `batch/batch_dual_compare.py`, `analysis/bench_annotate_fps.py`, `tests/test_body_core_layout.py`, `tests/test_batch_backend_args.py`, `tests/test_s3_calibration.py`
   - 验证命令: `.\.venv\Scripts\python.exe -m pytest tests/test_body_core_layout.py tests/test_batch_backend_args.py tests/test_s3_calibration.py -q`
-  - 验证证据: pending
   - 依赖: T-002, T-003
   - 风险: high
   - 覆盖: REQ-002, REQ-003, REQ-008, AC-002.3, AC-002.8, AC-008.1, NFR-003
@@ -212,3 +214,4 @@
 | T-006 | 2026-06-11 14:54:00 | b795674 | cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_ui_backend_sessions.py tests/test_ui_backend_contract.py -q => exit 0, 24 passed; cmd: npm --prefix frontend run test => exit 0, Frontend behavior smoke checks passed; cmd: git diff --check => exit 0 (line-ending warnings only) | 统一 session/model download/analysis 主动停止和晚到事件清理；job.stop 缺失/未知 jobId 结构化错误测试；更新 change.md。 |
 | T-003 | 2026-06-11 15:13:21 | 7a1390e | cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_ui_backend_models.py tests/test_windows_packaging_smoke.py -q => exit 0, 20 passed; cmd: npm --prefix frontend run test => exit 0, Frontend behavior smoke checks passed; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q => exit 0, 31 passed; cmd: git diff --check => exit 0 (line-ending warnings only) | 补齐 MediaPipe/YOLO26 模型档元数据、默认代理下载、YOLO 手动安装错误、安装版 sidecar YOLO runtime 排除边界和前端展示；更新 change.md。 |
 | T-007 | 2026-06-11 15:28:06 | 38474bf | cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_backend_routing_contract.py tests/test_yolo_backend_contract.py -q => exit 0, 33 passed; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q => exit 0, 31 passed; cmd: git diff --check => exit 0 (line-ending warnings only) | 接入 YOLO26n/s realtime body-only preview pipeline；session.frame 透传 YOLO 授权/多人 meta；保持 MediaPipe 旧默认路径和正式评分边界；更新 change.md。 |
+| T-008 | 2026-06-11 15:48:36 | 2e5051e | cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_body_core_layout.py tests/test_batch_backend_args.py tests/test_s3_calibration.py -q => exit 0, 40 passed; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q => exit 0, 31 passed; cmd: git diff --check => exit 0 (line-ending warnings only) | 接入 analysis.run YOLO26L high_quality body-only 内部分析 payload；batch/benchmark 默认 YOLO body_core 模型收敛到 yolo26l-pose.pt；保持 scoreAuthorized=false、calibration_status=unvalidated、displayScope=internal；更新 change.md。 |

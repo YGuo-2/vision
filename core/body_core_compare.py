@@ -56,6 +56,7 @@ BODY_CORE_CALIBRATION_NOTE: str = (
 # 支持的后端。YOLO 只允许 body_core_v1（在本模块内强制）。
 BACKEND_MEDIAPIPE = "mediapipe"
 BACKEND_YOLO = "yolo"
+DEFAULT_YOLO26L_MODEL_NAME = "yolo26l-pose.pt"
 
 
 class MultiPersonReviewRequiredError(RuntimeError):
