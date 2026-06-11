@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
   type BridgeEnvelope,
   type CameraEntry,
@@ -20,6 +20,7 @@ import {
   shouldApplyModelDownloadStartResponse,
   shouldApplySessionStartResponse,
   shouldRenderPreviewFrameAt,
+  sessionStartFailureState,
   sessionStatusFromJobEvent
 } from "./bridge-state";
 
@@ -187,11 +188,50 @@ const techIndicatorRows = computed<TechIndicatorRow[]>(() => {
 
 let unlisten: (() => void) | undefined;
 let lastPreviewFrameAt = 0;
-const PREVIEW_FRAME_MIN_INTERVAL_MS = 100;
+// 上限保护:仅在后端异常突发时限速,正常 30fps(帧间隔 ~33ms)不受影响。
+// 取 16ms(~60fps 上限)而非 33ms,避免与 30fps 帧到达相位抖动导致周期性丢帧。
+const PREVIEW_FRAME_MIN_INTERVAL_MS = 16;
+
+// 后台预热 MediaPipe pipeline，使点击「开始」时模型已就绪、首帧更快出现。
+// 失败静默：预热只是优化，失败时正常流程会退回懒加载路径。
+async function warmupPipeline(): Promise<void> {
+  try {
+    const response = await sendBridgeCommand("session.warmup", {
+      poseVariant: poseVariant.value,
+      enableHands: enableHands.value
+    });
+    if (!response.ok) {
+      statusText.value = `预热未完成：${response.error?.message ?? "开始时加载模型"}`;
+    }
+  } catch (error) {
+    statusText.value = `预热未完成：${errorMessage(error, "开始时加载模型")}`;
+  }
+}
 
 onMounted(async () => {
-  unlisten = await listenBridgeEvents(handleBridgeEvent);
-  await Promise.all([refreshCameras(), refreshModels()]);
+  try {
+    unlisten = await listenBridgeEvents(handleBridgeEvent);
+  } catch (error) {
+    errorText.value = errorMessage(error, "bridge 事件监听失败");
+    return;
+  }
+  void refreshCameras().catch((error) => {
+    errorText.value = errorMessage(error, "刷新摄像头失败");
+  });
+  void refreshModels()
+    .catch((error) => {
+      errorText.value = errorMessage(error, "刷新模型状态失败");
+    })
+    .finally(() => {
+      void warmupPipeline();
+    });
+});
+
+// pose 变体或手部开关变化时，缓存键失效，重新预热以匹配新配置。
+watch([poseVariant, enableHands], () => {
+  if (!isRunning.value) {
+    void warmupPipeline();
+  }
 });
 
 onBeforeUnmount(() => {
@@ -298,6 +338,8 @@ async function startSession(): Promise<void> {
   fpsText.value = "--";
   progressText.value = initialSessionProgressText();
   previewImage.value = "";
+  frameIndex.value = 0;
+  lastPreviewFrameAt = Number.NEGATIVE_INFINITY;
   const pendingSessionId = nextBridgeId("session");
   const pendingJobId = nextBridgeId("session-job");
   sessionId.value = pendingSessionId;
@@ -320,10 +362,12 @@ async function startSession(): Promise<void> {
   });
   setRawJson(response);
   if (!response.ok) {
-    statusText.value = "启动失败";
-    sessionId.value = undefined;
-    jobId.value = undefined;
-    errorText.value = response.error?.message ?? "启动失败";
+    const failure = sessionStartFailureState(response.error?.message);
+    statusText.value = failure.statusText;
+    isRunning.value = failure.isRunning;
+    sessionId.value = failure.sessionId;
+    jobId.value = failure.sessionJobId;
+    errorText.value = failure.errorText;
     return;
   }
   if (!shouldApplySessionStartResponse({ sessionId: sessionId.value, sessionJobId: jobId.value }, pendingSessionId, pendingJobId)) {
@@ -643,6 +687,14 @@ function nextBridgeId(prefix: string): string {
 
 function isJsonRecord(value: unknown): value is JsonRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function errorMessage(error: unknown, fallback: string): string {
+  if (error instanceof Error && error.message.trim()) {
+    return error.message;
+  }
+  const text = String(error ?? "").trim();
+  return text || fallback;
 }
 
 function formatScore(value: unknown): string {

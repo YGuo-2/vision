@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -143,7 +144,7 @@ def test_camera_list_command_uses_camera_enumerator(monkeypatch: pytest.MonkeyPa
     ]
 
 
-def test_session_start_emits_frame_events_and_releases_resources() -> None:
+def test_session_start_emits_frame_events_and_releases_capture() -> None:
     events: list[dict] = []
     manager = ui_backend.BridgeJobManager(events.append)
     cap = FakeCapture([{"frame": 1}, {"frame": 2}, {"frame": 3}])
@@ -180,9 +181,9 @@ def test_session_start_emits_frame_events_and_releases_resources() -> None:
         assert final.result["state"] == "completed"
         assert final.result["frames"] == 2
         assert cap.released is True
-        assert pipe.closed is True
+        assert pipe.closed is False
         frame_events = [event for event in events if event["event"] == "session.frame"]
-        assert len(frame_events) == 2
+        assert frame_events
         assert frame_events[0]["payload"]["actions"] == ["V_SIGN", "SQUAT"]
         assert frame_events[0]["payload"]["actionsZh"] == ["✌（V 手势）", "下蹲"]
         assert frame_events[0]["payload"]["image"].startswith("data:image/jpeg;base64,")
@@ -241,10 +242,80 @@ def test_session_stop_by_session_id_requests_running_job_stop() -> None:
         assert final.status == "stopped"
         assert final.result["state"] == "stopped"
         assert cap.released is True
-        assert pipe.closed is True
+        assert pipe.closed is False
         assert any(event["event"] == "job.stopped" for event in events)
     finally:
         release.set()
+        ui_backend.DEFAULT_PREVIEW_SERVICE = previous
+
+
+def test_camera_preview_drops_stale_frames_when_inference_is_slow() -> None:
+    events: list[dict] = []
+    manager = ui_backend.BridgeJobManager(events.append)
+
+    class CoordinatedBurstCapture(FakeCapture):
+        def __init__(self, *, frame_count: int) -> None:
+            super().__init__([], opened=True)
+            self.frame_count = frame_count
+            self.next_frame = 0
+            self.allow_burst = threading.Event()
+            self.props[ui_backend.CAP_PROP_FRAME_COUNT] = 0.0
+
+        def read(self):
+            self.read_count += 1
+            if self.next_frame == 0:
+                self.next_frame = 1
+                return True, {"frame": self.next_frame}
+            assert self.allow_burst.wait(1.0)
+            if self.next_frame >= self.frame_count:
+                return False, None
+            self.next_frame += 1
+            return True, {"frame": self.next_frame}
+
+    cap = CoordinatedBurstCapture(frame_count=20)
+
+    class SlowFirstFramePipeline(FakePipeline):
+        def __init__(self) -> None:
+            super().__init__(["HANDS_UP"])
+            self.seen_frames: list[int] = []
+
+        def annotate(self, frame, *, timestamp_ms: int | None = None):
+            self.seen_frames.append(int(frame["frame"]))
+            if len(self.seen_frames) == 1:
+                cap.allow_burst.set()
+                time.sleep(0.08)
+            return super().annotate(frame, timestamp_ms=timestamp_ms)
+
+    pipe = SlowFirstFramePipeline()
+    service = ui_backend.PreviewSessionService(
+        job_manager=manager,
+        capture_factory=lambda source: cap,
+        pipeline_factory=lambda options: pipe,
+        frame_encoder=lambda frame: "data:image/jpeg;base64,realtime-frame",
+    )
+    previous = _install_preview_service(service)
+    try:
+        response = ui_backend.handle_command(
+            ui_backend.CommandRequest(
+                command="session.start",
+                request_id="req-realtime",
+                session_id="session-realtime",
+                payload={"source": "0", "frameLimit": 2},
+            )
+        )
+        assert response["ok"] is True
+
+        final = manager.wait(response["jobId"], 2.0)
+
+        assert final is not None
+        assert final.status == "succeeded"
+        assert final.result["frames"] == 2
+        assert final.result["capturedFrames"] == 20
+        assert final.result["droppedFrames"] > 0
+        assert pipe.seen_frames == [1, 20]
+        frame_events = [event for event in events if event["event"] == "session.frame"]
+        assert frame_events[0]["payload"]["sourceFrameIndex"] == 1
+    finally:
         ui_backend.DEFAULT_PREVIEW_SERVICE = previous
 
 

@@ -12,10 +12,57 @@ export type ModelDownloadSummary = {
   failed: JsonRecord[];
 };
 
+export type BridgeFailureRequest = {
+  command: string;
+  requestId: string;
+  jobId?: string | null;
+  sessionId?: string | null;
+};
+
+export type SessionStartFailureSummary = {
+  statusText: string;
+  isRunning: false;
+  sessionId: undefined;
+  sessionJobId: undefined;
+  errorText: string;
+};
+
 const JOB_SCOPED_STATUS_EVENTS = new Set(["analysis.status", "template.status", "model.status"]);
 
 export function initialSessionProgressText(): string {
   return "等待帧";
+}
+
+export function sessionStartFailureState(message?: string | null): SessionStartFailureSummary {
+  const errorText = message?.trim() || "启动失败";
+  return {
+    statusText: "启动失败",
+    isRunning: false,
+    sessionId: undefined,
+    sessionJobId: undefined,
+    errorText
+  };
+}
+
+export function bridgeCommandFailureResponse<TPayload extends JsonRecord = JsonRecord>(
+  request: BridgeFailureRequest,
+  error: unknown
+): BridgeEnvelope<TPayload> {
+  const message = errorMessage(error);
+  return {
+    type: "response",
+    requestId: request.requestId,
+    ok: false,
+    jobId: request.jobId ?? null,
+    sessionId: request.sessionId ?? null,
+    payload: {} as TPayload,
+    error: {
+      code: "bridge_command_failed",
+      message,
+      detail: { command: request.command }
+    },
+    timestamp: new Date().toISOString()
+  };
 }
 
 export function isBridgeEventForCurrentState(event: BridgeEnvelope, state: CurrentBridgeState): boolean {
@@ -159,4 +206,12 @@ function formatFailedModels(failed: JsonRecord[]): string {
       return `${key} ${error}`;
     })
     .join("；");
+}
+
+function errorMessage(error: unknown): string {
+  if (error instanceof Error && error.message.trim()) {
+    return error.message;
+  }
+  const text = String(error ?? "").trim();
+  return text || "bridge command failed";
 }

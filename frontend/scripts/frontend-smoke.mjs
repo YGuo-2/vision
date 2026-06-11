@@ -74,6 +74,18 @@ assert(
   !app.includes(':disabled="model.installed || Boolean(modelDownloadJobId)"'),
   "installed models must remain downloadable for redownload"
 );
+assert(
+  !app.includes("await Promise.all([refreshCameras(), refreshModels()])"),
+  "startup must not block first render on camera enumeration and model status"
+);
+for (const marker of [
+  "void refreshCameras().catch",
+  "void refreshModels()",
+  ".finally(() =>",
+  "void warmupPipeline();"
+]) {
+  assertIncludes(app, marker, "App.vue startup flow");
+}
 
 for (const handler of [
   "startSession",
@@ -108,6 +120,8 @@ for (const marker of [
   "shouldApplyModelDownloadStartResponse",
   "shouldApplySessionStartResponse",
   "shouldRenderPreviewFrameAt",
+  "bridgeCommandFailureResponse",
+  "sessionStartFailureState",
   "JOB_SCOPED_STATUS_EVENTS"
 ]) {
   assertIncludes(bridgeStateSource, marker, "bridge-state.ts");
@@ -338,6 +352,30 @@ if (bridgeState.shouldApplyModelDownloadStartResponse({ modelDownloadJobId: guar
 assert(
   guardedModelDownloadStatus === "已取消",
   "early model download stop must keep stopped status after late start response"
+);
+
+const failedBridgeResponse = bridgeState.bridgeCommandFailureResponse(
+  { command: "session.start", requestId: "req-timeout", jobId: "job-session", sessionId: "session-current" },
+  new Error("bridge response timeout for req-timeout")
+);
+assert(failedBridgeResponse.ok === false, "invoke failure must become an ok=false bridge envelope");
+assert(failedBridgeResponse.requestId === "req-timeout", "invoke failure envelope must keep requestId");
+assert(failedBridgeResponse.jobId === "job-session", "invoke failure envelope must keep jobId");
+assert(failedBridgeResponse.sessionId === "session-current", "invoke failure envelope must keep sessionId");
+assert(failedBridgeResponse.error.code === "bridge_command_failed", "invoke failure envelope must expose bridge error code");
+assert(failedBridgeResponse.error.message.includes("bridge response timeout"), "invoke failure envelope must keep timeout message");
+assert(failedBridgeResponse.error.detail.command === "session.start", "invoke failure envelope must keep command detail");
+
+const failedStartState = bridgeState.sessionStartFailureState(failedBridgeResponse.error.message);
+assert(failedStartState.statusText === "启动失败", "failed session.start must show failed status");
+assert(failedStartState.isRunning === false, "failed session.start must clear running state");
+assert(failedStartState.sessionId === undefined, "failed session.start must clear pending session id");
+assert(failedStartState.sessionJobId === undefined, "failed session.start must clear pending job id");
+assert(failedStartState.errorText.includes("bridge response timeout"), "failed session.start must show bridge timeout");
+
+assert(
+  bridgeState.shouldRenderPreviewFrameAt(1, Number.NEGATIVE_INFINITY, 100) === true,
+  "first session.frame after a new session must render immediately"
 );
 
 let lastPreviewFrameAt = 1000;

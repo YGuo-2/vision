@@ -1,12 +1,12 @@
 schema_version: 1
-workflow: bugfix
+workflow: design-first
 mode: strict
-approval: approved
+approval: pending
 risk_level: high
-current_task: n/a
-last_checkpoint: 2026-06-10 03:38:01
-artifacts: bugfix.md, design.md, tasks.md, progress.md, spec.yml
-requirements: AC-005, AC-006, AC-008, BUG-001, BUG-002, BUG-003, BUG-004, BUG-005, BUG-006, FIX-001, FIX-002, FIX-003, FIX-004, FIX-005, FIX-006, NFR-002, NFR-005, SAFE-001, SAFE-002, SAFE-003, SAFE-004
-task_ids: B-001, B-002, B-003, B-004, B-005, B-006, B-007, B-008, B-009, B-010, B-011, B-012, B-013, B-014, B-015, B-016, B-017, B-018, B-019, B-020, B-021, B-022, B-023, B-024, B-025
-task_graph: B-001, B-001->B-002, B-002->B-003, B-003->B-004, B-002->B-005, B-002->B-006, B-003->B-007, B-004->B-007, B-005->B-007, B-006->B-007, B-007->B-008, B-008->B-009, B-009->B-010, B-010->B-011, B-011->B-012, B-012->B-013, B-013->B-014, B-014->B-015, B-015->B-016, B-016->B-017, B-017->B-018, B-018->B-019, B-019->B-020, B-020->B-021, B-021->B-022, B-022->B-023, B-023->B-024, B-024->B-025
-artifact_hashes: bugfix.md=dd884f948cce, design.md=dcfb30d2a498
+current_task: T-001
+last_checkpoint: 2026-06-11 12:49:54
+artifacts: design.md, requirements.md, tasks.md, progress.md, spec.yml
+requirements: AC-001.1, AC-001.2, AC-002.1, AC-002.2, AC-002.3, AC-002.4, AC-002.5, AC-002.6, AC-002.7, AC-002.8, AC-003.1, AC-003.2, AC-003.3, AC-003.4, AC-003.5, AC-003.6, AC-004.1, AC-004.2, AC-004.3, AC-005.1, AC-005.2, AC-005.3, AC-006.1, AC-006.2, AC-007.1, AC-007.2, AC-007.3, AC-008.1, AC-008.2, AC-008.3, NFR-001, NFR-002, NFR-003, NFR-004, NFR-005, NFR-006, REQ-001, REQ-002, REQ-003, REQ-004, REQ-005, REQ-006, REQ-007, REQ-008
+task_ids: T-001, T-002, T-003, T-004, T-005, T-006, T-007, T-008, T-009, T-010
+task_graph: T-001, T-001->T-002, T-001->T-003, T-001->T-004, T-004->T-005, T-004->T-006, T-002->T-007, T-003->T-007, T-004->T-007, T-002->T-008, T-003->T-008, T-007->T-009, T-008->T-009, T-005->T-010, T-006->T-010, T-007->T-010, T-008->T-010, T-009->T-010
+artifact_hashes: design.md=4ae5aba35aea, requirements.md=f379926d88c7

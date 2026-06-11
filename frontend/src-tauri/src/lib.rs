@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::env;
 use std::ffi::c_void;
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Write};
@@ -7,11 +8,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, State};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
+#[cfg(not(debug_assertions))]
 const BRIDGE_SIDECAR_NAME: &str = "vision-ui-backend.exe";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -180,7 +182,10 @@ fn pick_windows_directory() -> Option<String> {
         return None;
     }
 
-    let len = path.iter().position(|item| *item == 0).unwrap_or(path.len());
+    let len = path
+        .iter()
+        .position(|item| *item == 0)
+        .unwrap_or(path.len());
     if len == 0 {
         None
     } else {
@@ -259,6 +264,9 @@ fn start_bridge_process(app: AppHandle) -> Result<BridgeProcess, String> {
     command
         .args(&launch.args)
         .current_dir(&launch.cwd)
+        .env("PYTHONPATH", python_path_env(&repo_root))
+        .env("PYTHONUTF8", "1")
+        .env("PYTHONIOENCODING", "utf-8")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -362,12 +370,21 @@ fn bridge_launch(app: &AppHandle, repo_root: &Path) -> BridgeLaunch {
 }
 
 fn packaged_bridge_executable(app: &AppHandle) -> Option<PathBuf> {
-    let resource_dir = app.path().resource_dir().ok()?;
-    let candidate = resource_dir.join(BRIDGE_SIDECAR_NAME);
-    if candidate.exists() {
-        Some(candidate)
-    } else {
-        None
+    #[cfg(debug_assertions)]
+    {
+        let _ = app;
+        return None;
+    }
+
+    #[cfg(not(debug_assertions))]
+    {
+        let resource_dir = app.path().resource_dir().ok()?;
+        let candidate = resource_dir.join(BRIDGE_SIDECAR_NAME);
+        if candidate.exists() {
+            Some(candidate)
+        } else {
+            None
+        }
     }
 }
 
@@ -386,6 +403,14 @@ fn python_executable(repo_root: &Path) -> PathBuf {
         return venv_python;
     }
     PathBuf::from("python")
+}
+
+fn python_path_env(repo_root: &Path) -> OsString {
+    let mut paths = vec![repo_root.to_path_buf()];
+    if let Some(existing) = env::var_os("PYTHONPATH") {
+        paths.extend(env::split_paths(&existing));
+    }
+    env::join_paths(paths).unwrap_or_else(|_| repo_root.as_os_str().to_os_string())
 }
 
 pub fn run() {

@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +20,10 @@ import time
 import traceback
 from uuid import uuid4
 from typing import Any, Callable
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from apps.camera_enum import DEFAULT_SCAN_LIMIT, CameraEntry, InputSourceState, enumerate_cameras
 
@@ -51,6 +56,13 @@ CAP_PROP_FPS = 5
 CAP_PROP_FRAME_COUNT = 7
 
 
+# 预览帧瘦身参数（仅影响送往前端的副本，不影响录制原画质）。
+PREVIEW_JPEG_QUALITY = 70
+PREVIEW_MAX_EDGE = 960
+PREVIEW_FRAME_EVENT_MIN_INTERVAL_S = 1.0 / 30.0
+PREVIEW_CAPTURE_IDLE_SLEEP_S = 0.001
+
+
 COMMANDS: dict[str, JsonDict] = {
     "bridge.ping": {
         "description": "Return bridge liveness and protocol version.",
@@ -71,6 +83,11 @@ COMMANDS: dict[str, JsonDict] = {
     },
     "session.start": {
         "description": "Start realtime camera or offline video preview.",
+        "long_running": True,
+        "stoppable": True,
+    },
+    "session.warmup": {
+        "description": "Pre-build and cache the MediaPipe pipeline for faster session start.",
         "long_running": True,
         "stoppable": True,
     },
@@ -309,6 +326,26 @@ class BridgeJobManager:
         return self.get(job_id)
 
 
+class BridgeMessageWriter:
+    """Serialize bridge JSON lines shared by the main thread and job threads."""
+
+    def __init__(self, stream: Any) -> None:
+        self._stream = stream
+        self._lock = threading.Lock()
+
+    def write(self, message: JsonDict) -> None:
+        self.write_encoded(encode_message(message))
+
+    def write_encoded(self, encoded: str) -> None:
+        line = encoded.rstrip("\r\n")
+        with self._lock:
+            self._stream.write(line)
+            self._stream.write("\n")
+            flush = getattr(self._stream, "flush", None)
+            if flush is not None:
+                flush()
+
+
 @dataclass(frozen=True)
 class PreviewSessionOptions:
     source: str
@@ -338,6 +375,58 @@ class ActivePreviewSession:
     recorder: Any
     emit: Callable[[str, JsonDict], None]
     last_record_error: str | None = None
+
+
+@dataclass(frozen=True)
+class _CapturedPreviewFrame:
+    index: int
+    frame: Any
+    captured_at: float
+
+
+class _LatestPreviewFrameBuffer:
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self._latest: _CapturedPreviewFrame | None = None
+        self._closed = False
+        self._captured = 0
+        self._dropped = 0
+
+    def put(self, item: _CapturedPreviewFrame) -> None:
+        with self._condition:
+            if self._latest is not None:
+                self._dropped += 1
+            self._latest = item
+            self._captured += 1
+            self._condition.notify()
+
+    def get_latest(self, *, timeout: float) -> _CapturedPreviewFrame | None:
+        with self._condition:
+            if self._latest is None and not self._closed:
+                self._condition.wait(timeout)
+            if self._latest is None:
+                return None
+            item = self._latest
+            self._latest = None
+            return item
+
+    def close(self) -> None:
+        with self._condition:
+            self._closed = True
+            self._condition.notify_all()
+
+    @property
+    def closed(self) -> bool:
+        with self._condition:
+            return self._closed
+
+    def snapshot(self) -> JsonDict:
+        with self._condition:
+            return {
+                "capturedFrames": self._captured,
+                "droppedFrames": self._dropped,
+                "hasPendingFrame": self._latest is not None,
+            }
 
 
 @dataclass(frozen=True)
@@ -726,10 +815,90 @@ class PreviewSessionService:
         self._monotonic = monotonic or time.monotonic
         self._sessions_lock = threading.Lock()
         self._sessions: dict[str, ActivePreviewSession] = {}
+        # 预热缓存：按配置键复用 MediaPipe pipeline，避免每次「开始」重建模型。
+        # 仅摄像头会话复用（其时间戳基于单调时钟，跨会话单调递增）；视频文件不缓存复用，
+        # 因其时间戳按 frame_index 计算，跨文件会回退，违反 VIDEO 模式时间戳单调约束。
+        self._pipeline_cache_lock = threading.Lock()
+        self._pipeline_cache: dict[tuple[str, bool], Any] = {}
 
     @property
     def manager(self) -> BridgeJobManager:
         return self._job_manager or DEFAULT_JOB_MANAGER
+
+    @staticmethod
+    def _pipeline_cache_key(options: PreviewSessionOptions) -> tuple[str, bool]:
+        return (options.pose_variant, bool(options.enable_hands))
+
+    def _acquire_pipeline(self, options: PreviewSessionOptions) -> tuple[Any, bool]:
+        """返回 (pipeline, cached)。摄像头命中缓存则复用；否则新建。
+
+        cached=True 表示该实例归缓存所有，会话结束时不得关闭它。
+        """
+        if options.source_kind == "camera":
+            key = self._pipeline_cache_key(options)
+            with self._pipeline_cache_lock:
+                pipe = self._pipeline_cache.get(key)
+                if pipe is not None:
+                    return pipe, True
+            pipe = self._pipeline_factory(options)
+            with self._pipeline_cache_lock:
+                existing = self._pipeline_cache.get(key)
+                if existing is not None:
+                    # 并发预热/启动竞争：丢弃本次新建，复用已入缓存实例。
+                    _close_quietly(pipe)
+                    return existing, True
+                self._pipeline_cache[key] = pipe
+            return pipe, True
+        # 视频文件：每次新建独立实例，会话结束时关闭。
+        return self._pipeline_factory(options), False
+
+    def warmup(self, request: CommandRequest) -> JsonDict:
+        """后台预建并缓存 MediaPipe pipeline，使后续「开始」命中缓存、首帧更快。"""
+        try:
+            pose_variant = str(
+                request.payload.get("poseVariant") or request.payload.get("pose_variant") or "full"
+            ).strip().lower()
+            if pose_variant not in {"lite", "full", "heavy"}:
+                raise ValueError("poseVariant must be one of: lite, full, heavy")
+            enable_hands = _payload_bool(
+                request.payload.get("enableHands", request.payload.get("enable_hands")), default=True
+            )
+        except ValueError as exc:
+            return make_response(
+                request.request_id,
+                ok=False,
+                error=BridgeError("bad_request", str(exc), {"command": request.command}),
+            )
+
+        warmup_options = PreviewSessionOptions(
+            source="0",
+            source_kind="camera",
+            pose_variant=pose_variant,
+            enable_hands=enable_hands,
+        )
+
+        def _run(ctx: JobContext) -> JsonDict:
+            self._acquire_pipeline(warmup_options)
+            return {"state": "ready", "poseVariant": pose_variant, "enableHands": enable_hands}
+
+        record = self.manager.submit(
+            "session.warmup",
+            {"poseVariant": pose_variant, "enableHands": enable_hands},
+            _run,
+            request_id=request.request_id,
+            job_id=request.job_id,
+        )
+        return make_response(
+            request.request_id,
+            ok=True,
+            payload={
+                "state": "warming",
+                "jobId": record.job_id,
+                "poseVariant": pose_variant,
+                "enableHands": enable_hands,
+            },
+            job_id=record.job_id,
+        )
 
     def start(self, request: CommandRequest) -> JsonDict:
         try:
@@ -865,6 +1034,7 @@ class PreviewSessionService:
         options = normalize_session_options(ctx.payload)
         cap = None
         pipe = None
+        pipe_cached = False
         recorder = self._recording_factory(options)
         frame_count = 0
         total = 0
@@ -899,7 +1069,7 @@ class PreviewSessionService:
             )
             self._register_active_session(active)
 
-            pipe = self._pipeline_factory(options)
+            pipe, pipe_cached = self._acquire_pipeline(options)
             started_at = self._monotonic()
             ctx.progress(
                 "session.status",
@@ -913,58 +1083,52 @@ class PreviewSessionService:
                 },
             )
 
-            while not ctx.stopped():
-                ok, frame = cap.read()
-                if not ok:
-                    break
-
-                timestamp_ms = _next_timestamp_ms(
-                    pipe,
-                    is_file=is_file,
+            realtime_stats: JsonDict = {}
+            if is_file:
+                frame_count = self._run_sequential_preview_loop(
+                    ctx=ctx,
+                    options=options,
+                    cap=cap,
+                    pipe=pipe,
+                    recorder=recorder,
+                    active=active,
+                    width=width,
+                    height=height,
                     fps_for_ts=fps_for_ts,
-                    frame_index=frame_count,
+                    total=total,
                     started_at=started_at,
-                    monotonic=self._monotonic,
                 )
-                annotated, actions = pipe.annotate(frame, timestamp_ms=timestamp_ms)
-                frame_count += 1
-
-                elapsed = self._monotonic() - started_at
-                fps = frame_count / max(1e-6, elapsed)
-                actions_zh = [ACTION_LABELS_ZH.get(str(action), str(action)) for action in actions]
-                frame_width, frame_height = _frame_size(annotated, fallback=(width, height))
-                frame_payload: JsonDict = {
-                    "image": self._frame_encoder(annotated),
-                    "actions": list(actions),
-                    "actionsZh": actions_zh,
-                    "actionsText": ", ".join(actions_zh) if actions_zh else "-",
-                    "frameIndex": frame_count,
-                    "fps": fps,
-                    "progress": _progress_payload(frame_count, total),
-                    "size": {"width": frame_width, "height": frame_height},
-                }
-                ctx.progress("session.frame", frame_payload)
-                recorder.write_frame(annotated)
-                self._emit_recording_error_if_needed(active)
-
-                if total > 0 and (frame_count % 5 == 0 or frame_count == total):
-                    ctx.progress("session.progress", _progress_payload(frame_count, total))
-
-                if options.frame_limit is not None and frame_count >= options.frame_limit:
-                    break
+            else:
+                frame_count, realtime_stats = self._run_realtime_camera_loop(
+                    ctx=ctx,
+                    options=options,
+                    cap=cap,
+                    pipe=pipe,
+                    recorder=recorder,
+                    active=active,
+                    width=width,
+                    height=height,
+                    fps_for_ts=fps_for_ts,
+                    total=total,
+                    started_at=started_at,
+                )
 
             state = "stopped" if ctx.stopped() else "completed"
+            status_payload: JsonDict = {"state": state, "frames": frame_count, "totalFrames": total}
+            status_payload.update(realtime_stats)
             ctx.progress(
                 "session.status",
-                {"state": state, "frames": frame_count, "totalFrames": total},
+                status_payload,
             )
-            return {
+            result: JsonDict = {
                 "state": state,
                 "frames": frame_count,
                 "totalFrames": total,
                 "source": options.source,
                 "sourceKind": options.source_kind,
             }
+            result.update(realtime_stats)
+            return result
         finally:
             result_path = None
             try:
@@ -980,8 +1144,184 @@ class PreviewSessionService:
                     result_path=result_path,
                 ),
             )
-            _close_quietly(pipe)
+            if not pipe_cached:
+                _close_quietly(pipe)
             _release_quietly(cap)
+
+    def _run_sequential_preview_loop(
+        self,
+        *,
+        ctx: JobContext,
+        options: PreviewSessionOptions,
+        cap: Any,
+        pipe: Any,
+        recorder: Any,
+        active: ActivePreviewSession,
+        width: int,
+        height: int,
+        fps_for_ts: float,
+        total: int,
+        started_at: float,
+    ) -> int:
+        frame_count = 0
+        while not ctx.stopped():
+            ok, frame = cap.read()
+            if not ok:
+                break
+
+            timestamp_ms = _next_timestamp_ms(
+                pipe,
+                is_file=True,
+                fps_for_ts=fps_for_ts,
+                frame_index=frame_count,
+                started_at=started_at,
+                monotonic=self._monotonic,
+            )
+            annotated, actions = pipe.annotate(frame, timestamp_ms=timestamp_ms)
+            frame_count += 1
+            self._emit_preview_frame(
+                ctx=ctx,
+                annotated=annotated,
+                actions=actions,
+                frame_count=frame_count,
+                total=total,
+                width=width,
+                height=height,
+                started_at=started_at,
+            )
+            recorder.write_frame(annotated)
+            self._emit_recording_error_if_needed(active)
+
+            if total > 0 and (frame_count % 5 == 0 or frame_count == total):
+                ctx.progress("session.progress", _progress_payload(frame_count, total))
+
+            if options.frame_limit is not None and frame_count >= options.frame_limit:
+                break
+        return frame_count
+
+    def _run_realtime_camera_loop(
+        self,
+        *,
+        ctx: JobContext,
+        options: PreviewSessionOptions,
+        cap: Any,
+        pipe: Any,
+        recorder: Any,
+        active: ActivePreviewSession,
+        width: int,
+        height: int,
+        fps_for_ts: float,
+        total: int,
+        started_at: float,
+    ) -> tuple[int, JsonDict]:
+        buffer = _LatestPreviewFrameBuffer()
+        capture_stop = threading.Event()
+        capture_errors: list[BaseException] = []
+
+        def _capture_latest() -> None:
+            source_index = 0
+            try:
+                while not capture_stop.is_set() and not ctx.stopped():
+                    ok, frame = cap.read()
+                    if not ok:
+                        break
+                    source_index += 1
+                    buffer.put(
+                        _CapturedPreviewFrame(
+                            index=source_index,
+                            frame=frame,
+                            captured_at=self._monotonic(),
+                        )
+                    )
+                    time.sleep(PREVIEW_CAPTURE_IDLE_SLEEP_S)
+            except BaseException as exc:  # noqa: BLE001 - surface capture failures through the job envelope.
+                capture_errors.append(exc)
+            finally:
+                buffer.close()
+
+        capture_thread = threading.Thread(target=_capture_latest, name=f"preview-capture-{ctx.job_id}", daemon=True)
+        capture_thread.start()
+
+        frame_count = 0
+        last_frame_event_at: float | None = None
+        try:
+            while not ctx.stopped():
+                item = buffer.get_latest(timeout=0.05)
+                if item is None:
+                    if buffer.closed:
+                        break
+                    continue
+
+                timestamp_ms = _next_timestamp_ms(
+                    pipe,
+                    is_file=False,
+                    fps_for_ts=fps_for_ts,
+                    frame_index=frame_count,
+                    started_at=started_at,
+                    monotonic=self._monotonic,
+                )
+                annotated, actions = pipe.annotate(item.frame, timestamp_ms=timestamp_ms)
+                frame_count += 1
+
+                now = self._monotonic()
+                if last_frame_event_at is None or now - last_frame_event_at >= PREVIEW_FRAME_EVENT_MIN_INTERVAL_S:
+                    self._emit_preview_frame(
+                        ctx=ctx,
+                        annotated=annotated,
+                        actions=actions,
+                        frame_count=frame_count,
+                        total=total,
+                        width=width,
+                        height=height,
+                        started_at=started_at,
+                        extra_payload={"sourceFrameIndex": item.index},
+                    )
+                    last_frame_event_at = now
+
+                recorder.write_frame(annotated)
+                self._emit_recording_error_if_needed(active)
+
+                if options.frame_limit is not None and frame_count >= options.frame_limit:
+                    break
+
+            if capture_errors and not ctx.stopped():
+                raise RuntimeError(f"摄像头采集失败：{capture_errors[0]}")
+            return frame_count, buffer.snapshot()
+        finally:
+            capture_stop.set()
+            buffer.close()
+            capture_thread.join(timeout=1.0)
+
+    def _emit_preview_frame(
+        self,
+        *,
+        ctx: JobContext,
+        annotated: Any,
+        actions: list[str],
+        frame_count: int,
+        total: int,
+        width: int,
+        height: int,
+        started_at: float,
+        extra_payload: JsonDict | None = None,
+    ) -> None:
+        elapsed = self._monotonic() - started_at
+        fps = frame_count / max(1e-6, elapsed)
+        actions_zh = [ACTION_LABELS_ZH.get(str(action), str(action)) for action in actions]
+        frame_width, frame_height = _frame_size(annotated, fallback=(width, height))
+        frame_payload: JsonDict = {
+            "image": self._frame_encoder(annotated),
+            "actions": list(actions),
+            "actionsZh": actions_zh,
+            "actionsText": ", ".join(actions_zh) if actions_zh else "-",
+            "frameIndex": frame_count,
+            "fps": fps,
+            "progress": _progress_payload(frame_count, total),
+            "size": {"width": frame_width, "height": frame_height},
+        }
+        if extra_payload:
+            frame_payload.update(extra_payload)
+        ctx.progress("session.frame", frame_payload)
 
     def _active_from_request(self, request: CommandRequest) -> ActivePreviewSession | None:
         session_id = str(request.payload.get("sessionId") or request.session_id or "").strip()
@@ -1420,7 +1760,19 @@ def _to_jsonable(value: Any) -> Any:
 def _default_frame_encoder(frame: Any) -> str:
     import cv2
 
-    ok, encoded = cv2.imencode(".jpg", frame)
+    # 预览帧瘦身:仅作用于送往前端的副本，不影响录制（recorder 写的是原始 annotated）。
+    # 下采样长边到 PREVIEW_MAX_EDGE 并降低 JPEG 质量，显著减小单帧体积与 stdout/IPC 压力。
+    preview = frame
+    shape = getattr(frame, "shape", None)
+    if shape is not None and len(shape) >= 2:
+        height, width = int(shape[0]), int(shape[1])
+        longest = max(height, width)
+        if longest > PREVIEW_MAX_EDGE:
+            scale = PREVIEW_MAX_EDGE / float(longest)
+            new_size = (max(1, int(width * scale)), max(1, int(height * scale)))
+            preview = cv2.resize(frame, new_size, interpolation=cv2.INTER_AREA)
+
+    ok, encoded = cv2.imencode(".jpg", preview, [cv2.IMWRITE_JPEG_QUALITY, PREVIEW_JPEG_QUALITY])
     if not ok:
         raise RuntimeError("无法编码预览帧")
     return "data:image/jpeg;base64," + base64.b64encode(encoded.tobytes()).decode("ascii")
@@ -1624,6 +1976,7 @@ def handle_command(request: CommandRequest) -> JsonDict:
         "bridge.ping": _handle_ping,
         "camera.list": _handle_camera_list,
         "session.start": _handle_session_start,
+        "session.warmup": _handle_session_warmup,
         "session.stop": _handle_session_stop,
         "record.toggle": _handle_record_toggle,
         "record.stop": _handle_record_stop,
@@ -1679,6 +2032,10 @@ def _camera_entry_payload(entry: CameraEntry) -> JsonDict:
 
 def _handle_session_start(request: CommandRequest) -> JsonDict:
     return DEFAULT_PREVIEW_SERVICE.start(request)
+
+
+def _handle_session_warmup(request: CommandRequest) -> JsonDict:
+    return DEFAULT_PREVIEW_SERVICE.warmup(request)
 
 
 def _handle_session_stop(request: CommandRequest) -> JsonDict:
@@ -1758,13 +2115,18 @@ def main() -> int:
     import sys
 
     global DEFAULT_JOB_MANAGER
-    DEFAULT_JOB_MANAGER = BridgeJobManager(lambda message: print(encode_message(message), flush=True))
+    protocol_stdout = sys.stdout
+    writer = BridgeMessageWriter(protocol_stdout)
+    # Keep any third-party or legacy diagnostic print() calls away from the
+    # stdout JSONL protocol. Tauri reads stdout line-by-line as bridge messages.
+    sys.stdout = sys.stderr
+    DEFAULT_JOB_MANAGER = BridgeJobManager(writer.write)
 
     for line in sys.stdin:
         line = line.strip()
         if not line:
             continue
-        print(handle_line(line), flush=True)
+        writer.write_encoded(handle_line(line))
     return 0
 
 

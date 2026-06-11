@@ -1,3 +1,131 @@
+## 2026-06-10: 修复 Web/Tauri 预览串线、积压追帧与首屏阻塞
+
+### 问题描述
+
+Web/Tauri 桌面端在打开和点击“开始”后仍可能出现卡顿、灰屏无响应、bridge response timeout / decode_error，
+以及预览画面从旧帧高速追到实时画面的现象。进一步确认不是 Tauri 与 Python 后端“不兼容”，而是三类工程问题叠加：
+
+- Python bridge 的后台 job event 与主线程 response 可能并发写 stdout，Tauri 按行解析时会遇到拼接 JSON。
+- 摄像头预览按“读一帧、推理一帧、编码一帧、发送一帧”的顺序模型运行，下游慢时旧帧排队，恢复后表现为快进追帧。
+- `onMounted` 等待摄像头枚举与模型状态刷新完成后才继续启动优化流程，慢摄像头探测会拖住首屏可交互状态。
+
+### 修改内容
+
+- **Bridge transport 串行化**（`apps/ui_backend.py`）：新增 `BridgeMessageWriter`，主线程 response 与后台 job event 共用同一个写锁输出 JSONL；`main()` 捕获协议 stdout 后将普通 `print`/第三方诊断输出重定向到 stderr，保证 stdout 只承载一行一个 JSON bridge 消息。
+- **摄像头实时预览 backpressure**（`apps/ui_backend.py`）：视频源保留顺序处理；摄像头源改为采集线程持续覆盖 `_LatestPreviewFrameBuffer` 最新帧，推理/编码侧只取最新可用帧，并对 `session.frame` 做后端发送频率上限保护。首帧仍然是 `annotate()` 后的识别帧，不改成原始未识别帧；录制仍写 annotated 帧。
+- **首屏启动解耦**（`frontend/src/App.vue`）：挂载 bridge 事件监听后立即返回渲染流程，`refreshCameras()` / `refreshModels()` 改为后台执行；模型状态刷新后再触发 `session.warmup`，失败只更新状态，不产生未处理 rejection。
+- **回归覆盖**（`tests/test_ui_backend_contract.py`、`tests/test_ui_backend_sessions.py`、`frontend/scripts/frontend-smoke.mjs`）：新增并发 event/response JSONL 写入测试、慢推理高 FPS 假摄像头丢旧帧测试、首屏不再等待 `Promise.all([refreshCameras(), refreshModels()])` 的前端 smoke。
+
+### 验证方法
+
+- `.\.venv\Scripts\python.exe -m pytest tests/test_ui_backend_contract.py tests/test_ui_backend_sessions.py tests/test_windows_packaging_smoke.py -q` → 28 passed
+- `npm --prefix frontend run test` → Frontend behavior smoke checks passed
+- `npm --prefix frontend run build` → passed
+- `npm run verify:desktop` → frontend build、frontend smoke、Tauri cargo check、Python compile smoke、122 desktop regression tests passed
+- `.\.venv\Scripts\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q` → 31 passed
+
+## 2026-06-10: Web 前端预览性能优化（对齐 Tkinter 流畅度与启动速度）
+
+### 问题描述
+
+前端从 Tkinter 迁移到 Vue + Tauri 后出现两处体验回退：
+1. 预览卡顿——同样 30fps 下 Web 端明显比 Tkinter 卡。
+2. 启动慢——点击「开始」后要等较久才出现首帧。
+
+根因定位：
+- 卡顿主因是前端硬节流 `PREVIEW_FRAME_MIN_INTERVAL_MS = 100`（最多 10fps），后端发 30fps 也只画 10fps。
+- 延迟主因是预览帧体积过大：`_default_frame_encoder` 用 OpenCV 默认 JPEG 质量 95，1280×720 单帧 50–100KB，base64 后更大，整帧走 stdout → Rust → Tauri，下游一慢即阻塞、旧帧排队累积延迟。
+- 启动慢主因是 MediaPipe pipeline 在点「开始」后才同步创建，首帧前要等模型初始化数秒。
+
+### 修改内容
+
+- **前端节流放开**（`frontend/src/App.vue`）：`PREVIEW_FRAME_MIN_INTERVAL_MS` 100 → 16（~60fps 上限），对 30fps 源不再限速；取 16 而非 33，避免与 30fps 帧到达相位抖动导致周期性丢帧。仅作上限保护。
+- **预览帧瘦身**（`apps/ui_backend.py` `_default_frame_encoder`）：新增模块常量 `PREVIEW_JPEG_QUALITY = 70`、`PREVIEW_MAX_EDGE = 960`；编码前对长边超 960 的帧用 `INTER_AREA` 下采样，并以质量 70 编码 JPEG。仅作用于送往前端的副本，**不影响录制原画质**（recorder 写的是原始 annotated）。
+- **pipeline 预热与缓存复用**（`apps/ui_backend.py`）：`PreviewSessionService` 新增按 `(pose_variant, enable_hands)` 缓存的 pipeline；`_acquire_pipeline()` 对摄像头会话命中缓存则复用，会话结束时不关闭缓存实例（`run()` 的 finally 按 `pipe_cached` 跳过 `_close_quietly`）。视频文件不缓存复用（其时间戳按 frame_index 计算，跨文件回退会违反 VIDEO 模式时间戳单调约束）。新增 `session.warmup` 命令（`COMMANDS` / `handlers` / `_handle_session_warmup` / `PreviewSessionService.warmup` 四处接线），在后台 job 内预建 pipeline 入缓存。
+- **前端触发预热**（`frontend/src/App.vue`）：`onMounted` 完成后触发一次 `session.warmup`；`poseVariant`/`enableHands` 变化且未运行时重新预热；预热失败静默，退回懒加载路径。
+
+### 验证方法
+
+- `npm run verify:frontend` → built（vue-tsc 类型检查通过）
+- `npm --prefix frontend run test` → Frontend behavior smoke checks passed
+- `pytest tests/test_ui_backend_contract.py tests/test_vue_tauri_acceptance_gaps.py tests/test_windows_packaging_smoke.py` → 26 passed
+- `pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py` → 31 passed（MediaPipe 旧路径未漂移）
+- 端到端手测（30fps 外接摄像头）：界面就绪后即后台预热，点「开始」首帧明显更快；预览帧率接近 30fps、延迟下降；录制导出仍为原分辨率/画质；切换 pose 变体后再开始正常（缓存按变体失效并重新预热）。
+
+## 2026-06-10: 简化 Vue/Tauri 桌面端启动命令
+
+### 问题描述
+
+Vue/Tauri 开发启动需要先临时补 Cargo PATH，再执行 `npm --prefix frontend run tauri dev`，
+每次手动输入较长，容易忘记或输错。
+
+### 修改内容
+
+- 根目录 `package.json` 新增 `npm run dev:desktop`，一条命令启动 Vue/Tauri 桌面端。
+- 新增 `scripts/start-tauri-dev.ps1`，自动切到仓库根目录、补 `~\.cargo\bin` 到 PATH，
+  再运行 `npm --prefix frontend run tauri dev`。
+- 新增根目录 `start-desktop-dev.cmd`，可双击启动；失败时保留窗口并显示退出码。
+- 启动脚本支持 dry-run：`scripts/start-tauri-dev.ps1 -DryRun`、`start-desktop-dev.cmd --dry-run`
+  或 `npm run dev:desktop -- -DryRun`。
+
+### 验证方法
+
+- `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-tauri-dev.ps1 -DryRun` → passed
+- `cmd /c start-desktop-dev.cmd --dry-run` → passed
+- `npm run dev:desktop -- -DryRun` → passed
+
+## 2026-06-10: 修复 Tauri bridge 启动超时导致开始后长时间无预览
+
+### 问题描述
+
+Vue/Tauri 主窗口点击“开始”后，前端可能长时间等不到首个预览画面。排查发现模型文件已存在，
+真正的阻塞点是 Python sidecar 在某些启动路径下缺少仓库根目录 `PYTHONPATH`，直接运行
+`apps/ui_backend.py` 会报 `ModuleNotFoundError: No module named 'apps'` 并退出；Tauri 端因此一直等待
+bridge response，直到 30 秒超时，前端还会出现 unhandled rejection。
+
+### 修改内容
+
+- 在 `apps/ui_backend.py` 导入 `apps.camera_enum` 前主动把仓库根目录加入 `sys.path`，让 sidecar
+  直接以脚本方式启动时也能解析项目包。
+- 保留 Tauri dev 启动时设置 `PYTHONPATH` / `PYTHONUTF8` / `PYTHONIOENCODING` 的现有保护。
+- 在前端 bridge 中将 Tauri `invoke` 异常转换为统一 `ok=false` response envelope，保留
+  `requestId/jobId/sessionId` 和原始错误信息，避免 Vue native handler unhandled rejection。
+- 抽出 `sessionStartFailureState()`，让 `session.start` 失败时稳定清理 pending `sessionId/jobId`、
+  复位运行态并显示“启动失败”。
+- 新会话开始时重置预览帧节流计时，保证第一条有效 `session.frame` 不会被节流丢弃。
+- 补充 sidecar 无 `PYTHONPATH` 启动 smoke、bridge invoke 失败 envelope、启动失败状态清理和首帧
+  立即渲染的前端行为回归。
+
+### 验证方法
+
+- `npm --prefix frontend run test` → Frontend behavior smoke checks passed
+- `npm --prefix frontend run build` → passed
+- `.\.venv\Scripts\python.exe -m pytest tests/test_windows_packaging_smoke.py tests/test_vue_tauri_acceptance_gaps.py -q` → 15 passed
+- `npm run verify:desktop` → frontend build、frontend smoke、Tauri cargo check、Python compile smoke、120 desktop regression tests passed
+
+## 2026-06-10: 补齐当前 docs commit `7a45669` 的 active 证据链
+
+### 问题描述
+
+首轮最终验收复验时，`B-012+B-013` 仍指出当前 docs-only 提交 `7a45669` 没有进入 active 证据链，
+导致 `docs/specs/progress.md` 的 Last Known Commit 仍停留在 `7d44b21`，复查者无法稳定重建当前文档状态。
+
+### 修改内容
+
+- 将 `docs/specs/progress.md` 的 Last Known Commit 更新为 `7a45669`，并同步刷新 checkpoint。
+- 在 `docs/specs/tasks.md` 中追加 B-026，补入当前 docs commit 的证据链收口说明、波次、风险和完成日志。
+- 在 `docs/specs/spec.yml` 中把 task_ids / task_graph 扩展到 B-026，确保机器索引与任务清单一致。
+- 记录这次 docs-only 收口，避免后续复验继续看到旧的 moving-range 证据。
+
+### 验证方法
+
+- `.\.venv\Scripts\python.exe C:\Users\ny\.codex\plugins\cache\Useful-marketplace\spce-workflow\0.2.0\scripts\validate_spec.py docs\specs --resume`
+- `.\.venv\Scripts\python.exe C:\Users\ny\.codex\plugins\cache\Useful-marketplace\spce-workflow\0.2.0\scripts\validate_spec.py docs\specs --pre-acceptance`
+- `rg -n -- "7a45669" docs\specs change.md`
+- `powershell -NoProfile -Command "$patterns = @('5526945' + '..HEAD', 'pending' + ' commit', '当前实现' + '提交', '- ' + '[ ]'); foreach ($p in $patterns) { rg --fixed-strings $p docs\specs README.md AGENTS.md change.md }"`
+- `npm --prefix frontend run test`
+- `pytest tests\test_windows_packaging_smoke.py -q`
+
 ## 2026-06-09: 修复 Vue/Tauri 迁移最终验收缺口
 
 ### 问题描述
@@ -2053,3 +2181,125 @@ Status_Area 固定保留在控制区底部，并补充录制状态/路径显示�
 - 全量测试：`.\.venv\Scripts\python.exe -m pytest tests/test_recording_controller.py tests/test_clamp_workers.py tests/test_app_controls.py tests/test_layout_structure.py tests/test_error_handling.py -q`
   → 27 passed, 1 skipped（布局测试在无显示环境下跳过）。
 - 真实窗口的最小尺寸/滚动/端到端预览与录制写盘为冒烟/人工验证项。
+
+## 2026-06-10: Vue/Tauri 前端 dev 启动链路修复
+
+### 问题描述
+
+Vue/Tauri 窗口可编译启动，但首次 mounted 自动刷新会遇到 Tauri v2 事件权限缺失、
+debug 模式误用旧打包 sidecar、Python bridge 导入路径/Windows stdout 编码不稳定等问题，
+导致前端可能走 mock fallback 或出现 `event.listen not allowed` / `bridge response timeout`。
+
+### 修改内容
+
+- 新增 `frontend/src-tauri/capabilities/default.json`，为主窗口声明 `core:default`、
+  `core:event:default` 与 `core:event:allow-listen`。
+- `frontend/src/bridge.ts` 改用 `@tauri-apps/api/core` 的 `isTauri()` 判断真实 Tauri 运行时。
+- `frontend/src-tauri/src/lib.rs`：
+  - debug 构建下优先使用源码 bridge，避免 dev 模式误用旧 PyInstaller sidecar；
+  - 启动 Python bridge 时注入 `PYTHONPATH`、`PYTHONUTF8=1`、`PYTHONIOENCODING=utf-8`，
+    保证 `apps.ui_backend` 可导入且中文 JSON 响应按 UTF-8 进入 Rust reader。
+
+### 验证方法
+
+- `npm --prefix frontend run build`：通过。
+- `cargo check`（`frontend/src-tauri`）：通过。
+- `npm --prefix frontend run tauri dev`：已启动，窗口标题为 `Vision 动作识别与评分`。
+- mounted 自动刷新后日志未再出现 `not allowed`、`Unhandled`、`bridge response timeout`；
+  真实 Python bridge 进程由 Tauri 窗口拉起：`.venv\Scripts\python.exe -u apps\ui_backend.py`。
+
+## 2026-06-11: Vue/Tauri 高速帧通道与 MediaPipe/YOLO 后端路由 Spce 规范
+
+### 问题描述
+
+基于新的架构讨论，需要先按 Spce workflow 生成可审查规范，而不是直接进入实现。讨论结论涉及
+Vue 前端、Tauri/Rust 桌面壳、Python MediaPipe 后端、YOLO body-only 后端、二进制预览帧通道、
+模型分档、任务取消状态机、打包安装和评分授权边界，是跨模块高风险改造。
+
+### 修改内容
+
+- 新建 Design-First 规范主文档：
+  - `docs/specs/design.md`：固化四层职责、后端路由规则、JSON bridge 与二进制 latest-frame
+    通道边界、MediaPipe/full tech_eval 可信路径、YOLO body-only 能力标识、sidecar 打包风险和
+    三阶段演进路线。
+  - `docs/specs/requirements.md`：从设计派生 REQ-001 至 REQ-008、AC-001.1 至 AC-008.3、
+    NFR-001 至 NFR-006，并记录 Analyze Requirements 结论。
+  - `docs/specs/tasks.md`：拆分 10 个受控任务，覆盖路由契约、YOLO 元数据、模型清单、
+    二进制帧通道、Canvas 渲染、状态机、YOLO26n/s、YOLO26L、MediaPipe 回归门和打包收口。
+- 通过 Spce 工具生成并同步：
+  - `docs/specs/progress.md`
+  - `docs/specs/spec.yml`
+- 子 agent 只读审查补充的关键边界已写入规范：
+  - 安装版 sidecar 当前排除 `torch`、`ultralytics`、`core.yolo_adapter`，若安装版支持 YOLO
+    必须同步调整依赖和验证。
+  - YOLO raw adapter 的 Pose33-like 容器不等同于 `pose33_v3`，需区分 `rawLayout` 与
+    `featureLayout=body_core_v1`。
+  - Python snake_case 与前端 camelCase 字段必须保持一一映射。
+- 按用户要求开启 5 个只读 agent 分别审查 `design.md`、`requirements.md`、`tasks.md`、
+  `progress.md`、`spec.yml`，并完成审查后文档修正：
+  - `design.md`：统一 YOLO `scoreAuthorized=false` 为布尔授权字段，受限展示改用
+    `displayScope` / `evalScope` / `internalUseOnly`；明确 MediaPipe 与 YOLO 预览帧都走二进制
+    latest-frame 通道；路由输出补齐 `rawLayout`、`featureLayout`、`calibrationStatus`。
+  - `requirements.md`：区分前端/JSON camelCase 与 Python artifact snake_case；补齐
+    `calibrationStatus=unvalidated`、正式评分 / full tech_eval / 必需关键点的 MediaPipe 边界，
+    并阻断 `displayScope=limited` 进入正式报告或 pass/fail 判定。
+  - `tasks.md`：将验证命令改为分步 fail-fast；修正 T-007/T-009 依赖与执行 waves；补齐
+    `AC-001.2`、`AC-008.2`、`AC-008.3` 覆盖字段；把 YOLO landmark mapping 回归纳入 T-002/T-010。
+  - `progress.md` / `spec.yml`：记录 approval=pending、等待 `批准规范，启动执行`、dirty worktree
+    保护说明和五 agent 审查结论，并刷新 Kiro 兼容索引。
+
+### 验证方法
+
+- `.\.venv\Scripts\python.exe C:\Users\ny\.codex\plugins\cache\Useful-marketplace\spce-workflow\0.2.0\scripts\validate_spec.py docs/specs/ --workflow design-first --color never`
+  → 36 项检查全部通过。
+- `.\.venv\Scripts\python.exe C:\Users\ny\.codex\plugins\cache\Useful-marketplace\spce-workflow\0.2.0\scripts\validate_spec.py docs/specs/ --resume --color never`
+  → `status=ready`，`current_task=T-001`，`next_executable=["T-001"]`，无 issues/warnings。
+- `.\.venv\Scripts\python.exe C:\Users\ny\.codex\plugins\cache\Useful-marketplace\spce-workflow\0.2.0\scripts\validate_spec.py docs/specs/ --sync-check --color never`
+  → 无 issues/suggestions。
+
+## 2026-06-11: 补强高速帧通道与 MediaPipe/YOLO 路由 Spce 审查问题
+
+### 问题描述
+
+批准前复审继续指出当前 Spce 文档仍存在若干路由、职责、验证和性能边界不够硬的问题：
+`enableHands=false` 与手指指标冲突未定、路由器落点未固定、batch 后端选择逻辑可能分叉、
+YOLO 可用/不可用路径断言偏弱、实时多人预览未定义、模型管理职责写得过宽、二进制通道方案
+留到实现期才收敛、`displayScope` 等授权字段仍存在“等价字段”空间，以及 T-004/T-009 验证边界不够清晰。
+
+### 修改内容
+
+- `docs/specs/design.md`：
+  - 明确采用 `enableHands=false` 开关优先：不得静默启用 hand landmarker；含手指指标时走
+    MediaPipe pose-only partial，结果标注 `skippedCapabilities`、`evalCompleteness=partial` 和原因。
+  - 固定新增 `core/backend_router.py` 作为唯一后端路由决策点；`apps/ui_backend.py` 与
+    `batch/backend_options.py` 只能调用共享 router，batch 不得反向 import `apps`。
+  - 收敛受限显示字段为单一 `displayScope=limited|internal`，移除 `evalScope` /
+    `internalUseOnly` / “等价字段”空间。
+  - 定死二进制帧通道首选方案为 Python→Rust Windows 命名管道 + Rust→Vue Tauri 自定义协议，
+    回退方案为 latest-frame 原子文件 + Tauri 自定义协议。
+  - 补齐 YOLO 实时多人预览策略、模型不可用回退、Rust/Python 模型职责边界、Tkinter 旧入口不在范围、
+    性能与内存基线阈值。
+- `docs/specs/requirements.md`：
+  - 将 AC-002.2 / AC-002.3 从“可以选择 YOLO”改为“模型可用时必须选择 YOLO26n/s 或 YOLO26L”。
+  - 新增 AC-002.6、AC-002.7、AC-002.8，覆盖手指指标 partial、YOLO 模型不可用回退和实时多人预览。
+  - 新增 AC-003.6，要求 UI bridge、batch CLI 和离线分析统一调用 `core/backend_router.py`。
+  - 新增 AC-004.3、AC-005.3，覆盖性能基线、payload 阈值、内存增长、Canvas/bitmap 迁移行为证明。
+  - 修正 AC-001.1 中 Rust/Python 模型职责：Rust 管资源路径和打包，Python 管清单与下载执行。
+- `docs/specs/tasks.md`：
+  - T-001 增加 `core/backend_router.py` 和 batch 适配，覆盖新增路由 AC。
+  - T-003 改为串行任务，补代理/离线安装提示和模型不可用回退要求。
+  - T-004 增加 `npm run verify:tauri` 与前端 smoke，工程量调整为 8-12 小时。
+  - T-007/T-008 增加模型不可用回退、多人预览和 `displayScope` 验证。
+  - T-009 明确为回归门为主，仅在发现 YOLO 可进入正式评分/full tech_eval 时增加阻断守卫。
+  - 执行规则新增每任务完成必须同步 `change.md`。
+- `docs/specs/progress.md` / `docs/specs/spec.yml`：
+  - 记录本轮批准前补强决策，并刷新 Kiro 兼容索引、requirements 列表和 artifact hash。
+
+### 验证方法
+
+- `.\.venv\Scripts\python.exe C:\Users\ny\.codex\plugins\cache\Useful-marketplace\spce-workflow\0.2.0\scripts\validate_spec.py docs/specs/ --workflow design-first --color never`
+  → 36 项检查全部通过。
+- `.\.venv\Scripts\python.exe C:\Users\ny\.codex\plugins\cache\Useful-marketplace\spce-workflow\0.2.0\scripts\validate_spec.py docs/specs/ --resume --color never`
+  → `status=ready`，`current_task=T-001`，`next_executable=["T-001"]`，无 issues/warnings。
+- `.\.venv\Scripts\python.exe C:\Users\ny\.codex\plugins\cache\Useful-marketplace\spce-workflow\0.2.0\scripts\validate_spec.py docs/specs/ --sync-check --color never`
+  → 无 issues/suggestions。

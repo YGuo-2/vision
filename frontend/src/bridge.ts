@@ -1,5 +1,6 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { bridgeCommandFailureResponse } from "./bridge-state";
 
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 export type JsonRecord = Record<string, JsonValue>;
@@ -48,7 +49,7 @@ export type RecordState = {
 const mockListeners = new Set<(event: BridgeEnvelope) => void>();
 
 export function isTauriRuntime(): boolean {
-  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+  return isTauri();
 }
 
 export async function sendBridgeCommand<TPayload extends JsonRecord = JsonRecord>(
@@ -67,7 +68,11 @@ export async function sendBridgeCommand<TPayload extends JsonRecord = JsonRecord
   if (!isTauriRuntime()) {
     return mockBridgeCommand<TPayload>(request);
   }
-  return invoke<BridgeEnvelope<TPayload>>("bridge_command", { request });
+  try {
+    return await invoke<BridgeEnvelope<TPayload>>("bridge_command", { request });
+  } catch (error) {
+    return bridgeCommandFailureResponse<TPayload>(request, error);
+  }
 }
 
 export async function listenBridgeEvents(callback: (event: BridgeEnvelope) => void): Promise<UnlistenFn> {

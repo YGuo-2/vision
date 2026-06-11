@@ -2,6 +2,7 @@
   "name": "vision-workspace",
   "private": true,
   "scripts": {
+    "dev:desktop": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-tauri-dev.ps1",
     "verify:desktop": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-desktop-stack.ps1",
     "verify:frontend": "npm --prefix frontend run build",
     "verify:tauri": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$env:Path = \\\"$env:USERPROFILE\\.cargo\\bin;$env:Path\\\"; Push-Location frontend/src-tauri; cargo check; Pop-Location\"",

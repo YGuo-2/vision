@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -37,6 +39,9 @@ def test_rust_bridge_prefers_packaged_sidecar_and_keeps_dev_fallback() -> None:
     assert "resource_dir" in source
     assert ".venv" in source
     assert "apps" in source and "ui_backend.py" in source
+    assert 'env("PYTHONPATH", python_path_env(&repo_root))' in source
+    assert 'env("PYTHONUTF8", "1")' in source
+    assert 'env("PYTHONIOENCODING", "utf-8")' in source
     assert "creation_flags(0x08000000)" in source
     assert '"request": ["type", "command", "requestId", "jobId", "sessionId", "payload"]' in source
     assert '"optional": {' in source
@@ -153,3 +158,32 @@ def test_packaged_sidecar_resource_responds_to_bridge_ping_when_present() -> Non
     assert response["ok"] is True
     assert response["payload"]["version"] == ui_backend.BRIDGE_VERSION
     assert "model.download" in response["payload"]["commands"]
+
+
+def test_ui_backend_script_runs_without_pythonpath() -> None:
+    request = {
+        "type": "command",
+        "command": "bridge.ping",
+        "requestId": "req-script-no-pythonpath",
+        "payload": {},
+    }
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+
+    completed = subprocess.run(
+        [sys.executable, "-u", str(ROOT / "apps" / "ui_backend.py")],
+        input=json.dumps(request, ensure_ascii=False) + "\n",
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=15,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "No module named 'apps'" not in completed.stderr
+    response = json.loads(completed.stdout.strip().splitlines()[-1])
+    assert response["requestId"] == "req-script-no-pythonpath"
+    assert response["ok"] is True
+    assert response["payload"]["version"] == ui_backend.BRIDGE_VERSION

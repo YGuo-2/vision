@@ -1,56 +1,37 @@
 # Spce workflow Progress
 
-> **Workflow:** bugfix
+> **Workflow:** design-first
 > **Mode:** strict
-> **Status:** Completed
-> **Current Task:** n/a
-> **Approval:** approved
-> **Last Checkpoint:** 2026-06-10 03:38:01
+> **Status:** Draft
+> **Current Task:** T-001
+> **Approval:** pending
+> **Last Checkpoint:** 2026-06-11 12:49:54
 > **Branch:** main
-> **Last Known Commit:** 7d44b21
+> **Last Known Commit:** 7a45669
 
 ## Resume Summary
-- Goal: 修复 B-024 后首轮复验发现的 sidecar 构建退出码与旧产物缺口
-- Approved specs: bugfix.md, design.md, tasks.md
-- Current task: n/a
-- Next safe action: Run pre-acceptance, then final acceptance.
-- Blockers: n/a
+- Goal: 先审查 Vue/Tauri 高速帧通道与 MediaPipe/YOLO 后端路由 Design-First 规范；批准后从 T-001 后端路由决策契约开始实现。
+- Approved specs: none yet; draft artifacts are design.md, requirements.md, tasks.md
+- Current task: T-001
+- Next safe action: 等待用户回复 `批准规范，启动执行`；批准前不得实现业务代码。
+- Blockers: 等待用户批准规范；当前工作区包含无关既有改动，本轮不得回滚或混入业务实现。
 
 ## Active Task State
-- Task ID: n/a
-- Status: done
+- Task ID: T-001
+- Status: pending
 - Started at: n/a
-- Verification needed: Hardened sidecar build script: removes stale dist\\vision-ui-backend.exe before PyInstaller, throws on non-zero PyInstaller LASTEXITCODE, copies only freshly produced sidecar; pytest tests/test_windows_packaging_smoke.py -q -> 8 passed; npm run package:windows -> NSIS installer generated; npm run verify:desktop -> 120 passed.
-- Files expected to change: `scripts/build-tauri-sidecar.ps1`, `tests/test_windows_packaging_smoke.py`, `docs/specs/`, `change.md`
+- Verification needed: 批准后运行 `.\.venv\Scripts\python.exe -m pytest tests/test_backend_routing_contract.py tests/test_ui_backend_contract.py -q`
+- Files expected to change: `apps/ui_backend.py`, `core/feature_layout.py`, `core/yolo_adapter.py`, `tests/test_backend_routing_contract.py`, `tests/test_ui_backend_contract.py`
 
 ## Completed Work Log
 | Task ID | Time | Commit/State | Verification | Notes |
 |:---|:---|:---|:---|:---|
-| B-001 | 2026-06-09 18:49:49 | f0b0cf1 | 新增 tests/test_vue_tauri_acceptance_gaps.py，并更新 bridge/job 契约测试；运行 .\\.venv\\Scripts\\python.exe -m pytest tests\\test_ui_backend_contract.py tests\\test_ui_backend_jobs.py tests\\test_vue_tauri_acceptance_gaps.py -q 得到 9 failed / 11 passed，失败点对应 final acceptance 缺口：manifest jobId/sessionId、bad request requestId、completed job stop、Vue analysis/model/download/dir picker/event/raw JSON/frontend test coverage。 | 首轮缺口复现 |
-| B-002 | 2026-06-09 18:54:12 | f0b0cf1 | 修复 apps/ui_backend.py 与 frontend/src-tauri/src/lib.rs 的 message contract、错误 requestId 保留和 active-only job.stop；更新阻塞式 job.stop 测试。验证：.\\.venv\\Scripts\\python.exe -m pytest tests\\test_ui_backend_contract.py tests\\test_ui_backend_jobs.py -q -> 15 passed；frontend/src-tauri cargo check passed。 | 协议修复 |
-| B-003 | 2026-06-09 19:00:38 | f0b0cf1 | 修复 Vue 输入源 none/camera/video 三态、完整 raw JSON envelope、当前 session/job 事件过滤、预览帧 UI 节流和实时流进度文案。验证：npm --prefix frontend run build passed；pytest tests\\test_ui_backend_sessions.py tests\\test_input_source_state.py -q -> 15 passed；tests\\test_vue_tauri_acceptance_gaps.py 中 event/raw JSON 覆盖项已转绿，剩余失败归属 B-004/B-005/B-006/B-007。 | 初轮状态修复 |
-| B-005 | 2026-06-09 19:10:10 | f0b0cf1 | 补齐 Vue 动作分析面板：template.create、analysis.run、模板路径/基准视频/目标视频/startFrame/endFrame/worker/previewOut、doTechEval、stance/viewHint/debugVideo、结果展示和 job.stop。验证：npm --prefix frontend run build passed；pytest tests\\test_ui_backend_analysis.py tests\\test_tech_eval_contract.py tests\\test_pose33_v3_golden.py -q -> 30 passed；tests\\test_vue_tauri_acceptance_gaps.py 中 analysis/tech eval 覆盖项已转绿。 | 动作分析迁移 |
-| B-006 | 2026-06-09 19:14:02 | f0b0cf1 | 补齐 Vue 设置/模型管理面板：modelsDir/path/sizeMb/installed/active 展示、model.download 单模型/全部缺失、model.progress、cancelModelDownload/job.stop。验证：npm --prefix frontend run build passed；pytest tests\\test_ui_backend_models.py tests\\test_ui_backend_contract.py -q -> 14 passed；tests\\test_vue_tauri_acceptance_gaps.py 中 settings/model download 覆盖项已转绿。 | 模型管理迁移 |
-| B-004 | 2026-06-09 19:20:07 | f0b0cf1 | 补齐录制目录选择：Vue selectRecordDir 调用受限 Tauri select_directory，Rust 使用 Windows Shell32 folder picker FFI，无新增依赖、不走任意 shell；recordDir 默认留空，让 Python bridge 回退 outputs_dir()。验证：cargo check passed；npm --prefix frontend run build passed；pytest tests\\test_ui_backend_sessions.py tests\\test_recording_controller.py tests\\test_vue_tauri_acceptance_gaps.py -q 中目录覆盖项转绿，剩余唯一失败为 B-007 前端测试入口。 | 录制目录迁移 |
-| B-007 | 2026-06-09 19:28:42 | f0b0cf1 | 强化验证集合：新增 frontend/scripts/frontend-smoke.mjs 与 npm --prefix frontend run test；verify-desktop-stack.ps1 接入前端 smoke、纳入 tests/test_vue_tauri_acceptance_gaps.py，并检查原生命令 exit code。验证：npm --prefix frontend run test passed；pytest tests\\test_vue_tauri_acceptance_gaps.py -q -> 5 passed；npm run verify:desktop -> frontend build/test, cargo check, py_compile, 114 desktop regression tests passed；pytest tests\\test_windows_packaging_smoke.py -q -> 6 passed；npm run package:windows produced NSIS installer。 | 初轮验证集合 |
-| B-008 | 2026-06-09 19:35:38 | f0b0cf1 | 同步 README.md、AGENTS.md、change.md 与 bugfix 规范状态，记录前端 smoke、verify:desktop、packaging 和核心回归证据。验证：git diff --check 无 whitespace error（仅 LF/CRLF warning）；py_compile apps/app_ui.py apps/ui_backend.py core/vision_pipeline.py passed；pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q -> 31 passed；pytest tests/test_windows_packaging_smoke.py -q -> 6 passed；npm run verify:desktop -> frontend build/test, cargo check, py_compile, 114 desktop regression tests passed。 | 初轮文档同步 |
-| B-009 | 2026-06-09 20:18:46 | 5526945 | 修复 Vue 未知总帧进度、analysis/template/model status job 过滤和模型下载失败展示；新增 frontend/src/bridge-state.ts 行为助手与 behavior smoke；验证：npm --prefix frontend run test -> Frontend behavior smoke checks passed；npm --prefix frontend run build passed；pytest tests/test_ui_backend_models.py tests/test_vue_tauri_acceptance_gaps.py -q -> 11 passed。 | 首轮验收追加修复 |
-| B-010 | 2026-06-09 20:28:51 | 5526945 | 补足前端 behavior smoke、verify 文案、packaged sidecar ping 和文档证据；验证：npm run verify:desktop -> frontend build, Frontend behavior smoke, cargo check, py_compile, 116 desktop regression tests passed；py_compile apps/app_ui.py apps/ui_backend.py core/vision_pipeline.py passed；pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q -> 31 passed；git diff --check -> only CRLF warnings；npm run package:windows produced NSIS installer；pytest tests/test_windows_packaging_smoke.py -q -> 7 passed including generated sidecar bridge.ping. | 证据链收口 |
-| B-011 | 2026-06-09 21:03:12 | 5526945..3d6441b | 修复 manifest request optional jobId/sessionId、Rust decode_error envelope、strict scoped-event filtering、长任务预分配 job/session id 和既有模型文件保护测试；验证：npm --prefix frontend run test -> Frontend behavior smoke checks passed；npm --prefix frontend run build passed；pytest tests/test_ui_backend_contract.py tests/test_ui_backend_models.py tests/test_vue_tauri_acceptance_gaps.py tests/test_windows_packaging_smoke.py -q -> 29 passed；frontend/src-tauri cargo check passed。 | 复验修复 |
-| B-012 | 2026-06-09 21:14:41 | 5526945..3d6441b | 同步 requirements.md 状态/审批记录、README/AGENTS 最终验证结果、change.md 和 commit 证据；验证：rg 检查无草稿/非具体提交占位/旧完成日志占位；npm run verify:desktop -> 117 desktop regression tests passed；pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q -> 31 passed；py_compile apps/app_ui.py apps/ui_backend.py core/vision_pipeline.py passed；pytest tests/test_windows_packaging_smoke.py -q -> 7 passed；npm run package:windows produced NSIS installer；git diff --check -> only CRLF warnings。 | 复验证据同步 |
-| B-013 | 2026-06-09 21:51:10 | 3d6441b..8764f86 | 新增 B-013..B-017 任务并在 bugfix/design 记录第一波 B-002/B-004/B-006/B-008/B-010 ACTIONABLE_ISSUES；任务新增时历史结构检查通过；完成态复查以后续 `--resume` / `--pre-acceptance` 为准。 | 第一波存在 actionable issues，未启动对抗审查。 |
-| B-014 | 2026-06-09 21:57:29 | 3d6441b..8764f86 | 补齐 Python/Rust manifest optional/nullable 元数据和 TS null envelope 类型；验证：pytest tests\test_ui_backend_contract.py tests\test_windows_packaging_smoke.py -q -> 17 passed；npm --prefix frontend run test -> Frontend behavior smoke checks passed；C:\Users\ny\.cargo\bin\cargo.exe check -> passed。 | cargo 未在当前 PATH，使用本机绝对路径 C:\Users\ny\.cargo\bin\cargo.exe。 |
-| B-015 | 2026-06-09 22:00:45 | 3d6441b..8764f86 | Rust Shell32 picker 增加 OleInitialize/OleUninitialize；MTA RPC_E_CHANGED_MODE 时禁用 BIF_NEWDIALOGSTYLE 降级；验证：C:\Users\ny\.cargo\bin\cargo.exe check -> passed；pytest tests\test_windows_packaging_smoke.py -q -> 8 passed；npm --prefix frontend run test -> Frontend behavior smoke checks passed。 | 依据 Microsoft SHBrowseForFolder COM 初始化要求修复。 |
-| B-016 | 2026-06-09 22:04:56 | 3d6441b..8764f86 | download_model 校验已知 Content-Length 的截断 EOF 并清理 .part；Vue onBeforeUnmount 复用 cancelModelDownload 停止 active 下载；验证：pytest tests\test_ui_backend_models.py tests\test_vue_tauri_acceptance_gaps.py -q -> 13 passed；npm --prefix frontend run test -> Frontend behavior smoke checks passed；npm --prefix frontend run build -> passed。 | 正式模型文件在中断和截断下载时均保持不变。 |
-| B-017 | 2026-06-09 22:17:40 | 3d6441b..8764f86 | README/AGENTS/change.md 与 docs/specs 已同步；PowerShell fixed-string 检查（`$p = "5526945.." + "HEAD"; rg --fixed-strings $p docs\specs README.md AGENTS.md change.md`）-> no matches；npm run verify:desktop -> 118 passed；pytest tests/test_windows_packaging_smoke.py -q -> 8 passed；pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q -> 31 passed；npm run package:windows -> NSIS installer generated；validate_spec.py docs\specs --resume 和 --pre-acceptance -> OK。 | 文档证据提交后再次复查 resume/pre-acceptance。 |
-| B-018 | 2026-06-09 22:50:10 | 3aa2578 | 记录 docs sync commit 3aa2578 并修复 B-017/B-018 grep 命令为完整 HEAD 字符串拼接，避免自匹配；PowerShell 单引号 `-Command` 构造 fixed-string 检查目标模式（`5526945..` + `HEAD`）-> no matches；change.md 已记录 B-018；validate_spec.py docs\specs --resume/--pre-acceptance 已重跑。 | docs-only 证据提交 `90f9e54` 已复查，避免提交内容自引用 hash。 |
-| B-019 | 2026-06-09 23:24:53 | 920b06d | Added bridge-lifecycle stopJobById helper and behavior smoke assertions for exact job.stop command/payload/options; npm --prefix frontend run test -> passed; npm --prefix frontend run build -> passed; pytest tests/test_vue_tauri_acceptance_gaps.py -q -> 6 passed. | 修复第三轮第一波 B-016 验收发现 |
-| B-020 | 2026-06-10 00:02:13 | 2e94534 | Handled current session job.failed as a terminal UI state and added frontend behavior smoke for current/foreign job.failed; npm --prefix frontend run test/build -> passed; pytest tests/test_vue_tauri_acceptance_gaps.py -q -> 6 passed; pytest tests/test_ui_backend_sessions.py tests/test_input_source_state.py tests/test_vue_tauri_acceptance_gaps.py -q -> 21 passed; pytest tests/test_ui_backend_models.py tests/test_vue_tauri_acceptance_gaps.py -q -> 13 passed; npm run verify:desktop -> 118 passed. | 修复第四轮第一波 B-003 验收发现 |
-| B-021 | 2026-06-10 00:39:35 | d98dba6 | Fixed early session job.failed race and concrete evidence records; npm --prefix frontend run test -> passed; npm --prefix frontend run build -> passed; pytest tests/test_ui_backend_sessions.py tests/test_input_source_state.py tests/test_vue_tauri_acceptance_gaps.py -q -> 21 passed; npm run verify:desktop -> 118 passed; safe PowerShell fixed-string grep -> no matches. | n/a |
-| B-022 | 2026-06-10 01:17:16 | cdf639f | Added request nullable manifest parity for Python/Rust and removed stale B-013/B-018 wording; pytest tests/test_ui_backend_contract.py tests/test_windows_packaging_smoke.py -q -> 19 passed; npm --prefix frontend run test -> passed; C:\Users\ny\.cargo\bin\cargo.exe check -> passed; stale evidence grep -> no matches. | n/a |
-| B-023 | 2026-06-10 02:05:11 | b53b81a | Fixed analysis.run stop after compare before tech eval/debug export and synchronized latest validation evidence; pytest tests/test_ui_backend_analysis.py -q -> 5 passed; pytest tests/test_ui_backend_analysis.py tests/test_ui_backend_contract.py tests/test_windows_packaging_smoke.py tests/test_vue_tauri_acceptance_gaps.py -q -> 30 passed; npm --prefix frontend run test -> passed; npm run verify:desktop -> 120 passed. | docs-only evidence sync commit `8b574b5` recorded. |
-| B-024 | 2026-06-10 03:13:12 | eab6894 / docs 2b4ae3d | Fixed second-wave adversarial frontend lifecycle gaps: preview frame throttle behavior smoke, model.download early failed/stopped late-response guard, installed model redownload, and unmount analysis/template job.stop cleanup; npm --prefix frontend run test -> passed; npm --prefix frontend run build -> passed; pytest tests/test_vue_tauri_acceptance_gaps.py tests/test_ui_backend_models.py tests/test_ui_backend_sessions.py tests/test_input_source_state.py -q -> 28 passed; npm run verify:desktop -> 120 passed; npm run package:windows -> NSIS installer generated. | Second-wave adversarial B-003/B-006/B-009/B-019+B-020 ACTIONABLE_ISSUES resolved; docs sync commit `2b4ae3d` recorded. |
-| B-025 | 2026-06-10 03:38:01 | 7d44b21 | Hardened sidecar build script: removes stale dist\\vision-ui-backend.exe before PyInstaller, throws on non-zero PyInstaller LASTEXITCODE, copies only freshly produced sidecar; pytest tests/test_windows_packaging_smoke.py -q -> 8 passed; npm run package:windows -> NSIS installer generated; npm run verify:desktop -> 120 passed. | B-024 follow-up first-wave B-007 ACTIONABLE_ISSUES resolved; implementation commit 7d44b21. |
+| - | - | - | - | - |
 
 ## Recovery Notes
-- Completed B-025
+- 当前规范状态为 Draft，approval=pending。用户已要求 5 个只读 agent 分别审查 design.md、requirements.md、tasks.md、progress.md、spec.yml；审查完成后如有 P0/P1/P2 需先修正文档并重新运行 Spce 校验。
+- 五个只读 agent 已完成审查：design.md、requirements.md、tasks.md、progress.md 的 P1/P2 问题已修正；spec.yml 审查未发现 P0/P1/P2 阻断，P3 覆盖字段提醒已核对为当前 tasks.md 已显式覆盖。
+- 用户追加问题清单后已补强批准前规范：采用 `enableHands=false` 开关优先，手指指标降级为 skip-aware partial；新增 `core/backend_router.py` 作为唯一路由点；收敛 `displayScope` 为唯一受限显示字段；定死二进制帧通道首选命名管道 + Tauri 自定义协议、回退 latest-frame 原子文件；补齐模型不可用回退、YOLO 实时多人、性能基线、Rust 验证和每任务同步 change.md。
+- 当前工作区并非干净状态：main ahead 21，且存在多处既有前端、后端、测试和生成文件改动；本轮仅审查并修正 docs/specs 与 change.md，不得回滚无关改动。
+- 关键边界：MediaPipe 保留正式评分和 full tech_eval；YOLO 只做 body-only 预览、离线分析、内部标定或快速筛查；`enableHands=false` 只是 YOLO 候选条件，不是直接路由条件。
+- 关键帧通道目标：JSON bridge 只传状态、进度、分数和小型元数据；预览大帧改走二进制 latest-frame，Vue 只用 Canvas/bitmap 绘制最新帧。

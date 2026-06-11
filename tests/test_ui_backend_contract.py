@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import io
 import json
 import sys
+import threading
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -176,6 +178,55 @@ def test_handle_line_serializes_ping_response():
     assert response["ok"] is True
     assert response["payload"]["version"] == ui_backend.BRIDGE_VERSION
     assert "session.start" in response["payload"]["commands"]
+
+
+def test_bridge_message_writer_serializes_concurrent_json_lines():
+    stream = io.StringIO()
+    writer = ui_backend.BridgeMessageWriter(stream)
+    thread_count = 8
+    messages_per_thread = 80
+
+    def write_many(thread_index: int) -> None:
+        for message_index in range(messages_per_thread):
+            writer.write(
+                ui_backend.make_event(
+                    "stress.event",
+                    payload={"thread": thread_index, "index": message_index},
+                    job_id=f"job-{thread_index}",
+                )
+            )
+            writer.write(
+                ui_backend.make_response(
+                    f"req-{thread_index}-{message_index}",
+                    ok=True,
+                    payload={"thread": thread_index, "index": message_index},
+                    job_id=f"job-{thread_index}",
+                )
+            )
+
+    threads = [threading.Thread(target=write_many, args=(index,)) for index in range(thread_count)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(2.0)
+        assert not thread.is_alive()
+
+    lines = stream.getvalue().splitlines()
+    assert len(lines) == thread_count * messages_per_thread * 2
+    seen_events = set()
+    seen_responses = set()
+    for line in lines:
+        payload = json.loads(line)
+        if payload["type"] == "event":
+            assert payload["event"] == "stress.event"
+            seen_events.add((payload["payload"]["thread"], payload["payload"]["index"]))
+        else:
+            assert payload["type"] == "response"
+            assert payload["ok"] is True
+            assert payload["requestId"].startswith("req-")
+            seen_responses.add((payload["payload"]["thread"], payload["payload"]["index"]))
+    assert len(seen_events) == thread_count * messages_per_thread
+    assert len(seen_responses) == thread_count * messages_per_thread
 
 
 def test_handle_line_preserves_request_id_on_parse_errors():
