@@ -76,6 +76,11 @@ YOLO_CONFIDENCE_KIND: str = "yolo_conf"
 YOLO_VALIDITY_POLICY: str = "confidence_thr"
 # S3（#10）已落 valid_conf_thr=0.6，但跨视频 go/no-go 未通过；仍不得对外评分。
 YOLO_CALIBRATION_STATUS: str = "unvalidated"
+YOLO_RAW_LAYOUT: str = "pose33_like_coco17"
+YOLO_FEATURE_LAYOUT: str = "body_core_v1"
+YOLO_CAPABILITY: str = "body_only"
+YOLO_DISPLAY_SCOPE_LIMITED: str = "limited"
+YOLO_DISPLAY_SCOPE_INTERNAL: str = "internal"
 
 DEFAULT_YOLO_MODEL_NAME: str = "yolo11n-pose.pt"
 
@@ -312,17 +317,32 @@ def _boundary_meta(
     valid_conf_thr: float,
     num_persons: int,
     selected_index: int | None,
+    display_scope: str = YOLO_DISPLAY_SCOPE_LIMITED,
 ) -> dict:
     return {
+        **_yolo_authorization_meta(display_scope=display_scope),
         "backend": "yolo",
         "confidence_kind": YOLO_CONFIDENCE_KIND,
         "validity_policy": YOLO_VALIDITY_POLICY,
         "valid_conf_thr": float(valid_conf_thr),
-        "calibration_status": YOLO_CALIBRATION_STATUS,
         "calibration_note": CALIBRATION_NOTE,
         "num_persons": int(num_persons),
         "selected_index": selected_index,
         "track_reset_note": TRACK_RESET_NOTE,
+    }
+
+
+def _yolo_authorization_meta(*, display_scope: str) -> dict:
+    scope = str(display_scope or YOLO_DISPLAY_SCOPE_LIMITED)
+    if scope not in {YOLO_DISPLAY_SCOPE_LIMITED, YOLO_DISPLAY_SCOPE_INTERNAL}:
+        scope = YOLO_DISPLAY_SCOPE_LIMITED
+    return {
+        "raw_layout": YOLO_RAW_LAYOUT,
+        "feature_layout": YOLO_FEATURE_LAYOUT,
+        "capability": YOLO_CAPABILITY,
+        "score_authorized": False,
+        "calibration_status": YOLO_CALIBRATION_STATUS,
+        "display_scope": scope,
     }
 
 
@@ -805,6 +825,7 @@ def extract_yolo_landmark_series(
     gate = evaluate_multi_person_gate(num_persons_per_frame)
 
     meta = {
+        **_yolo_authorization_meta(display_scope=YOLO_DISPLAY_SCOPE_INTERNAL),
         "video": str(video_path),
         "backend": "yolo",
         "model_name": adapter.model_name,
@@ -819,7 +840,6 @@ def extract_yolo_landmark_series(
         "validity_policy": YOLO_VALIDITY_POLICY,
         # S3（#10）落库 valid_conf_thr=0.6，但未授权对外评分。
         "valid_conf_thr": float(adapter.valid_conf_thr),
-        "calibration_status": YOLO_CALIBRATION_STATUS,
         "calibration_note": CALIBRATION_NOTE,
         "frame_count": int(n_frames),
         "fps": float(fps),

@@ -81,6 +81,38 @@ def test_template_create_command_runs_as_job_and_returns_template_meta(tmp_path:
         ui_backend.DEFAULT_ANALYSIS_SERVICE = previous
 
 
+def test_analysis_run_error_payload_exposes_camel_case_yolo_route_metadata() -> None:
+    response = ui_backend.handle_command(
+        ui_backend.CommandRequest(
+            command="analysis.run",
+            request_id="req-route-meta",
+            payload={
+                "videoPath": "student.mp4",
+                "doCompare": False,
+                "doTechEval": False,
+                "qualityProfile": "high_quality",
+                "enableHands": False,
+                "modelAvailability": {"yoloSupported": True, "yolo26L": False},
+            },
+        )
+    )
+
+    assert response["ok"] is False
+    route = response["payload"]["backendRoute"]
+    assert route["ok"] is False
+    assert route["requestedBackend"] == "yolo"
+    assert route["rawLayout"] == "n/a"
+    assert route["featureLayout"] == "body_core_v1"
+    assert route["capability"] == "body_only"
+    assert route["calibrationStatus"] == "unvalidated"
+    assert route["scoreAuthorized"] is False
+    assert route["displayScope"] == "internal"
+    assert "score_authorized" not in route
+    assert "display_scope" not in route
+    assert "evalScope" not in route
+    assert "internalUseOnly" not in route
+
+
 def test_analysis_run_command_returns_template_compare_payload(tmp_path: Path) -> None:
     events: list[dict] = []
     manager = ui_backend.BridgeJobManager(events.append)

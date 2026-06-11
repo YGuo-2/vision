@@ -1,3 +1,29 @@
+## 2026-06-11: T-002 补齐 YOLO 能力和评分授权元数据
+
+### 问题描述
+
+YOLO adapter 的边界帧与序列 artifact 已标注 `backend=yolo`、confidence 和标定状态，但缺少统一的
+raw/feature layout、body-only capability、布尔评分授权和受限显示范围字段。若这些字段只在 router 或
+batch helper 中补齐，真实 YOLO 产物仍可能被下游误读成完整 Pose33 能力或正式评分结果。
+
+### 修改内容
+
+- 在 `core/yolo_adapter.py` 新增 YOLO 授权/能力元数据片段，边界层 `FrameResult.meta` 和
+  `extract_yolo_landmark_series()` 序列 meta 均写入 `raw_layout=pose33_like_coco17`、
+  `feature_layout=body_core_v1`、`capability=body_only`、`score_authorized=False`、
+  `calibration_status=unvalidated` 和 `display_scope=limited|internal`。
+- 保持边界帧默认 `display_scope=limited`，离线/序列 artifact 默认 `display_scope=internal`；不引入
+  `evalScope`、`internalUseOnly` 或其他同义显示字段。
+- 扩展 YOLO adapter、COCO17 映射、规则可用性和 UI bridge 分析契约测试，覆盖 Python snake_case
+  artifact、前端 camelCase `backendRoute`、布尔 `scoreAuthorized=false`、COCO17 结构性缺失点与
+  missing capability 语义。
+
+### 验证方法
+
+- `.\.venv\Scripts\python.exe -m pytest tests/test_yolo_backend_contract.py tests/test_yolo_landmark_mapping.py tests/test_rule_availability.py tests/test_ui_backend_analysis.py -q` → 46 passed
+- `.\.venv\Scripts\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q` → 31 passed
+- `git diff --check` → 退出码 0（仅 Windows 换行提示，无空白错误）
+
 ## 2026-06-11: T-001 固化后端路由决策契约
 
 ### 问题描述

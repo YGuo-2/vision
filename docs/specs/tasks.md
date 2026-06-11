@@ -3,9 +3,9 @@
 > **功能名称:** Vue/Tauri 高速帧通道与 MediaPipe/YOLO 后端路由架构
 > **关联规范:** `docs/specs/design.md` · `docs/specs/requirements.md`
 > **状态:** In Progress
-> **当前任务:** T-002
-> **进度:** 1 / 10 已完成
-> **最后更新:** 2026-06-11 13:58:19
+> **当前任务:** T-004
+> **进度:** 2 / 10 已完成
+> **最后更新:** 2026-06-11 14:12:26
 
 ---
 
@@ -37,11 +37,13 @@
   - 验证标准: 新增 `core/backend_router.py` 作为唯一决策点；`apps/ui_backend.py` 和 `batch/backend_options.py` 只能调用共享 router，不得复制规则；路由函数不能只依赖 `enableHands`；`enableHands=false` + 手指指标必须走 MediaPipe pose-only partial 并标 `skippedCapabilities=fingers`，不得静默启用 hand landmarker；YOLO realtime 模型不可用时必须回退 MediaPipe 并记录 `fallbackReason/requestedBackend`；YOLO26L 离线高质量 body-only 模型不可用时必须返回结构化下载/安装错误，不静默回退；YOLO 路由必须输出 backend、modelProfile、rawLayout、featureLayout、capabilities、requiresCapabilities、calibrationStatus、布尔 scoreAuthorized、displayScope、evalCompleteness、reason。
   - 预估工程量: 4-6 小时
 
-- [ ] **T-002:** 补齐 YOLO 能力和评分授权元数据
-  - 状态: pending
+- [x] **T-002:** 补齐 YOLO 能力和评分授权元数据
+  - 状态: done
+  - 验证证据: cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_yolo_backend_contract.py tests/test_yolo_landmark_mapping.py tests/test_rule_availability.py tests/test_ui_backend_analysis.py -q => exit 0, 46 passed; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q => exit 0, 31 passed; cmd: git diff --check => exit 0 (line-ending warnings only)
+  - 完成时间: 2026-06-11 14:12:26
+  - 备注: YOLO adapter 边界层与序列 artifact 统一补齐 raw_layout/feature_layout/capability/score_authorized/display_scope；UI camelCase route 与 COCO17 missing capability 测试上锁；更新 change.md。
   - 涉及文件: `core/yolo_adapter.py`, `batch/batch_dual_compare.py`, `batch/batch_tech_eval.py`, `apps/ui_backend.py`, `tests/test_yolo_backend_contract.py`, `tests/test_rule_availability.py`, `tests/test_ui_backend_analysis.py`
   - 验证命令: `.\.venv\Scripts\python.exe -m pytest tests/test_yolo_backend_contract.py tests/test_yolo_landmark_mapping.py tests/test_rule_availability.py tests/test_ui_backend_analysis.py -q`
-  - 验证证据: pending
   - 依赖: T-001
   - 风险: high
   - 覆盖: REQ-003, AC-003.1, AC-003.2, AC-003.3, AC-003.4, AC-003.5, AC-003.6, NFR-003
@@ -194,3 +196,4 @@
 | 任务 ID | 完成时间 | Commit Hash | 验证证据 | 备注 |
 |:---|:---|:---|:---|:---|
 | T-001 | 2026-06-11 13:58:19 | 60f3a66 | cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_backend_routing_contract.py tests/test_ui_backend_contract.py tests/test_batch_backend_args.py -q => exit 0, 35 passed; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q => exit 0, 31 passed; cmd: git diff --check => exit 0 (line-ending warnings only) | 新增 core/backend_router.py 唯一路由决策点；UI bridge 和 batch helper 消费共享 router；更新 change.md。 |
+| T-002 | 2026-06-11 14:12:26 | 4541e61 | cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_yolo_backend_contract.py tests/test_yolo_landmark_mapping.py tests/test_rule_availability.py tests/test_ui_backend_analysis.py -q => exit 0, 46 passed; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q => exit 0, 31 passed; cmd: git diff --check => exit 0 (line-ending warnings only) | YOLO adapter 边界层与序列 artifact 统一补齐 raw_layout/feature_layout/capability/score_authorized/display_scope；UI camelCase route 与 COCO17 missing capability 测试上锁；更新 change.md。 |

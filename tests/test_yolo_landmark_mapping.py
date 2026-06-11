@@ -169,9 +169,17 @@ def test_map_coco17_person_returns_arrays_and_frameresult():
     assert frame.pose33 is not None and len(frame.pose33) == 33
     assert frame.track_id == 7
     assert frame.meta is not None
+    assert frame.meta["backend"] == "yolo"
+    assert frame.meta["raw_layout"] == "pose33_like_coco17"
+    assert frame.meta["feature_layout"] == "body_core_v1"
+    assert frame.meta["capability"] == "body_only"
     assert frame.meta["confidence_kind"] == "yolo_conf"
     assert frame.meta["validity_policy"] == "confidence_thr"
     assert frame.meta["calibration_status"] == "unvalidated"
+    assert frame.meta["score_authorized"] is False
+    assert frame.meta["display_scope"] == "limited"
+    assert "eval_scope" not in frame.meta
+    assert "internal_use_only" not in frame.meta
 
 
 # --------------------------------------------------------------------------- #

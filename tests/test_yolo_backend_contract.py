@@ -83,6 +83,15 @@ def test_no_person_frame_result_pose_none():
     assert fr.pose33 is None
     assert fr.track_id is None
     assert fr.meta is not None and fr.meta["num_persons"] == 0
+    assert fr.meta["backend"] == "yolo"
+    assert fr.meta["raw_layout"] == "pose33_like_coco17"
+    assert fr.meta["feature_layout"] == "body_core_v1"
+    assert fr.meta["capability"] == "body_only"
+    assert fr.meta["calibration_status"] == "unvalidated"
+    assert fr.meta["score_authorized"] is False
+    assert fr.meta["display_scope"] == "limited"
+    assert "eval_scope" not in fr.meta
+    assert "internal_use_only" not in fr.meta
 
 
 def test_yolo_result_empty_does_not_crash():
@@ -184,6 +193,8 @@ def test_sequence_layer_multi_person_meta_flags_review_required():
     assert meta["gate_status"] == GATE_STATUS_MULTI_PERSON
     assert meta["num_persons_per_frame"] == [1, 2, 1]
     assert "review_required" in meta["gate_note"].lower()
+    assert meta["score_authorized"] is False
+    assert meta["display_scope"] == "internal"
 
 
 def test_sequence_layer_single_person_not_flagged():
@@ -269,9 +280,16 @@ def test_sequence_layer_returns_numpy_only_with_meta():
     ):
         assert key in meta, f"meta 缺少字段 {key}"
     assert meta["backend"] == "yolo"
+    assert meta["raw_layout"] == "pose33_like_coco17"
+    assert meta["feature_layout"] == "body_core_v1"
+    assert meta["capability"] == "body_only"
     assert meta["confidence_kind"] == "yolo_conf"
     assert meta["validity_policy"] == "confidence_thr"
     assert meta["calibration_status"] == "unvalidated"
+    assert meta["score_authorized"] is False
+    assert meta["display_scope"] == "internal"
+    assert "eval_scope" not in meta
+    assert "internal_use_only" not in meta
     note = meta["calibration_note"].lower()
     assert "preview" in note or "must not enter outward-facing scoring" in note
     assert meta["fps"] == pytest.approx(24.0)

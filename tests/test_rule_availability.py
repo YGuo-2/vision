@@ -263,3 +263,39 @@ def test_coco17_eye_capabilities_match_adapter_contract():
         "right_eye_inner",
         "right_eye_outer",
     }.issubset(missing)
+
+
+def test_coco17_missing_groups_remain_structural_capability_gaps():
+    missing = set(
+        landmarks_missing_for_capabilities(
+            (
+                MOUTH_L,
+                MOUTH_R,
+                L_HEEL,
+                R_HEEL,
+                L_FOOT_INDEX,
+                R_FOOT_INDEX,
+                17,
+                18,
+                19,
+                20,
+                21,
+                22,
+            ),
+            COCO17_SUPPORTED_CAPABILITIES,
+        )
+    )
+    assert {
+        "mouth_left",
+        "mouth_right",
+        "left_heel",
+        "right_heel",
+        "left_foot_index",
+        "right_foot_index",
+        "left_pinky",
+        "right_pinky",
+        "left_index",
+        "right_index",
+        "left_thumb",
+        "right_thumb",
+    }.issubset(missing)
