@@ -26,6 +26,13 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from apps.camera_enum import DEFAULT_SCAN_LIMIT, CameraEntry, InputSourceState, enumerate_cameras
+from core.backend_router import (
+    CAPABILITY_FINGERS,
+    ModelAvailability,
+    QualityProfile,
+    route_for_analysis,
+    route_for_preview,
+)
 
 
 JsonDict = dict[str, Any]
@@ -355,6 +362,7 @@ class PreviewSessionOptions:
     enable_hands: bool = True
     record_dir: str | None = None
     frame_limit: int | None = None
+    backend_route: JsonDict = field(default_factory=dict)
 
     def to_payload(self) -> JsonDict:
         return {
@@ -365,6 +373,7 @@ class PreviewSessionOptions:
             "enableHands": self.enable_hands,
             "recordDir": self.record_dir,
             "frameLimit": self.frame_limit,
+            "backendRoute": self.backend_route,
         }
 
 
@@ -462,8 +471,11 @@ class AnalysisRunOptions:
     do_tech_eval: bool = False
     stance: str = "left"
     view_hint: str = "auto"
+    enable_hands: bool = True
+    quality_profile: str = QualityProfile.DEFAULT.value
     debug_video: bool = False
     debug_out_path: str | None = None
+    backend_route: JsonDict = field(default_factory=dict)
 
     def to_payload(self) -> JsonDict:
         return {
@@ -476,8 +488,11 @@ class AnalysisRunOptions:
             "doTechEval": self.do_tech_eval,
             "stance": self.stance,
             "viewHint": self.view_hint,
+            "enableHands": self.enable_hands,
+            "qualityProfile": self.quality_profile,
             "debugVideo": self.debug_video,
             "debugOutPath": self.debug_out_path,
+            "backendRoute": self.backend_route,
         }
 
 
@@ -535,6 +550,17 @@ class TemplateAnalysisService:
                 ok=False,
                 error=BridgeError("bad_request", str(exc), {"command": request.command}),
             )
+        if not bool(options.backend_route.get("ok", True)):
+            return make_response(
+                request.request_id,
+                ok=False,
+                payload={"backendRoute": options.backend_route},
+                error=BridgeError(
+                    str(options.backend_route.get("errorCode") or "backend_unavailable"),
+                    str(options.backend_route.get("userMessage") or options.backend_route.get("reason") or "backend unavailable"),
+                    {"command": request.command, "backendRoute": options.backend_route},
+                ),
+            )
         record = self.manager.submit(
             "analysis.run",
             options.to_payload(),
@@ -577,6 +603,7 @@ class TemplateAnalysisService:
         payload: JsonDict = {
             "state": "running",
             "videoPath": options.video_path,
+            "backendRoute": options.backend_route,
         }
 
         def finish() -> JsonDict:
@@ -742,6 +769,10 @@ class ModelManagementService:
         active_keys = {_pose_model_key(pose_variant)}
         if enable_hands:
             active_keys.add("hand")
+        route = route_for_preview(
+            enable_hands=enable_hands,
+            model_availability=_default_route_model_availability(),
+        )
         models = []
         missing = []
         for spec in self.specs:
@@ -765,6 +796,7 @@ class ModelManagementService:
             "enableHands": enable_hands,
             "activeKeys": sorted(active_keys),
             "missingKeys": missing,
+            "backendRoute": route.to_camel_dict(),
             "models": models,
         }
 
@@ -931,6 +963,7 @@ class PreviewSessionService:
                 "poseVariant": options.pose_variant,
                 "workers": options.workers,
                 "enableHands": options.enable_hands,
+                "backendRoute": options.backend_route,
                 "recordDir": options.record_dir,
             },
             job_id=record.job_id,
@@ -1047,6 +1080,7 @@ class PreviewSessionService:
                 "state": "opening",
                 "source": options.source,
                 "sourceKind": options.source_kind,
+                "backendRoute": options.backend_route,
             },
         )
 
@@ -1080,6 +1114,7 @@ class PreviewSessionService:
                     "fpsForTimestamp": fps_for_ts,
                     "totalFrames": total,
                     "size": {"width": width, "height": height},
+                    "backendRoute": options.backend_route,
                 },
             )
 
@@ -1114,7 +1149,12 @@ class PreviewSessionService:
                 )
 
             state = "stopped" if ctx.stopped() else "completed"
-            status_payload: JsonDict = {"state": state, "frames": frame_count, "totalFrames": total}
+            status_payload: JsonDict = {
+                "state": state,
+                "frames": frame_count,
+                "totalFrames": total,
+                "backendRoute": options.backend_route,
+            }
             status_payload.update(realtime_stats)
             ctx.progress(
                 "session.status",
@@ -1126,6 +1166,7 @@ class PreviewSessionService:
                 "totalFrames": total,
                 "source": options.source,
                 "sourceKind": options.source_kind,
+                "backendRoute": options.backend_route,
             }
             result.update(realtime_stats)
             return result
@@ -1403,14 +1444,20 @@ def normalize_session_options(payload: JsonDict) -> PreviewSessionOptions:
         raise ValueError("poseVariant must be one of: lite, full, heavy")
 
     frame_limit = _optional_positive_int(payload.get("frameLimit", payload.get("frame_limit")))
+    enable_hands = _payload_bool(payload.get("enableHands", payload.get("enable_hands")), default=True)
+    route = route_for_preview(
+        enable_hands=enable_hands,
+        model_availability=_route_model_availability_from_payload(payload),
+    )
     return PreviewSessionOptions(
         source=state.value,
         source_kind=state.kind,
         pose_variant=pose_variant,
         workers=clamp_workers(payload.get("workers", 1)),
-        enable_hands=_payload_bool(payload.get("enableHands", payload.get("enable_hands")), default=True),
+        enable_hands=enable_hands,
         record_dir=_optional_str(payload.get("recordDir", payload.get("record_dir"))),
         frame_limit=frame_limit,
+        backend_route=route.to_camel_dict(),
     )
 
 
@@ -1438,11 +1485,24 @@ def normalize_analysis_run_options(payload: JsonDict) -> AnalysisRunOptions:
         payload.get("doTechEval", payload.get("enableTechEval")),
         default=False,
     )
-    if not do_compare and not do_tech_eval:
+    quality_profile = str(
+        payload.get("qualityProfile") or payload.get("quality_profile") or QualityProfile.DEFAULT.value
+    ).strip().lower() or QualityProfile.DEFAULT.value
+    if not do_compare and not do_tech_eval and quality_profile != QualityProfile.HIGH_QUALITY.value:
         raise ValueError("at least one of doCompare or doTechEval must be true")
     template_path = _optional_str(payload.get("templatePath", payload.get("template")))
     if do_compare and not template_path:
         raise ValueError("templatePath is required when doCompare is true")
+    enable_hands = _payload_bool(payload.get("enableHands", payload.get("enable_hands")), default=True)
+    requires_capabilities = tuple(payload.get("requiresCapabilities") or payload.get("requires_capabilities") or ())
+    route = route_for_analysis(
+        enable_hands=enable_hands,
+        do_compare=do_compare,
+        do_tech_eval=do_tech_eval,
+        quality_profile=quality_profile,
+        model_availability=_route_model_availability_from_payload(payload),
+        requires_capabilities=tuple(str(item) for item in requires_capabilities),
+    )
     return AnalysisRunOptions(
         video_path=video_path,
         template_path=template_path,
@@ -1453,8 +1513,11 @@ def normalize_analysis_run_options(payload: JsonDict) -> AnalysisRunOptions:
         do_tech_eval=do_tech_eval,
         stance=str(payload.get("stance") or "left").strip() or "left",
         view_hint=str(payload.get("viewHint") or payload.get("view_hint") or "auto").strip() or "auto",
+        enable_hands=enable_hands,
+        quality_profile=quality_profile,
         debug_video=_payload_bool(payload.get("debugVideo"), default=False),
         debug_out_path=_optional_str(payload.get("debugOutPath", payload.get("debugVideoPath"))),
+        backend_route=route.to_camel_dict(),
     )
 
 
@@ -1471,6 +1534,27 @@ def _pose_variant(payload: JsonDict, *, default: str) -> str:
     if pose_variant not in {"lite", "full", "heavy"}:
         raise ValueError("poseVariant must be one of: lite, full, heavy")
     return pose_variant
+
+
+def _default_route_model_availability() -> ModelAvailability:
+    return ModelAvailability(
+        yolo_realtime=False,
+        yolo26l=False,
+        yolo_supported=False,
+        reason="YOLO runtime is not enabled for this bridge path yet",
+    )
+
+
+def _route_model_availability_from_payload(payload: JsonDict) -> ModelAvailability:
+    raw = payload.get("modelAvailability") or payload.get("model_availability")
+    if not isinstance(raw, dict):
+        return _default_route_model_availability()
+    return ModelAvailability(
+        yolo_realtime=_payload_bool(raw.get("yoloRealtime", raw.get("yolo_realtime")), default=False),
+        yolo26l=_payload_bool(raw.get("yolo26L", raw.get("yolo26l")), default=False),
+        yolo_supported=_payload_bool(raw.get("yoloSupported", raw.get("yolo_supported")), default=False),
+        reason=str(raw.get("reason") or raw.get("message") or ""),
+    )
 
 
 def _optional_int(value: Any) -> int | None:

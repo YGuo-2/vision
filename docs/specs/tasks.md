@@ -2,10 +2,10 @@
 
 > **功能名称:** Vue/Tauri 高速帧通道与 MediaPipe/YOLO 后端路由架构
 > **关联规范:** `docs/specs/design.md` · `docs/specs/requirements.md`
-> **状态:** Draft
-> **当前任务:** T-001
-> **进度:** 0 / 10 已完成
-> **最后更新:** 2026-06-11 12:49:54
+> **状态:** In Progress
+> **当前任务:** T-002
+> **进度:** 1 / 10 已完成
+> **最后更新:** 2026-06-11 13:58:19
 
 ---
 
@@ -23,16 +23,18 @@
 
 ## 阶段 1：契约与路由基础
 
-- [ ] **T-001:** 固化后端路由决策契约
-  - 状态: pending
+- [x] **T-001:** 固化后端路由决策契约
+  - 状态: done
+  - 验证证据: cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_backend_routing_contract.py tests/test_ui_backend_contract.py tests/test_batch_backend_args.py -q => exit 0, 35 passed; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q => exit 0, 31 passed; cmd: git diff --check => exit 0 (line-ending warnings only)
+  - 完成时间: 2026-06-11 13:58:19
+  - 备注: 新增 core/backend_router.py 唯一路由决策点；UI bridge 和 batch helper 消费共享 router；更新 change.md。
   - 涉及文件: `core/backend_router.py`, `batch/backend_options.py`, `apps/ui_backend.py`, `core/feature_layout.py`, `core/yolo_adapter.py`, `tests/test_backend_routing_contract.py`, `tests/test_ui_backend_contract.py`, `tests/test_batch_backend_args.py`
   - 验证命令: `.\.venv\Scripts\python.exe -m pytest tests/test_backend_routing_contract.py tests/test_ui_backend_contract.py tests/test_batch_backend_args.py -q`
-  - 验证证据: pending
   - 依赖: 无
   - 风险: high
-  - 覆盖: REQ-001, REQ-002, REQ-003, AC-001.1, AC-001.2, AC-002.1, AC-002.2, AC-002.3, AC-002.4, AC-002.5, AC-002.6, AC-002.7, AC-003.1, AC-003.6
+  - 覆盖: REQ-001, REQ-002, REQ-003, AC-001.1, AC-001.2, AC-002.1, AC-002.2, AC-002.3, AC-002.4, AC-002.5, AC-002.6, AC-002.7, AC-002.8, AC-003.1, AC-003.6
   - 可并行: 否
-  - 验证标准: 新增 `core/backend_router.py` 作为唯一决策点；`apps/ui_backend.py` 和 `batch/backend_options.py` 只能调用共享 router，不得复制规则；路由函数不能只依赖 `enableHands`；`enableHands=false` + 手指指标必须走 MediaPipe pose-only partial 并标 `skippedCapabilities=fingers`，不得静默启用 hand landmarker；YOLO 模型不可用时必须回退 MediaPipe 并记录 `fallbackReason/requestedBackend`；YOLO 路由必须输出 backend、modelProfile、rawLayout、featureLayout、capabilities、requiresCapabilities、calibrationStatus、布尔 scoreAuthorized、displayScope、evalCompleteness、reason。
+  - 验证标准: 新增 `core/backend_router.py` 作为唯一决策点；`apps/ui_backend.py` 和 `batch/backend_options.py` 只能调用共享 router，不得复制规则；路由函数不能只依赖 `enableHands`；`enableHands=false` + 手指指标必须走 MediaPipe pose-only partial 并标 `skippedCapabilities=fingers`，不得静默启用 hand landmarker；YOLO realtime 模型不可用时必须回退 MediaPipe 并记录 `fallbackReason/requestedBackend`；YOLO26L 离线高质量 body-only 模型不可用时必须返回结构化下载/安装错误，不静默回退；YOLO 路由必须输出 backend、modelProfile、rawLayout、featureLayout、capabilities、requiresCapabilities、calibrationStatus、布尔 scoreAuthorized、displayScope、evalCompleteness、reason。
   - 预估工程量: 4-6 小时
 
 - [ ] **T-002:** 补齐 YOLO 能力和评分授权元数据
@@ -56,7 +58,7 @@
   - 风险: medium
   - 覆盖: REQ-007, AC-007.1, AC-007.2, AC-007.3
   - 可并行: 否
-  - 验证标准: Python 侧负责模型清单、下载执行和代理/离线提示；Rust 侧只负责资源路径、sidecar 打包和安装版资源发现；模型状态区分 MediaPipe pose full/heavy + hands、YOLO26n/s、YOLO26L、YOLO26X；YOLO26X 不进入默认路由；YOLO 模型不可用时 router 能产生可见回退/下载提示；安装版是否支持 YOLO 与 sidecar 依赖策略一致；下载/取消事件仍保持现有 envelope 契约。
+  - 验证标准: Python 侧负责模型清单、下载执行和代理/离线提示；开发侧模型下载走 `http://127.0.0.1:7890` 代理，安装版用户侧需处理下载源不可达提示；Rust 侧只负责资源路径、sidecar 打包和安装版资源发现；模型状态区分 MediaPipe pose full/heavy + hands、YOLO26n/s、YOLO26L、YOLO26X；YOLO26X 不进入默认路由；YOLO realtime 模型不可用时 router 能产生可见回退/下载提示，YOLO26L 缺失时能产生结构化下载/安装错误；安装版是否支持 YOLO 与 sidecar 依赖策略一致；下载/取消事件仍保持现有 envelope 契约。
   - 预估工程量: 2-3 小时
 
 ---
@@ -72,7 +74,7 @@
   - 风险: high
   - 覆盖: REQ-004, AC-004.1, AC-004.2, AC-004.3, NFR-001, NFR-006
   - 可并行: 否
-  - 验证标准: 首选实现为 Python->Rust Windows 命名管道 + Rust->Vue Tauri 自定义协议；回退为 latest-frame 原子文件 + Tauri 自定义协议；`session.frame` JSON event 不再携带大图 base64/bytes；同一 session 只保留最新帧并记录 dropped/rendered/payload/age 指标；迁移前后基线证据覆盖 payload p95、渲染帧率和 3 分钟内存增长阈值。
+  - 验证标准: 首选实现为 Python->Rust 仅绑定 `127.0.0.1` 的 TCP 长度前缀帧流（随机端口 + 会话 token 经 JSON bridge 握手下发）+ Rust->Vue Tauri 2 raw IPC `tauri::ipc::Response` 二进制 `ArrayBuffer`；Windows named pipe / Tauri custom protocol 仅作备选，切换原因必须写入任务证据和 `change.md`；禁止以 JSON/base64 回传大帧兜底；`session.frame` JSON event 不再携带大图 base64/bytes；同一 session 只保留最新帧并记录 dropped/rendered/payload/age 指标；迁移前后基线证据覆盖丢帧率、渲染帧率、前端内存增长、IPC payload 大小。
   - 预估工程量: 8-12 小时
 
 - [ ] **T-005:** 将 Vue 预览迁移到 Canvas/bitmap 渲染
@@ -84,7 +86,7 @@
   - 风险: high
   - 覆盖: REQ-005, AC-005.1, AC-005.2, AC-005.3, NFR-001, NFR-006
   - 可并行: 否
-  - 验证标准: 前端不再用 `previewImage` 或等价 reactive 大图字符串保存每帧；Canvas/bitmap 只绘制最新帧；session/job/frame id 可过滤晚到帧；frontend smoke 需证明 frame handle 不进入历史数组或 reactive 队列。
+  - 验证标准: 前端不再用 `previewImage` 或等价 reactive 大图字符串保存每帧；Canvas/bitmap 只绘制最新帧；通过 `requestAnimationFrame` 节流拉取最新帧并经 `createImageBitmap` 绘制 canvas；session/job/frame id 可过滤晚到帧；frontend smoke 需证明 frame handle 不进入历史数组或 reactive 队列；任务证据和 `change.md` 需记录迁移前后丢帧率、渲染帧率、前端内存增长、IPC payload 大小。
   - 预估工程量: 4-6 小时
 
 - [ ] **T-006:** 打通 Rust/Python 双侧任务状态机和取消语义
@@ -110,9 +112,9 @@
   - 验证证据: pending
   - 依赖: T-002, T-003, T-004
   - 风险: high
-  - 覆盖: REQ-002, REQ-003, AC-002.2, AC-002.7, AC-002.8, AC-003.1, NFR-003
+  - 覆盖: REQ-002, REQ-003, AC-002.2, AC-002.7, AC-002.9, AC-003.1, NFR-003
   - 可并行: 否
-  - 验证标准: 无手部实时预览在 YOLO26n/s 可用时必须选择 YOLO26n/s；模型不可用或安装版不支持时必须回退 MediaPipe 并输出 `fallbackReason/requestedBackend`；实时多人时只渲染 primary target，输出 `multiPersonDetected/personCount/reviewRequired/targetPolicy`；需要手部或缺失关键点时回退 MediaPipe 或 partial，不得启用 YOLO。
+  - 验证标准: 无手部实时预览在 YOLO26n/s 可用时必须选择 YOLO26n/s；模型不可用或安装版不支持时必须回退 MediaPipe 并输出 `fallbackReason/requestedBackend` 与 UI fallback 提示；实时多人时沿用 `core/yolo_adapter.py` 既有 `select_main_person` 最大框/最高分策略，只渲染 primary target，输出 `multiPersonDetected/personCount/reviewRequired/targetPolicy`；完整 track 延续/中心最近/tie-break 策略本期不做；需要手部或缺失关键点时回退 MediaPipe 或 partial，不得启用 YOLO。
   - 预估工程量: 4-6 小时
 
 - [ ] **T-008:** 接入 YOLO26L 离线高质量 body-only 分析路径
@@ -122,9 +124,9 @@
   - 验证证据: pending
   - 依赖: T-002, T-003
   - 风险: high
-  - 覆盖: REQ-002, REQ-003, REQ-008, AC-002.3, AC-002.7, AC-008.1, NFR-003
+  - 覆盖: REQ-002, REQ-003, REQ-008, AC-002.3, AC-002.8, AC-008.1, NFR-003
   - 可并行: 否
-  - 验证标准: 离线高质量 body-only 分析在 YOLO26L 可用时必须选择 YOLO26L；模型不可用或安装版不支持时必须回退 MediaPipe 并输出 `fallbackReason/requestedBackend`；结果不进入 full tech_eval；`scoreAuthorized=false` 和 `calibration_status=unvalidated` 不被放宽，受限显示只用 `displayScope=internal` / `display_scope=internal`。
+  - 验证标准: 离线高质量 body-only 分析在 YOLO26L 可用时必须选择 YOLO26L；模型不可用、安装版不支持或模型下载未完成时必须返回结构化下载/安装错误，不静默回退 MediaPipe，并输出 `requestedBackend=yolo`、缺失模型档和用户可见提示；结果不进入 full tech_eval；`scoreAuthorized=false` 和 `calibration_status=unvalidated` 不被放宽，受限显示只用 `displayScope=internal` / `display_scope=internal`。
   - 预估工程量: 4-6 小时
 
 - [ ] **T-009:** 保持 MediaPipe 正式评分和 full tech_eval 默认边界
@@ -191,4 +193,4 @@
 
 | 任务 ID | 完成时间 | Commit Hash | 验证证据 | 备注 |
 |:---|:---|:---|:---|:---|
-| — | — | — | — | 暂无完成任务 |
+| T-001 | 2026-06-11 13:58:19 | 60f3a66 | cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_backend_routing_contract.py tests/test_ui_backend_contract.py tests/test_batch_backend_args.py -q => exit 0, 35 passed; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q => exit 0, 31 passed; cmd: git diff --check => exit 0 (line-ending warnings only) | 新增 core/backend_router.py 唯一路由决策点；UI bridge 和 batch helper 消费共享 router；更新 change.md。 |

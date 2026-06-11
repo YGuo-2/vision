@@ -281,3 +281,80 @@ def test_model_status_known_command_dispatches_successfully():
     assert response["ok"] is True
     assert response["payload"]["activeKeys"] == ["hand", "pose_full"]
     assert response["payload"]["models"]
+
+
+def test_model_status_exposes_shared_backend_route_for_preview():
+    req = ui_backend.parse_command(
+        {
+            "type": "command",
+            "command": "model.status",
+            "requestId": "req-route-status",
+            "payload": {"poseVariant": "full", "enableHands": False},
+        }
+    )
+
+    response = ui_backend.handle_command(req)
+
+    assert response["ok"] is True
+    route = response["payload"]["backendRoute"]
+    assert route["backend"] == "mediapipe"
+    assert route["modelProfile"] == "pose_only"
+    assert route["requestedBackend"] == "yolo"
+    assert route["fallbackReason"]
+    assert route["scoreAuthorized"] is False
+
+
+def test_session_start_payload_contains_backend_route_decision():
+    options = ui_backend.normalize_session_options({"source": "0", "enableHands": False})
+
+    route = options.backend_route
+    assert route["backend"] == "mediapipe"
+    assert route["modelProfile"] == "pose_only"
+    assert route["requestedBackend"] == "yolo"
+    assert route["scoreAuthorized"] is False
+
+
+def test_analysis_high_quality_yolo26l_missing_returns_structured_error():
+    response = ui_backend.handle_command(
+        ui_backend.CommandRequest(
+            command="analysis.run",
+            request_id="req-route-analysis",
+            payload={
+                "videoPath": "student.mp4",
+                "doCompare": False,
+                "doTechEval": False,
+                "qualityProfile": "high_quality",
+                "enableHands": False,
+            },
+        )
+    )
+
+    assert response["ok"] is False
+    assert response["error"]["code"] == "yolo26l_unavailable"
+    route = response["payload"]["backendRoute"]
+    assert route["ok"] is False
+    assert route["requestedBackend"] == "yolo"
+    assert route["featureLayout"] == "body_core_v1"
+
+
+def test_analysis_full_tech_eval_hands_off_marks_pose_only_partial_route():
+    response = ui_backend.handle_command(
+        ui_backend.CommandRequest(
+            command="analysis.run",
+            request_id="req-route-tech",
+            payload={
+                "videoPath": "student.mp4",
+                "doCompare": False,
+                "doTechEval": True,
+                "enableHands": False,
+                "requiresCapabilities": ["fingers"],
+            },
+        )
+    )
+
+    assert response["ok"] is True
+    route = response["payload"]["backendRoute"]
+    assert route["backend"] == "mediapipe"
+    assert route["modelProfile"] == "pose_only"
+    assert route["evalCompleteness"] == "partial"
+    assert route["skippedCapabilities"] == ["fingers"]

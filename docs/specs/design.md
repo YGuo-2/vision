@@ -3,7 +3,7 @@
 > **设计名称：** Vue/Tauri 高速帧通道与 MediaPipe/YOLO 后端路由架构
 > **设计粒度：** High Level Design
 > **版本：** v1.0
-> **状态：** 草稿
+> **状态：** 已批准
 > **最后更新：** 2026-06-11
 
 ---
@@ -45,7 +45,7 @@
 
 - 本轮规范生成不直接实现业务代码；实现需在用户回复 `批准规范，启动执行` 后开始。
 - YOLO26n/s、YOLO26L、YOLO26X 的具体模型文件命名、下载源和许可落地将在模型清单任务中固化；本规范先锁定用途分层。
-- 二进制通道的底层方案已定为“首选 + 回退”：首选 Windows 本地命名管道承载 Python -> Rust 的长度前缀帧包，Rust 维护每 session 单槽 latest-frame store，并通过 Tauri 自定义协议向 Vue 返回二进制 bytes；若命名管道在打包环境不可用，回退到 app data/cache 下的 latest-frame 原子文件 + Rust 自定义协议读取。两种方案都不得把帧字节作为 JSON 数组或 base64 event payload 传回 Vue。
+- 二进制通道的底层方案已定为“首选 + 备选”：首选 Python -> Rust 仅绑定 `127.0.0.1` 的 TCP 帧流，随机端口和会话 token 通过 JSON bridge 握手下发，帧包采用长度前缀二进制协议，Rust 维护每 session 单槽 latest-frame store；Rust -> Vue 采用 Tauri 2 raw IPC，`invoke` 返回 `tauri::ipc::Response` 二进制 `ArrayBuffer`，前端通过 `requestAnimationFrame` 节流拉取最新帧并用 `createImageBitmap`/Canvas 渲染。备选为 Windows named pipe 或 Tauri custom protocol；遇硬阻碍可切换备选并在 `change.md` 记录原因，但仍禁止用 JSON/base64 回传大帧。
 - 内部受限显示只使用 `displayScope=limited|internal`，不改变 `scoreAuthorized=false`。
 
 ---
@@ -120,8 +120,8 @@ flowchart TD
 | `enableHands=false` 且任务为实时预览，YOLO26n/s 可用 | YOLO body-only | YOLO26n/s | `body_core_v1`, `body_only` | false |
 | `enableHands=false` 且任务为实时预览，YOLO26n/s 不可用或安装版不支持 | MediaPipe pose-only preview | pose full/heavy，不启用 hands | `pose33_v3` | preview only，记录 `fallbackReason` |
 | `enableHands=false` 且任务为离线高质量 body-only 分析，YOLO26L 可用 | YOLO body-only | YOLO26L | `body_core_v1`, `body_only` | false |
-| `enableHands=false` 且任务为离线高质量 body-only 分析，YOLO26L 不可用或安装版不支持 | MediaPipe body-only fallback | pose full/heavy，不启用 hands | `pose33_v3` 或派生 body-only | internal，记录 `fallbackReason` |
-| `enableHands=false` 且任务为正式评分或完整技术评估 | MediaPipe pose-only 生产路径 | pose full/heavy，不启用 hands | `pose33_v3`，手指指标 skip-aware partial | 可对可用 MediaPipe 指标授权；`evalCompleteness=partial` |
+| `enableHands=false` 且任务为离线高质量 body-only 分析，YOLO26L 不可用或安装版不支持 | 结构化错误 | n/a | n/a | 返回下载/安装提示，不静默回退 |
+| `enableHands=false` 且任务为正式评分或完整技术评估 | MediaPipe pose-only 生产路径 | pose full/heavy，不启用 hands | `pose33_v3`，手指指标 skip-aware 标注 | 可对可用 MediaPipe 指标授权；`evalCompleteness=partial` |
 | 需要手指且 `enableHands=true` | MediaPipe full | pose full/heavy + hand landmarker | `pose33_v3` + hands | full |
 | 需要手指且 `enableHands=false` | MediaPipe pose-only partial | pose full/heavy，不启用 hands | 手指能力缺失，`skippedCapabilities=fingers` | partial |
 | 需要嘴角、脚跟或脚尖 | MediaPipe production | pose full/heavy | `pose33_v3` + required landmarks | full 或 partial，取决于可用点 |
@@ -133,16 +133,17 @@ flowchart TD
 |:---|:---|:---|:---|
 | `backend.route` 内部决策 | `taskType`, `enableHands`, `qualityProfile`, `requiresCapabilities`, `scoreMode`, `modelAvailability`, `multiPersonPolicy` | `backend`, `modelProfile`, `rawLayout`, `featureLayout`, `capabilities`, `requiresCapabilities`, `calibrationStatus`, `scoreAuthorized`, `displayScope`, `evalCompleteness`, `skippedCapabilities`, `fallbackReason`, `multiPersonDetected`, `reviewRequired`, `reason` | 唯一实现位于 `core/backend_router.py`；不允许只用 `enableHands` 决策；`scoreAuthorized` 必须是布尔值 |
 | JSON command bridge | 控制命令和小型 payload | response/event envelope | 不承载大帧 payload |
-| Binary frame channel | session id, frame id, encoded frame bytes, dimensions, timestamp | latest frame handle 或 frame bytes | 每 session 单槽 latest-frame，旧帧可丢弃 |
+| Binary frame channel | session id, frame id, encoded frame bytes, dimensions, timestamp, token | latest frame bytes | Python -> Rust 仅绑定 `127.0.0.1` 的 TCP 长度前缀帧流；Rust -> Vue 通过 Tauri raw IPC 返回 `ArrayBuffer`；每 session 单槽 latest-frame，旧帧可丢弃 |
 | Vue preview renderer | latest frame handle/bytes, display metadata | Canvas 当前画面 | 图片不进入 reactive 大对象或历史数组 |
 | MediaPipe scoring path | 视频/摄像头帧、模板、评分配置 | 正式评分、full tech_eval、debug artifact | 保持 `pose33_v3` golden 不漂移 |
 | YOLO body-only path | 视频/摄像头帧、模型档、valid_conf_thr | body-only skeleton、内部分析元数据 | 标 `scoreAuthorized=false` 与 `displayScope=limited|internal`，不进 full tech_eval |
 | Model/config management | Python 模型清单、下载命令、安装状态；Rust 资源路径和打包配置 | MediaPipe/YOLO 模型可用性状态 | 下载、取消、打包资源、代理/离线失败和许可状态可追踪 |
 
-#### 二进制帧通道首选与回退
+#### 二进制帧通道首选与备选
 
-- **首选方案：** Tauri/Rust 创建 per-session Windows 本地命名管道，Python sidecar 在 JSONL stdout 之外向命名管道写入长度前缀帧包；Rust 读取后只保留该 session 最新帧，Vue 通过 Tauri 自定义协议按 `sessionId/frameId` 读取二进制 bytes 并 `createImageBitmap`/Canvas 渲染。
-- **回退方案：** 若命名管道在 dev 或 packaged 环境不可用，Python 将每 session 最新 encoded frame 原子写入 app data/cache 中的单槽文件，JSON event 只发送 frame handle；Rust 自定义协议按 handle 读取 bytes 给 Vue。停止、切换 session 或窗口卸载必须清理 handle 和缓存文件。
+- **首选方案：** Rust 为每个 session 建立仅绑定 `127.0.0.1` 的 TCP listener，随机端口和会话 token 通过 JSON bridge 握手下发给 Python sidecar；Python 在 JSONL stdout 之外连接本地端口并写入带 token 校验的长度前缀二进制帧包；Rust 读取后只保留该 session 最新帧。
+- **Rust -> Vue：** Vue 通过 Tauri `invoke` 拉取最新帧，Rust 返回 `tauri::ipc::Response` 二进制 `ArrayBuffer`；前端在 `requestAnimationFrame` 中节流调用，收到 bytes 后经 `createImageBitmap` 绘制到 canvas。
+- **备选方案：** 若 TCP 本地帧流或 raw IPC 在 dev/packaged 环境遇硬阻碍，可切换到 Windows named pipe 或 Tauri custom protocol。切换原因、影响范围和验证结果必须记录到任务证据与 `change.md`；仍禁止以 JSON/base64 回传大帧兜底。
 - **共同约束：** 两段链路都禁止把帧 bytes 放进 JSON 数组或 base64 Tauri event；latest-frame store 需要记录 `droppedFrameCount`、`renderedFrameCount`、`lastFrameAgeMs` 和 payload size，用于性能 smoke。
 
 ### 4.5 数据模型 / 状态变化
@@ -155,7 +156,7 @@ flowchart TD
 | YOLO output meta | 已有 `calibration_status` 与部分 meta | 增加统一 `backend/featureLayout/scoreAuthorized/capability/displayScope` 显示契约 | `scoreAuthorized` 为布尔值；camelCase 用于前端，snake_case 用于 Python artifact |
 | YOLO raw layout | Pose33-like 容器承载 COCO17 映射点 | `rawLayout=pose33_like_coco17` 与 `featureLayout=body_core_v1` 分开标识 | raw 容器不代表完整 Pose33 能力 |
 | enableHands/手指指标冲突 | 可能被理解为路由自动启用 hands | `enableHands=false` 时禁止自动启用 hand landmarker，手指指标 skip-aware partial | 结果必须带 `skippedCapabilities`、`evalCompleteness=partial` 和原因 |
-| YOLO realtime 多人 | 未定义 | 只渲染 primary target，输出 `multiPersonDetected/personCount/reviewRequired/targetPolicy` | 不做正式评分；目标选择优先稳定跟踪，否则最大 bbox |
+| YOLO realtime 多人 | 未定义 | 只渲染 primary target，输出 `multiPersonDetected/personCount/reviewRequired/targetPolicy` | 不做正式评分；沿用 `core/yolo_adapter.py` 既有 `select_main_person` 最大框/最高分策略；完整 tracking/tie-break 本期不做 |
 | task lifecycle | Python job manager + Tauri pending map | Rust/Python 双侧一致状态机 | stop/unmount/timeout 不得产生晚到污染 |
 | model profiles | MediaPipe 模型为主，YOLO11n 既有实验 | MediaPipe, YOLO26n/s, YOLO26L, YOLO26X 分档 | YOLO26X 不进默认 |
 
@@ -179,7 +180,8 @@ flowchart TD
 | Rust 原生推理先行 | 放弃 | 第一阶段收益不明且会扩大风险；先由 Rust 做系统层和高速通道 |
 | Python 同时承载 MediaPipe 与 YOLO，Rust 做系统层 | 采用 | 与当前代码边界一致，能先解决帧通道、路由和打包问题 |
 | `core/backend_router.py` 作为唯一决策点 | 采用 | 避免 `apps/ui_backend.py` 与 batch CLI 分叉出两套路由 |
-| 命名管道 + Tauri 自定义协议传帧，cache latest-frame file 作为回退 | 采用 | 覆盖 Python -> Rust 与 Rust -> Vue 两段，不污染 JSON bridge |
+| `127.0.0.1` TCP 帧流 + Tauri raw IPC 传帧 | 采用 | 与 Tauri 2 raw IPC 能力匹配，覆盖 Python -> Rust 与 Rust -> Vue 两段，不污染 JSON bridge |
+| Windows named pipe / Tauri custom protocol | 采用为备选 | 仅在首选方案遇硬阻碍时启用，并需在 `change.md` 记录原因与验证结果 |
 | 中期迁移 YOLO 离线到 ONNXRuntime/TensorRT | 采用为后续阶段 | 仅在 Python 路由和契约稳定后推进 |
 
 ---
@@ -207,7 +209,7 @@ flowchart TD
 - 前端行为：运行 `npm --prefix frontend run test`，新增用例证明帧不进入 reactive 图片字符串、旧帧丢弃、晚到事件忽略。
 - 桌面栈：运行 `npm run verify:desktop`，确保 Vue build、frontend smoke、Tauri cargo check、Python py_compile 和桌面回归通过。
 - 打包链路：运行 `npm run package:windows` 和 `pytest tests/test_windows_packaging_smoke.py -q`，验证 sidecar、资源和 packaged bridge。
-- 性能与内存：新增二进制帧通道 smoke，记录 frame drop、rendered frame、IPC payload size、前端内存增长和停止后事件清理。验收时必须提供迁移前/后同源基线；`session.frame` JSON metadata p95 payload 应小于 8KB 且不得包含图片 bytes/base64；30fps 源的渲染帧率不得低于迁移前基线 10% 以上；3 分钟预览的前端内存增长不得超过基线 20% 或 50MB 中较大值。阈值如需调整，必须在任务证据中记录样本、环境和原因。
+- 性能与内存：新增二进制帧通道 smoke，记录 frame drop、rendered frame、IPC payload size、前端内存增长和停止后事件清理。验收时必须提供迁移前/后同源基线；`session.frame` JSON metadata p95 payload 应小于 8KB 且不得包含图片 bytes/base64；30fps 源的渲染帧率不得低于迁移前基线 10% 以上；3 分钟预览的前端内存增长不得超过基线 20% 或 50MB 中较大值。T-004/T-005 的证据和 `change.md` 必须记录迁移前后对比：丢帧率、渲染帧率、前端内存增长、IPC payload 大小；阈值如需调整，必须在任务证据中记录样本、环境和原因。
 
 ---
 
@@ -222,4 +224,4 @@ flowchart TD
 
 | 日期 | 审批人 | 决定 | 备注 |
 |:---|:---|:---|:---|
-| 2026-06-11 | 用户 | 待审查 | 回复 `批准规范，启动执行` 后才可开始实现 |
+| 2026-06-11 | 用户 | 已批准 | 经 /goal 指令预批准，范围限 R1~R10 修订后版本 |

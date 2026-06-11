@@ -1,3 +1,29 @@
+## 2026-06-11: T-001 固化后端路由决策契约
+
+### 问题描述
+
+Vue/Tauri 桌面端、batch CLI 与后续 YOLO 接入需要共享同一套 MediaPipe/YOLO 后端路由规则；
+若各入口各自判断 `enableHands`、模型可用性、评分授权和能力缺失，容易导致 YOLO 被误接入正式评分
+或 full tech_eval，也容易把 YOLO26L 缺失误处理成静默 MediaPipe 回退。
+
+### 修改内容
+
+- 新增 `core/backend_router.py`，集中定义 `BackendRouteRequest` / `BackendRouteDecision`、实时预览、
+  离线高质量 body-only、正式评分/full tech_eval 的确定性路由规则，以及 snake_case/camelCase 序列化契约。
+- 将 `batch/backend_options.py` 收编为共享 router 的 CLI 适配层，保留原有参数和 `BATCH_META_FIELDS` 兼容，
+  同时补齐 `raw_layout`、`capability`、`display_scope` 等授权/能力元数据。
+- 在 `apps/ui_backend.py` 的 `model.status`、`session.start`、`analysis.run` payload 中透传 `backendRoute`；
+  默认未声明 YOLO runtime 可用时，无手部实时预览标注为 MediaPipe pose-only fallback；离线高质量
+  body-only 缺 YOLO26L 时返回结构化 `yolo26l_unavailable` 错误，不启动静默回退任务。
+- 补充 `tests/test_backend_routing_contract.py`，并扩展 UI bridge 与 batch 参数契约测试，覆盖
+  hands-off partial、YOLO realtime fallback、YOLO26L 结构化错误、多人预览 review 标记和布尔授权字段。
+
+### 验证方法
+
+- `.\.venv\Scripts\python.exe -m pytest tests/test_backend_routing_contract.py tests/test_ui_backend_contract.py tests/test_batch_backend_args.py -q` → 35 passed
+- `.\.venv\Scripts\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q` → 31 passed
+- `git diff --check` → 退出码 0（仅 Windows 换行提示，无空白错误）
+
 ## 2026-06-10: 修复 Web/Tauri 预览串线、积压追帧与首屏阻塞
 
 ### 问题描述

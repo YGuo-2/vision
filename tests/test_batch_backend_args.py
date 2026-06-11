@@ -17,7 +17,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from batch import batch_dual_compare, batch_export_skeleton, batch_tech_eval  # noqa: E402
-from batch.backend_options import normalize_backend_layout, yolo_batch_meta  # noqa: E402
+from batch.backend_options import meta_for_backend, normalize_backend_layout, yolo_batch_meta  # noqa: E402
 
 
 def test_backend_layout_defaults_preserve_pose33_path():
@@ -38,9 +38,25 @@ def test_yolo_meta_marks_unvalidated_and_unauthorized():
         }
     )
     assert meta["backend"] == "yolo"
+    assert meta["raw_layout"] == "pose33_like_coco17"
     assert meta["feature_layout"] == "body_core_v1"
+    assert meta["capability"] == "body_only"
     assert meta["calibration_status"] == "unvalidated"
     assert meta["score_authorized"] is False
+    assert meta["display_scope"] in {"limited", "internal"}
+    assert meta["review_required"] is True
+
+
+def test_meta_for_backend_uses_shared_router_contract_for_mediapipe_body_core():
+    meta = meta_for_backend("mediapipe", {"review_required": True}, pose_variant="heavy")
+
+    assert meta["backend"] == "mediapipe"
+    assert meta["raw_layout"] == "pose33_v3"
+    assert meta["feature_layout"] == "body_core_v1"
+    assert meta["capability"] == "body_only"
+    assert meta["calibration_status"] == "unvalidated"
+    assert meta["score_authorized"] is False
+    assert meta["display_scope"] == "internal"
     assert meta["review_required"] is True
 
 

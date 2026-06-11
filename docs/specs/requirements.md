@@ -3,7 +3,7 @@
 > **功能名称：** Vue/Tauri 高速帧通道与 MediaPipe/YOLO 后端路由架构
 > **来源设计：** `docs/specs/design.md`
 > **版本：** v1.0
-> **状态：** 草稿
+> **状态：** 已批准
 > **最后更新：** 2026-06-11
 
 ---
@@ -19,7 +19,7 @@
 - **歧义检查：** 已消除“关手部就走 YOLO”的歧义；`enableHands=false` 只是 YOLO 候选准入条件，正式路由还必须检查任务类型、评分模式、关键点能力和模型档。`enableHands=false` 同时也是禁止静默启用 hand landmarker 的硬约束；当 full tech_eval 请求手指指标时，系统走 MediaPipe pose-only 生产路径并将手指指标标为 skip-aware partial。`YOLO26L` 被定义为高质量 body-only 离线分析模型，不被定义为 full tech_eval 后端。`scoreAuthorized` 是布尔授权字段，YOLO 未获独立批准前只能是 `false`；内部分析或受限显示必须使用 `displayScope` 表达。YOLO raw Pose33-like 容器不等于 `pose33_v3` 生产布局，必须区分 raw layout 与最终 feature layout。
 - **设计一致性：** 本文件只从 `design.md` 派生职责边界、路由规则、帧通道、模型策略、状态机、标识契约和验证要求；没有新增超出设计的产品能力。
 - **冲突检查：** 与既有 `docs/yolo_default_switch_decision.md` 的“全部不切默认”不冲突，因为本规范要求 MediaPipe 继续承担正式评分和完整技术评估，YOLO 仅在显式 body-only 场景使用。与 `core/yolo_adapter.py` 的 `calibration_status=unvalidated` 不冲突，因为本规范不授权 YOLO 对外评分。
-- **失败路径：** 需要覆盖模型缺失、模型下载取消、模型下载源/代理不可达、sidecar 启动失败、JSON bridge 超时、二进制帧通道断开、late event、session 切换、旧帧污染、多人检测、YOLO 缺失能力、打包资源缺失、安装版 sidecar 排除 YOLO 依赖、权限不足、并发停止和 Windows 安装路径差异。
+- **失败路径：** 需要覆盖模型缺失、模型下载取消、模型下载源/代理不可达、sidecar 启动失败、JSON bridge 超时、二进制帧通道断开、late event、session 切换、旧帧污染、多人检测、YOLO 缺失能力、打包资源缺失、安装版 sidecar 排除 YOLO 依赖、权限不足、并发停止和 Windows 安装路径差异。实时预览所需 YOLO 模型不可用时允许自动回退 MediaPipe pose-only 并显式标注 fallback；离线高质量 body-only 分析所需 YOLO26L 不可用时必须返回结构化下载/安装错误，不得静默回退。
 - **Quick Plan 跳过原因：** n/a，本任务使用 strict 模式；跨前端、Rust、Python、模型、性能和打包链路，不能跳过需求分析。
 
 ---
@@ -79,11 +79,16 @@
   - **THEN** 路由必须选择 MediaPipe pose-only partial，结果包含 `evalCompleteness=partial`、`skippedCapabilities` 包含 `fingers`、`reason` 说明用户关闭手部检测，不得静默启用 hand landmarker。
 
 - **AC-002.7:**
-  - **GIVEN** `enableHands=false` 且任务满足 YOLO realtime 或 YOLO26L body-only 条件
-  - **WHEN** 所需 YOLO 模型不可用、安装版不支持 YOLO 或模型下载未完成
-  - **THEN** 路由必须回退到 MediaPipe 对应非手部路径，输出 `backend=mediapipe`、`fallbackReason`、`requestedBackend=yolo` 和用户可见下载/安装提示；不得无提示失败或静默伪装为 YOLO。
+  - **GIVEN** `enableHands=false` 且任务为实时预览
+  - **WHEN** YOLO26n/s 模型不可用、安装版不支持 YOLO 或模型下载未完成
+  - **THEN** 路由必须自动回退到 MediaPipe pose-only 预览，输出 `backend=mediapipe`、`fallbackReason`、`requestedBackend=yolo`、`reason` 和 UI 可见 fallback 提示；不得无提示失败或静默伪装为 YOLO。
 
 - **AC-002.8:**
+  - **GIVEN** `enableHands=false` 且任务为离线高质量 body-only 分析
+  - **WHEN** YOLO26L 模型不可用、安装版不支持 YOLO 或模型下载未完成
+  - **THEN** 路由必须返回结构化错误，提示下载/安装 YOLO26L，不得静默回退 MediaPipe，也不得伪装为已完成 YOLO 分析。
+
+- **AC-002.9:**
   - **GIVEN** YOLO 实时预览检测到多人
   - **WHEN** 输出预览骨架
   - **THEN** 系统必须只渲染 primary target，并输出 `multiPersonDetected=true`、`personCount`、`reviewRequired=true`、`targetPolicy` 和提示；不得把多人实时预览结果标为正式评分。
@@ -133,7 +138,7 @@
 - **AC-004.1:**
   - **GIVEN** session 正在输出预览帧
   - **WHEN** 后端发送帧数据
-  - **THEN** JSON bridge 只发送 frame id、frame handle、尺寸、动作、进度、时间戳和错误等小型元数据；大帧 bytes 通过命名管道 + Tauri 自定义协议首选方案传输，或通过 latest-frame 原子文件 + Tauri 自定义协议回退方案传输。
+  - **THEN** JSON bridge 只发送 frame id、尺寸、动作、进度、时间戳、握手端口/token 和错误等小型元数据；Python -> Rust 大帧 bytes 通过仅绑定 `127.0.0.1` 的 TCP 长度前缀帧流传输，Rust -> Vue 通过 Tauri 2 raw IPC `tauri::ipc::Response` 返回二进制 `ArrayBuffer`；若首选方案遇硬阻碍，只能切换到 Windows named pipe 或 Tauri custom protocol 备选，并在任务证据和 `change.md` 记录原因。
 
 - **AC-004.2:**
   - **GIVEN** 后端帧率高于前端渲染能力
@@ -143,7 +148,7 @@
 - **AC-004.3:**
   - **GIVEN** 同一视频源在迁移前后进行预览 smoke
   - **WHEN** 采集 payload、渲染帧率和内存指标
-  - **THEN** `session.frame` JSON metadata p95 payload 必须小于 8KB 且不含图片 bytes/base64；30fps 源渲染帧率不得低于迁移前基线 10% 以上；3 分钟预览前端内存增长不得超过基线 20% 或 50MB 中较大值，若阈值待标定必须在证据中记录环境和原因。
+  - **THEN** `session.frame` JSON metadata p95 payload 必须小于 8KB 且不含图片 bytes/base64；30fps 源渲染帧率不得低于迁移前基线 10% 以上；3 分钟预览前端内存增长不得超过基线 20% 或 50MB 中较大值；任务证据和 `change.md` 必须记录迁移前后丢帧率、渲染帧率、前端内存增长、IPC payload 大小，若阈值待标定必须记录环境和原因。
 
 ### REQ-005: Vue Canvas/bitmap 渲染
 
@@ -266,7 +271,7 @@
 
 ### 假设
 
-- 二进制通道首选命名管道 + Tauri 自定义协议，回退 latest-frame 原子文件 + Tauri 自定义协议；实现不得在 T-004 中换成未经重新批准的新通道方案。
+- 二进制通道首选仅绑定 `127.0.0.1` 的 TCP 长度前缀帧流 + Tauri 2 raw IPC `ArrayBuffer`；Windows named pipe / Tauri custom protocol 只作为备选，切换须记录到任务证据和 `change.md`；实现不得在 T-004 中换成未经重新批准的新通道方案或以 JSON/base64 回传大帧。
 - YOLO 模型下载源、许可提示和资源路径会在模型清单任务中落实。
 - 现有 `.venv`、Cargo、Node 和 Tauri 工具链可继续用于验证。
 
@@ -284,4 +289,4 @@
 
 | 日期 | 审批人 | 决定 | 备注 |
 |:---|:---|:---|:---|
-| 2026-06-11 | 用户 | 待审查 | 回复 `批准规范，启动执行` 后才可开始实现 |
+| 2026-06-11 | 用户 | 已批准 | 经 /goal 指令预批准，范围限 R1~R10 修订后版本 |
