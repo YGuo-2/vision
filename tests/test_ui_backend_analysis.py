@@ -177,6 +177,64 @@ def test_analysis_run_command_returns_template_compare_payload(tmp_path: Path) -
         ui_backend.DEFAULT_ANALYSIS_SERVICE = previous
 
 
+def test_high_quality_template_compare_does_not_carry_yolo_route(tmp_path: Path) -> None:
+    manager = ui_backend.BridgeJobManager()
+    template_path = tmp_path / "template.npz"
+    _write_template(template_path)
+    compare_called = threading.Event()
+
+    def fake_compare(template, video, **kwargs):
+        compare_called.set()
+        return SimpleNamespace(
+            template_path=Path(template),
+            video_path=Path(video),
+            pose_variant="full",
+            fps=30.0,
+            start_frame=1,
+            end_frame=2,
+            cost=1.0,
+            avg_cost=0.5,
+            score=0.9,
+            preview_path=None,
+            workers_used=1,
+        )
+
+    service = ui_backend.TemplateAnalysisService(
+        job_manager=manager,
+        compare_template=fake_compare,
+    )
+    previous = _install_analysis_service(service)
+    try:
+        response = ui_backend.handle_command(
+            ui_backend.CommandRequest(
+                command="analysis.run",
+                request_id="req-high-quality-compare",
+                payload={
+                    "videoPath": "student.mp4",
+                    "templatePath": str(template_path),
+                    "doCompare": True,
+                    "doTechEval": False,
+                    "qualityProfile": "high_quality",
+                    "enableHands": False,
+                    "modelAvailability": {"yoloSupported": True, "yolo26L": True},
+                },
+            )
+        )
+
+        assert response["ok"] is True
+        assert response["payload"]["backendRoute"]["backend"] == "mediapipe"
+        assert response["payload"]["backendRoute"]["requestedBackend"] is None
+        final = manager.wait(response["jobId"], 2.0)
+
+        assert final is not None
+        assert final.status == "succeeded"
+        assert compare_called.is_set()
+        assert "compare" in final.result
+        assert "bodyCoreAnalysis" not in final.result
+    finally:
+        ui_backend.DEFAULT_ANALYSIS_SERVICE = previous
+
+
 def test_analysis_run_stop_after_compare_skips_tech_eval(tmp_path: Path) -> None:
     events: list[dict] = []
     manager = ui_backend.BridgeJobManager(events.append)
@@ -243,6 +301,134 @@ def test_analysis_run_stop_after_compare_skips_tech_eval(tmp_path: Path) -> None
     finally:
         compare_can_finish.set()
         ui_backend.DEFAULT_ANALYSIS_SERVICE = previous
+
+
+def test_yolo_body_core_analysis_receives_cancellation_signal() -> None:
+    events: list[dict] = []
+    manager = ui_backend.BridgeJobManager(events.append)
+    entered = threading.Event()
+    release = threading.Event()
+    cancellation_seen = threading.Event()
+
+    def fake_body_core_analysis(video_path, **kwargs):
+        should_stop = kwargs["should_stop"]
+        entered.set()
+        assert release.wait(2.0)
+        if should_stop():
+            cancellation_seen.set()
+            raise InterruptedError("cancelled")
+        raise AssertionError("expected cancellation")
+
+    service = ui_backend.TemplateAnalysisService(
+        job_manager=manager,
+        body_core_analysis=fake_body_core_analysis,
+    )
+    previous = _install_analysis_service(service)
+    try:
+        response = ui_backend.handle_command(
+            ui_backend.CommandRequest(
+                command="analysis.run",
+                request_id="req-yolo-cancel",
+                payload={
+                    "videoPath": "student.mp4",
+                    "doCompare": False,
+                    "doTechEval": False,
+                    "qualityProfile": "high_quality",
+                    "enableHands": False,
+                    "modelAvailability": {"yoloSupported": True, "yolo26L": True},
+                },
+            )
+        )
+        assert response["ok"] is True
+        assert entered.wait(2.0)
+        assert manager.stop(response["jobId"]) is True
+        release.set()
+        final = manager.wait(response["jobId"], 2.0)
+
+        assert final is not None
+        assert final.status == "stopped"
+        assert cancellation_seen.is_set()
+    finally:
+        release.set()
+        ui_backend.DEFAULT_ANALYSIS_SERVICE = previous
+
+
+def test_high_quality_body_only_analysis_returns_internal_yolo_payload() -> None:
+    manager = ui_backend.BridgeJobManager()
+    called = threading.Event()
+
+    def fake_body_core_analysis(video_path, **kwargs):
+        called.set()
+        assert video_path == "student.mp4"
+        assert kwargs["model_profile"] == "yolo26l"
+        return np.zeros((2, 12, 2), dtype=np.float32), 30.0, {
+            "model_name": "yolo26l-pose.pt",
+            "raw_layout": "pose33_like_coco17",
+            "body_core_valid_frame_ratio": 1.0,
+        }
+
+    service = ui_backend.TemplateAnalysisService(
+        job_manager=manager,
+        body_core_analysis=fake_body_core_analysis,
+    )
+    previous = _install_analysis_service(service)
+    try:
+        response = ui_backend.handle_command(
+            ui_backend.CommandRequest(
+                command="analysis.run",
+                request_id="req-yolo-body-core",
+                payload={
+                    "videoPath": "student.mp4",
+                    "doCompare": False,
+                    "doTechEval": False,
+                    "qualityProfile": "high_quality",
+                    "enableHands": False,
+                    "modelAvailability": {
+                        "yoloSupported": True,
+                        "yolo26L": True,
+                    },
+                },
+            )
+        )
+        assert response["ok"] is True
+        assert response["payload"]["backendRoute"]["backend"] == "yolo"
+        final = manager.wait(response["jobId"], 2.0)
+
+        assert final is not None
+        assert final.status == "succeeded"
+        assert called.is_set()
+        result = final.result["bodyCoreAnalysis"]
+        assert result["modelProfile"] == "yolo26l"
+        assert result["scoreAuthorized"] is False
+        assert result["calibrationStatus"] == "unvalidated"
+        assert result["displayScope"] == "internal"
+        assert "techEval" not in final.result
+    finally:
+        ui_backend.DEFAULT_ANALYSIS_SERVICE = previous
+
+
+def test_high_quality_body_only_analysis_requires_hands_disabled() -> None:
+    response = ui_backend.handle_command(
+        ui_backend.CommandRequest(
+            command="analysis.run",
+            request_id="req-yolo-body-core-hands-on",
+            payload={
+                "videoPath": "student.mp4",
+                "doCompare": False,
+                "doTechEval": False,
+                "qualityProfile": "high_quality",
+                "enableHands": True,
+                "modelAvailability": {
+                    "yoloSupported": True,
+                    "yolo26L": True,
+                },
+            },
+        )
+    )
+
+    assert response["ok"] is False
+    assert response["error"]["code"] == "bad_request"
+    assert "enableHands=false" in response["error"]["message"]
 
 
 def test_analysis_run_requires_template_when_compare_enabled() -> None:

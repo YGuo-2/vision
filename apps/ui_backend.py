@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import os
-import secrets
 import socket
 import struct
 import sys
@@ -72,8 +71,7 @@ PREVIEW_MAX_EDGE = 960
 PREVIEW_FRAME_EVENT_MIN_INTERVAL_S = 1.0 / 30.0
 PREVIEW_CAPTURE_IDLE_SLEEP_S = 0.001
 FRAME_CHANNEL_HOST = "127.0.0.1"
-FRAME_CHANNEL_TOKEN_BYTES = 16
-FRAME_CHANNEL_ACCEPT_TIMEOUT_S = 0.2
+FRAME_CHANNEL_WRITE_TIMEOUT_S = 0.5
 
 
 COMMANDS: dict[str, JsonDict] = {
@@ -271,6 +269,16 @@ class BridgeJobManager:
                         record.result = result or {}
                         _emit("job.completed", {"result": record.result}, None)
             except Exception as exc:  # noqa: BLE001 - serialize all job failures.
+                if record.stop_event.is_set() and isinstance(exc, InterruptedError):
+                    with self._lock:
+                        record.status = "stopped"
+                        record.result = {
+                            "state": "stopped",
+                            "interrupted": True,
+                            "message": str(exc),
+                        }
+                    _emit("job.stopped", {"result": record.result}, None)
+                    return
                 error = BridgeError(
                     "job_failed",
                     str(exc),
@@ -366,9 +374,11 @@ class PreviewSessionOptions:
     pose_variant: str = "full"
     workers: int = 1
     enable_hands: bool = True
+    requires_capabilities: tuple[str, ...] = ()
     record_dir: str | None = None
     frame_limit: int | None = None
     backend_route: JsonDict = field(default_factory=dict)
+    frame_channel: JsonDict = field(default_factory=dict)
 
     def to_payload(self) -> JsonDict:
         return {
@@ -377,9 +387,11 @@ class PreviewSessionOptions:
             "poseVariant": self.pose_variant,
             "workers": self.workers,
             "enableHands": self.enable_hands,
+            "requiresCapabilities": list(self.requires_capabilities),
             "recordDir": self.record_dir,
             "frameLimit": self.frame_limit,
             "backendRoute": self.backend_route,
+            "frameChannel": self.frame_channel,
         }
 
 
@@ -446,96 +458,115 @@ class _LatestPreviewFrameBuffer:
 
 
 class LatestFrameChannel:
-    """Localhost latest-frame byte channel for Rust raw IPC fetches."""
+    """Write preview bytes to the Rust-owned localhost latest-frame channel."""
 
-    def __init__(self, *, session_id: str, host: str = FRAME_CHANNEL_HOST) -> None:
+    def __init__(self, *, session_id: str, host: str, port: int, token: str) -> None:
         self.session_id = session_id
         self.host = host
-        self.token = secrets.token_hex(FRAME_CHANNEL_TOKEN_BYTES)
+        self.port = int(port)
+        self.token = token
         self._lock = threading.Lock()
-        self._latest: bytes = b""
         self._frame_id = 0
         self._payload_bytes = 0
+        self._published = 0
+        self._dropped = 0
         self._served = 0
-        self._closed = threading.Event()
-        self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._socket.bind((self.host, 0))
-        self.port = int(self._socket.getsockname()[1])
-        self._socket.listen(4)
-        self._thread = threading.Thread(
-            target=self._serve,
-            name=f"preview-frame-channel-{session_id}",
-            daemon=True,
-        )
-        self._thread.start()
+        self._last_error: str | None = None
+        self._last_published_at: float | None = None
+
+    @classmethod
+    def from_payload(cls, *, session_id: str, payload: JsonDict) -> "LatestFrameChannel | None":
+        port = int(payload.get("framePort") or 0)
+        token = str(payload.get("frameToken") or "").strip()
+        host = str(payload.get("frameHost") or FRAME_CHANNEL_HOST).strip() or FRAME_CHANNEL_HOST
+        if not session_id or not token or port <= 0:
+            return None
+        return cls(session_id=session_id, host=host, port=port, token=token)
 
     def publish(self, payload: bytes) -> JsonDict:
         data = bytes(payload)
         with self._lock:
             self._frame_id += 1
-            self._latest = data
-            self._payload_bytes = len(data)
             frame_id = self._frame_id
+            self._payload_bytes = len(data)
+            self._published += 1
+            self._last_published_at = time.monotonic()
+        frame_handle = f"{self.session_id}:{frame_id}"
+        ack = self._write_frame(frame_id=frame_id, frame_handle=frame_handle, data=data)
+        with self._lock:
+            if ack:
+                self._dropped = int(ack.get("droppedFrames", self._dropped) or 0)
+                self._served = int(ack.get("servedFrames", self._served) or 0)
+                self._last_error = None
+            else:
+                self._last_error = self._last_error or "Rust latest-frame channel did not acknowledge frame"
         return {
             "sessionId": self.session_id,
-            "frameHandle": f"{self.session_id}:{frame_id}",
+            "frameHandle": frame_handle,
             "frameHost": self.host,
             "framePort": self.port,
             "frameToken": self.token,
             "frameId": frame_id,
             "frameBytes": len(data),
             "frameTransport": "tcp-length-prefixed",
+            "frameStore": self.snapshot(),
         }
 
     def snapshot(self) -> JsonDict:
         with self._lock:
+            age_ms = (
+                int(max(0.0, (time.monotonic() - self._last_published_at) * 1000.0))
+                if self._last_published_at is not None
+                else None
+            )
             return {
                 "frameHost": self.host,
                 "framePort": self.port,
                 "frameToken": self.token,
                 "frameId": self._frame_id,
                 "frameBytes": self._payload_bytes,
-                "framesServed": self._served,
+                "publishedFrames": self._published,
+                "droppedFrames": self._dropped,
+                "servedFrames": self._served,
+                "lastFrameAgeMs": age_ms,
+                "lastError": self._last_error,
                 "frameTransport": "tcp-length-prefixed",
             }
 
     def close(self) -> None:
-        self._closed.set()
-        try:
-            self._socket.close()
-        except OSError:
-            pass
-        self._thread.join(timeout=1.0)
+        # Rust owns latest-frame channel lifetime and performs delayed terminal
+        # cleanup so the final published frame remains fetchable by pending RAF.
+        return None
 
-    def _serve(self) -> None:
-        while not self._closed.is_set():
-            try:
-                self._socket.settimeout(FRAME_CHANNEL_ACCEPT_TIMEOUT_S)
-                conn, _addr = self._socket.accept()
-            except socket.timeout:
+    def _write_frame(self, *, frame_id: int, frame_handle: str, data: bytes) -> JsonDict:
+        try:
+            with socket.create_connection((self.host, self.port), timeout=FRAME_CHANNEL_WRITE_TIMEOUT_S) as conn:
+                conn.settimeout(FRAME_CHANNEL_WRITE_TIMEOUT_S)
+                header = f"PUT {self.session_id} {self.token} {frame_id} {frame_handle}\n"
+                conn.sendall(header.encode("utf-8"))
+                conn.sendall(struct.pack(">I", len(data)))
+                if data:
+                    conn.sendall(data)
+                ack = conn.recv(512).decode("utf-8", errors="replace").strip()
+        except OSError as exc:
+            with self._lock:
+                self._last_error = str(exc)
+            return {}
+        if not ack.startswith("OK"):
+            with self._lock:
+                self._last_error = ack or "empty latest-frame ack"
+            return {}
+        parts = ack.split()
+        metrics: JsonDict = {}
+        for part in parts[1:]:
+            if "=" not in part:
                 continue
-            except OSError:
-                break
-            with conn:
-                try:
-                    conn.settimeout(1.0)
-                    request = conn.recv(512).decode("utf-8", errors="replace").strip().split()
-                    if len(request) < 3 or request[0] != "GET":
-                        conn.sendall(struct.pack(">I", 0))
-                        continue
-                    session_id, token = request[1], request[2]
-                    if session_id != self.session_id or token != self.token:
-                        conn.sendall(struct.pack(">I", 0))
-                        continue
-                    with self._lock:
-                        payload = self._latest
-                        self._served += 1
-                    conn.sendall(struct.pack(">I", len(payload)))
-                    if payload:
-                        conn.sendall(payload)
-                except OSError:
-                    continue
+            key, value = part.split("=", 1)
+            try:
+                metrics[key] = int(value)
+            except ValueError:
+                metrics[key] = value
+        return metrics
 
 
 @dataclass(frozen=True)
@@ -720,7 +751,7 @@ class TemplateAnalysisService:
                 "analysis.progress",
                 {"stage": "YOLO26L body-only 内部分析中", "done": 0, "total": 0, "percent": None},
             )
-            payload["bodyCoreAnalysis"] = self._run_body_core_analysis(options)
+            payload["bodyCoreAnalysis"] = self._run_body_core_analysis(options, should_stop=ctx.stop_event.is_set)
             return finish()
 
         if options.do_compare:
@@ -751,13 +782,19 @@ class TemplateAnalysisService:
 
         return finish()
 
-    def _run_body_core_analysis(self, options: AnalysisRunOptions) -> JsonDict:
+    def _run_body_core_analysis(
+        self,
+        options: AnalysisRunOptions,
+        *,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> JsonDict:
         route = options.backend_route or {}
         features, fps, meta = self._body_core_analysis(
             options.video_path,
             backend=BACKEND_YOLO,
             pose_variant=options.pose_variant,
             model_profile=str(route.get("modelProfile") or "yolo26l"),
+            should_stop=should_stop,
         )
         return _body_core_analysis_payload(
             video_path=options.video_path,
@@ -818,6 +855,7 @@ class ModelManagementService:
         installed_size_func: Callable[[Any], float | None] | None = None,
         model_path_func: Callable[[Any], Path] | None = None,
         download_func: Callable[..., Path] | None = None,
+        packaged_yolo_runtime: bool = False,
     ) -> None:
         self._job_manager = job_manager
         self._specs = specs
@@ -826,6 +864,7 @@ class ModelManagementService:
         self._installed_size = installed_size_func or _default_installed_size_mb
         self._model_path = model_path_func or _default_model_path
         self._download = download_func or _default_download_model
+        self._packaged_yolo_runtime = bool(packaged_yolo_runtime)
 
     @property
     def manager(self) -> BridgeJobManager:
@@ -907,9 +946,10 @@ class ModelManagementService:
         active_keys = {_pose_model_key(pose_variant)}
         if enable_hands:
             active_keys.add("hand")
+        route_availability = self._route_model_availability()
         route = route_for_preview(
             enable_hands=enable_hands,
-            model_availability=_default_route_model_availability(),
+            model_availability=route_availability,
         )
         models = []
         missing = []
@@ -929,8 +969,14 @@ class ModelManagementService:
                 "profile": str(getattr(spec, "profile", key)),
                 "downloadable": bool(getattr(spec, "downloadable", True)),
                 "installedSupported": bool(getattr(spec, "installed_supported", True)),
+                "runtimeSupported": self._is_runtime_supported(spec),
                 "defaultRouteEligible": bool(getattr(spec, "default_route_eligible", True)),
                 "note": str(getattr(spec, "note", "")),
+                "license": _model_license(spec),
+                "purpose": _model_purpose(spec),
+                "proxy": _model_proxy_hint(spec),
+                "offlineInstall": _model_offline_install_hint(spec),
+                "downloadHint": _model_download_hint(spec),
             }
             if not installed and bool(getattr(spec, "downloadable", True)):
                 missing.append(key)
@@ -943,17 +989,50 @@ class ModelManagementService:
             "missingKeys": missing,
             "backendRoute": route.to_camel_dict(),
             "yoloRuntime": {
-                "supported": False,
+                "supported": route_availability.yolo_supported,
                 "packaged": False,
-                "message": "当前安装版 sidecar 不打包 YOLO runtime；YOLO 档位仅展示状态，不进入正式评分默认路由。",
+                "message": route_availability.reason
+                or "当前安装版 sidecar 不打包 YOLO runtime；YOLO 档位仅展示状态，不进入正式评分默认路由。",
             },
             "models": models,
         }
 
+    def _route_model_availability(self) -> ModelAvailability:
+        by_key = {_spec_key(spec): spec for spec in self.specs}
+        yolo26n = by_key.get("yolo26n")
+        yolo26s = by_key.get("yolo26s")
+        yolo26l = by_key.get("yolo26l")
+        yolo_specs = [spec for spec in (yolo26n, yolo26s, yolo26l) if spec is not None]
+        routable_yolo26n = bool(yolo26n is not None and self._is_installed(yolo26n) and self._is_runtime_supported(yolo26n))
+        routable_yolo26s = bool(yolo26s is not None and self._is_installed(yolo26s) and self._is_runtime_supported(yolo26s))
+        installed_yolo26l = bool(yolo26l is not None and self._is_installed(yolo26l) and self._is_runtime_supported(yolo26l))
+        runtime_supported = any(
+            self._is_installed(spec) and self._is_runtime_supported(spec)
+            for spec in yolo_specs
+        )
+        realtime_model = "yolo26n" if routable_yolo26n else ("yolo26s" if routable_yolo26s else "")
+        reason = "" if runtime_supported else "YOLO runtime unavailable or not packaged; install manually for development preview."
+        return ModelAvailability(
+            yolo_realtime=bool(realtime_model),
+            yolo_realtime_model=realtime_model,
+            yolo26l=installed_yolo26l,
+            yolo_supported=runtime_supported,
+            reason=reason,
+        )
+
+    def _is_runtime_supported(self, spec: Any) -> bool:
+        if str(getattr(spec, "category", "mediapipe")) != "yolo":
+            return bool(getattr(spec, "installed_supported", True))
+        return bool(getattr(spec, "installed_supported", True)) and self._packaged_yolo_runtime
+
     def _download_specs(self, payload: JsonDict) -> list[Any]:
         all_missing = _payload_bool(payload.get("allMissing", payload.get("all")), default=False)
         if all_missing:
-            return [spec for spec in self.specs if not self._is_installed(spec)]
+            return [
+                spec
+                for spec in self.specs
+                if not self._is_installed(spec) and bool(getattr(spec, "downloadable", True))
+            ]
         key = str(payload.get("modelKey") or payload.get("key") or "").strip()
         if not key:
             raise ValueError("modelKey or allMissing is required")
@@ -1250,7 +1329,10 @@ class PreviewSessionService:
             height = int(_capture_float(cap, CAP_PROP_FRAME_HEIGHT, 720.0))
             recorder.begin_session(fps=fps_for_ts, size=(width, height))
             if ctx.session_id:
-                frame_channel = LatestFrameChannel(session_id=ctx.session_id)
+                frame_channel = LatestFrameChannel.from_payload(
+                    session_id=ctx.session_id,
+                    payload=options.frame_channel,
+                )
             active = ActivePreviewSession(
                 session_id=ctx.session_id or "",
                 job_id=ctx.job_id,
@@ -1541,6 +1623,7 @@ class PreviewSessionService:
             "size": {"width": frame_width, "height": frame_height},
             "payloadBytes": len(encoded),
             "frameTransport": "tcp-length-prefixed",
+            "backendRoute": dict(ctx.payload.get("backendRoute") or {}),
         }
         if frame_meta:
             frame_payload["backendMeta"] = _to_camel_meta(frame_meta)
@@ -1644,6 +1727,7 @@ def normalize_session_options(payload: JsonDict, *, trust_existing_route: bool =
 
     frame_limit = _optional_positive_int(payload.get("frameLimit", payload.get("frame_limit")))
     enable_hands = _payload_bool(payload.get("enableHands", payload.get("enable_hands")), default=True)
+    requires_capabilities = _requires_capabilities_from_payload(payload)
     route_payload = payload.get("backendRoute") if trust_existing_route else None
     if isinstance(route_payload, dict):
         route_dict = dict(route_payload)
@@ -1651,16 +1735,20 @@ def normalize_session_options(payload: JsonDict, *, trust_existing_route: bool =
         route_dict = route_for_preview(
             enable_hands=enable_hands,
             model_availability=_route_model_availability_from_payload(payload),
+            requires_capabilities=requires_capabilities,
         ).to_camel_dict()
+    frame_channel = payload.get("frameChannel") or payload.get("frame_channel")
     return PreviewSessionOptions(
         source=state.value,
         source_kind=state.kind,
         pose_variant=pose_variant,
         workers=clamp_workers(payload.get("workers", 1)),
         enable_hands=enable_hands,
+        requires_capabilities=requires_capabilities,
         record_dir=_optional_str(payload.get("recordDir", payload.get("record_dir"))),
         frame_limit=frame_limit,
         backend_route=route_dict,
+        frame_channel=dict(frame_channel) if isinstance(frame_channel, dict) else {},
     )
 
 
@@ -1697,7 +1785,14 @@ def normalize_analysis_run_options(payload: JsonDict, *, trust_existing_route: b
     if do_compare and not template_path:
         raise ValueError("templatePath is required when doCompare is true")
     enable_hands = _payload_bool(payload.get("enableHands", payload.get("enable_hands")), default=True)
-    requires_capabilities = tuple(payload.get("requiresCapabilities") or payload.get("requires_capabilities") or ())
+    requires_capabilities = _requires_capabilities_from_payload(payload)
+    if (
+        quality_profile == QualityProfile.HIGH_QUALITY.value
+        and not do_compare
+        and not do_tech_eval
+        and enable_hands
+    ):
+        raise ValueError("high_quality body-only analysis requires enableHands=false")
     route_payload = payload.get("backendRoute") if trust_existing_route else None
     if isinstance(route_payload, dict):
         route_dict = dict(route_payload)
@@ -1708,7 +1803,7 @@ def normalize_analysis_run_options(payload: JsonDict, *, trust_existing_route: b
             do_tech_eval=do_tech_eval,
             quality_profile=quality_profile,
             model_availability=_route_model_availability_from_payload(payload),
-            requires_capabilities=tuple(str(item) for item in requires_capabilities),
+            requires_capabilities=requires_capabilities,
         ).to_camel_dict()
     return AnalysisRunOptions(
         video_path=video_path,
@@ -1758,10 +1853,22 @@ def _route_model_availability_from_payload(payload: JsonDict) -> ModelAvailabili
         return _default_route_model_availability()
     return ModelAvailability(
         yolo_realtime=_payload_bool(raw.get("yoloRealtime", raw.get("yolo_realtime")), default=False),
+        yolo_realtime_model=str(raw.get("yoloRealtimeModel", raw.get("yolo_realtime_model", ""))).strip().lower(),
         yolo26l=_payload_bool(raw.get("yolo26L", raw.get("yolo26l")), default=False),
         yolo_supported=_payload_bool(raw.get("yoloSupported", raw.get("yolo_supported")), default=False),
         reason=str(raw.get("reason") or raw.get("message") or ""),
     )
+
+
+def _requires_capabilities_from_payload(payload: JsonDict) -> tuple[str, ...]:
+    raw = payload.get("requiresCapabilities", payload.get("requires_capabilities", ()))
+    if raw is None or raw == "":
+        return ()
+    if isinstance(raw, str):
+        return (raw,)
+    if isinstance(raw, (list, tuple, set)):
+        return tuple(str(item) for item in raw if str(item).strip())
+    return (str(raw),)
 
 
 def _normalize_annotate_result(value: Any) -> tuple[Any, list[str], JsonDict]:
@@ -1960,6 +2067,46 @@ def _spec_key(spec: Any) -> str:
 
 def _spec_label(spec: Any) -> str:
     return str(getattr(spec, "label", _spec_key(spec)))
+
+
+def _spec_category(spec: Any) -> str:
+    return str(getattr(spec, "category", "mediapipe") or "mediapipe")
+
+
+def _model_license(spec: Any) -> str:
+    if _spec_category(spec) == "yolo":
+        return "Ultralytics model/license terms; verify before redistribution"
+    return "MediaPipe official model asset"
+
+
+def _model_purpose(spec: Any) -> str:
+    category = _spec_category(spec)
+    profile = str(getattr(spec, "profile", _spec_key(spec)) or _spec_key(spec))
+    if category == "yolo":
+        if profile == "yolo26l":
+            return "offline body-only internal analysis; not formal scoring"
+        if "yolo26x" in profile:
+            return "experimental only; not default route"
+        return "realtime body-only preview fallback candidate"
+    if _spec_key(spec) == "hand":
+        return "hand landmark detection when enableHands=true"
+    return "MediaPipe pose inference"
+
+
+def _model_proxy_hint(spec: Any) -> str:
+    if bool(getattr(spec, "downloadable", True)):
+        return "http://127.0.0.1:7890 by default; override VISION_MODEL_PROXY"
+    return "manual install; use local proxy for external downloads"
+
+
+def _model_offline_install_hint(spec: Any) -> str:
+    return f"Place {str(getattr(spec, 'filename', _spec_key(spec)))} under models/"
+
+
+def _model_download_hint(spec: Any) -> str:
+    if bool(getattr(spec, "downloadable", True)):
+        return "automatic download supported"
+    return str(getattr(spec, "note", "") or "automatic download unavailable; install manually")
 
 
 def _default_recording_factory(options: PreviewSessionOptions) -> Any:

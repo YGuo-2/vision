@@ -93,8 +93,9 @@ export async function selectDirectory(): Promise<string | null> {
 export async function fetchLatestFrameBytes(payload: JsonRecord): Promise<ArrayBuffer | null> {
   const sessionId = typeof payload.sessionId === "string" ? payload.sessionId : "";
   const frameToken = typeof payload.frameToken === "string" ? payload.frameToken : "";
-  const framePort = Number(payload.framePort ?? 0);
-  if (!sessionId || !frameToken || !Number.isFinite(framePort) || framePort <= 0) {
+  const frameHandle = typeof payload.frameHandle === "string" ? payload.frameHandle : "";
+  const frameId = Number(payload.frameId ?? 0);
+  if (!sessionId || !frameToken || !frameHandle || !Number.isFinite(frameId) || frameId <= 0) {
     return null;
   }
   if (!isTauriRuntime()) {
@@ -103,8 +104,9 @@ export async function fetchLatestFrameBytes(payload: JsonRecord): Promise<ArrayB
   return invoke<ArrayBuffer>("latest_frame", {
     request: {
       sessionId,
-      framePort,
-      frameToken
+      frameToken,
+      frameId,
+      frameHandle
     }
   });
 }

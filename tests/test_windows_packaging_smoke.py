@@ -56,8 +56,16 @@ def test_rust_bridge_prefers_packaged_sidecar_and_keeps_dev_fallback() -> None:
     assert '"jobId": null' in source
     assert '"sessionId": null' in source
     assert "latest_frame" in source
-    assert "TcpStream::connect((\"127.0.0.1\", request.frame_port))" in source
-    assert "Response::new(bytes)" in source
+    assert "TcpListener::bind((\"127.0.0.1\", 0))" in source
+    assert "ensure_latest_frame_channel" in source
+    assert "schedule_terminal_frame_channel_cleanup" in source
+    assert '"frameChannel"' in source
+    assert "close_for_session" in source
+    assert "channels.remove(&session_id)" in source
+    assert 'matches!(state, "completed" | "stopped")' in source
+    assert "Arc::ptr_eq(current, &expected_channel)" in source
+    assert "guard.remove(expected_session_id)" in source
+    assert "Response::new(slot.bytes)" in source
 
 
 def test_rust_directory_picker_initializes_com_for_shell32_dialog() -> None:
@@ -140,6 +148,16 @@ def test_bridge_json_preserves_chinese_and_space_paths() -> None:
 
     assert "样本 数据" in encoded
     assert decoded["payload"]["path"] == path
+
+
+def test_python_latest_frame_writer_leaves_terminal_close_to_rust() -> None:
+    source = (ROOT / "apps" / "ui_backend.py").read_text(encoding="utf-8")
+    close_start = source.index("    def close(self) -> None:", source.index("class LatestFrameChannel"))
+    write_start = source.index("    def _write_frame", close_start)
+    close_block = source[close_start:write_start]
+
+    assert "Rust owns latest-frame channel lifetime" in close_block
+    assert "CLOSE" not in close_block
 
 
 def test_packaged_sidecar_resource_responds_to_bridge_ping_when_present() -> None:

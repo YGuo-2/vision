@@ -59,6 +59,8 @@ for (const marker of [
   "model.download",
   "model.progress",
   "model.status",
+  "qualityProfile: highQualityBodyOnly.value ? \"high_quality\" : \"default\"",
+  "highQualityBodyOnly",
   "yoloRuntimeMessage",
   "selectRecordDir",
   "选择目录",
@@ -117,6 +119,9 @@ for (const marker of ["selectDirectory", "invoke<string | null>(\"select_directo
 for (const marker of ["fetchLatestFrameBytes", "invoke<ArrayBuffer>(\"latest_frame\""]) {
   assertIncludes(bridge, marker, "bridge.ts");
 }
+for (const marker of ["frameId", "frameHandle", "sessionId", "frameToken"]) {
+  assertIncludes(bridge, marker, "bridge.ts latest-frame request binding");
+}
 
 for (const marker of [
   "fetchLatestFrameBytes(frame.payload)",
@@ -124,7 +129,19 @@ for (const marker of [
   "createImageBitmap(blob)",
   "ctx.drawImage(bitmap, 0, 0)",
   "bitmap.close()",
-  "cancelPendingFrameRender"
+  "cancelPendingFrameRender",
+  "isPendingFrameCurrent(frame)",
+  "applyFrameMetadata(frame.payload)",
+  "acceptLatestFrameIdentity(payload, event.sessionId ?? null, event.jobId ?? null)",
+  "sanitizedRawEnvelope(envelope)",
+  "latestFrameIdentity",
+  "routeModelAvailability()",
+  "fallbackNotice",
+  "reviewNotice",
+  "multiPersonDetected",
+  "license",
+  "offlineInstall",
+  "downloadHint"
 ]) {
   assertIncludes(app, marker, "App.vue");
 }
@@ -133,12 +150,30 @@ assert(!app.includes("previewImage"), "preview frames must not be stored in a re
 assert(!app.includes("URL.createObjectURL"), "preview frames must render via Canvas/ImageBitmap, not object URLs");
 assert(!app.includes("<img"), "preview stage must not render frames through an img element");
 assertIncludes(app, "<canvas ref=\"previewCanvas\"", "App.vue");
+assert(
+  app.indexOf("applyBackendRouteNotice(response.payload.backendRoute)") >
+    app.indexOf("async function startSession"),
+  "startSession must immediately apply backendRoute fallback notices"
+);
+assert(
+  app.indexOf("acceptLatestFrameIdentity(payload, event.sessionId ?? null, event.jobId ?? null)") <
+    app.indexOf("if (!shouldRenderPreviewFrame())"),
+  "throttled newer frames must update latest identity before preview render throttling"
+);
 
 for (const marker of ["select_directory", "OleInitialize", "OleUninitialize", "SHBrowseForFolderW", "SHGetPathFromIDListW"]) {
   assertIncludes(tauri, marker, "src-tauri lib.rs");
 }
 
-for (const marker of ["fn latest_frame", "TcpStream::connect", "Response::new(bytes)"]) {
+for (const marker of [
+  "fn latest_frame",
+  "TcpListener::bind",
+  "ensure_latest_frame_channel",
+  "\"frameChannel\"",
+  "frame_handle",
+  "frame_id",
+  "Response::new(slot.bytes)"
+]) {
   assertIncludes(tauri, marker, "src-tauri lib.rs");
 }
 
@@ -407,6 +442,41 @@ assert(
   bridgeState.shouldRenderPreviewFrameAt(1, Number.NEGATIVE_INFINITY, 100) === true,
   "first session.frame after a new session must render immediately"
 );
+
+assert(
+  bridgeState.isCurrentFrameIdentity(
+    { sessionId: "session-current", jobId: "job-session", frameId: 2, frameHandle: "session-current:2" },
+    { sessionId: "session-current", jobId: "job-session", frameId: 2, frameHandle: "session-current:2" }
+  ) === true,
+  "matching latest-frame identity must be accepted"
+);
+assert(
+  bridgeState.isCurrentFrameIdentity(
+    { sessionId: "session-current", jobId: "job-session", frameId: 1, frameHandle: "session-current:1" },
+    { sessionId: "session-current", jobId: "job-session", frameId: 2, frameHandle: "session-current:2" }
+  ) === false,
+  "same-session stale frame identity must be rejected"
+);
+
+const rawFrameEnvelope = {
+  type: "event",
+  event: "session.frame",
+  jobId: "job-session",
+  sessionId: "session-current",
+  payload: {
+    sessionId: "session-current",
+    frameToken: "secret-token",
+    frameHandle: "session-current:9",
+    frameId: 9,
+    nested: { frameToken: "nested-token", keep: true }
+  },
+  error: null,
+  timestamp: "2026-06-09T00:00:00Z"
+};
+const sanitizedRawFrameJson = JSON.stringify(bridgeState.sanitizedRawEnvelope(rawFrameEnvelope), null, 2);
+assert(!sanitizedRawFrameJson.includes("secret-token"), "raw JSON must scrub frameToken");
+assert(!sanitizedRawFrameJson.includes("session-current:9"), "raw JSON must scrub frameHandle");
+assert(sanitizedRawFrameJson.includes("\"frameId\": 9"), "raw JSON must keep frameId for debugging");
 
 let lastPreviewFrameAt = 1000;
 if (bridgeState.shouldRenderPreviewFrameAt(1050, lastPreviewFrameAt, 100)) {

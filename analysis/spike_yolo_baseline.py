@@ -92,6 +92,15 @@ BLAZE33_MISSING_IN_COCO17: tuple[int, ...] = (
 
 # body_core_v1 关心的 12 个躯干四肢核心点（用于"对照"统计聚焦）。
 BODY_CORE_V1_INDICES: tuple[int, ...] = (11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28)
+YOLO_ARTIFACT_METADATA: dict[str, Any] = {
+    "backend": "yolo",
+    "raw_layout": "pose33_like_coco17",
+    "feature_layout": "body_core_v1",
+    "capability": "body_only",
+    "score_authorized": False,
+    "calibration_status": "unvalidated",
+    "display_scope": "internal",
+}
 
 
 @dataclass
@@ -473,6 +482,18 @@ def process_video(
     yolo_run = run_yolo(video_path, yolo_model=yolo_model, valid_conf_thr=yolo_conf_thr)
 
     body_core = BODY_CORE_V1_INDICES
+    yolo_meta = {
+        **YOLO_ARTIFACT_METADATA,
+        "model": yolo_run.model_name,
+        "fps_infer": round(yolo_run.fps_infer, 3),
+        "fps_wall": round(yolo_run.fps_wall, 3),
+        "miss_rate": round(yolo_run.miss_rate, 4),
+        "init_sec": round(yolo_run.init_sec, 3),
+        "jitter_body_core": _round_or_none(temporal_jitter(yolo_run, body_core)),
+        "multi_person_frames": yolo_run.multi_person_frames,
+        "max_persons": yolo_run.max_persons,
+        "track_policy": yolo_run.extra.get("track_policy"),
+    }
     rec: dict[str, Any] = {
         "video": str(video_path),
         "frames": mp_run.n_frames,
@@ -484,18 +505,7 @@ def process_video(
             "init_sec": round(mp_run.init_sec, 3),
             "jitter_body_core": _round_or_none(temporal_jitter(mp_run, body_core)),
         },
-        "yolo": {
-            "model": yolo_run.model_name,
-            "fps_infer": round(yolo_run.fps_infer, 3),
-            "fps_wall": round(yolo_run.fps_wall, 3),
-            "miss_rate": round(yolo_run.miss_rate, 4),
-            "init_sec": round(yolo_run.init_sec, 3),
-            "jitter_body_core": _round_or_none(temporal_jitter(yolo_run, body_core)),
-            "multi_person_frames": yolo_run.multi_person_frames,
-            "max_persons": yolo_run.max_persons,
-            "calibration_status": yolo_run.extra.get("calibration_status"),
-            "track_policy": yolo_run.extra.get("track_policy"),
-        },
+        "yolo": yolo_meta,
         "cross_backend_body_core_diff": cross_backend_position_diff(mp_run, yolo_run, body_core),
         "fps_speedup_infer": _round_or_none(
             yolo_run.fps_infer / mp_run.fps_infer if mp_run.fps_infer > 0 else None
@@ -536,7 +546,7 @@ def _stable_video_id(video_path: Path) -> str:
 def _frame_export(run: BackendRun, frame_index: int) -> dict[str, Any]:
     has_frame = run.landmarks is not None and frame_index < run.landmarks.shape[0]
     person_count = run.person_counts[frame_index] if frame_index < len(run.person_counts) else 0
-    return {
+    rec = {
         "backend": run.backend,
         "model": run.model_name,
         "detected": bool(person_count > 0),
@@ -552,8 +562,12 @@ def _frame_export(run: BackendRun, frame_index: int) -> dict[str, Any]:
         "confidence_kind": run.extra.get("confidence_kind"),
         "validity_policy": run.extra.get("validity_policy"),
         "valid_conf_thr": run.extra.get("valid_conf_thr"),
-        "calibration_status": run.extra.get("calibration_status"),
     }
+    if run.backend == "yolo":
+        rec.update(YOLO_ARTIFACT_METADATA)
+    else:
+        rec["calibration_status"] = run.extra.get("calibration_status")
+    return rec
 
 
 def _rounded_landmarks(arr: np.ndarray) -> list[list[float]]:
@@ -684,6 +698,8 @@ def _write_csv(path: Path, records: list[dict[str, Any]]) -> None:
         "mp_jitter_body_core", "yolo_jitter_body_core",
         "cross_diff_median", "cross_diff_p90",
         "yolo_multi_person_frames", "yolo_max_persons",
+        "yolo_backend", "yolo_raw_layout", "yolo_feature_layout", "yolo_capability",
+        "yolo_score_authorized", "yolo_calibration_status", "yolo_display_scope",
     ]
     with path.open("w", newline="", encoding="utf-8-sig") as fh:
         w = csv.writer(fh)
@@ -700,6 +716,9 @@ def _write_csv(path: Path, records: list[dict[str, Any]]) -> None:
                 r["mediapipe"]["jitter_body_core"], r["yolo"]["jitter_body_core"],
                 cb["median_diff"], cb["p90_diff"],
                 r["yolo"]["multi_person_frames"], r["yolo"]["max_persons"],
+                r["yolo"]["backend"], r["yolo"]["raw_layout"], r["yolo"]["feature_layout"],
+                r["yolo"]["capability"], r["yolo"]["score_authorized"],
+                r["yolo"]["calibration_status"], r["yolo"]["display_scope"],
             ])
 
 

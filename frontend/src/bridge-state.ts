@@ -1,4 +1,4 @@
-import type { BridgeEnvelope, JsonRecord } from "./bridge";
+import type { BridgeEnvelope, JsonRecord, JsonValue } from "./bridge";
 
 export type CurrentBridgeState = {
   sessionId?: string;
@@ -10,6 +10,13 @@ export type CurrentBridgeState = {
 export type ModelDownloadSummary = {
   status: string;
   failed: JsonRecord[];
+};
+
+export type FrameIdentity = {
+  sessionId?: string | null;
+  jobId?: string | null;
+  frameId: number;
+  frameHandle: string;
 };
 
 export type BridgeFailureRequest = {
@@ -102,6 +109,22 @@ export function shouldRenderPreviewFrameAt(
   return nowMs - lastRenderedAtMs >= minIntervalMs;
 }
 
+export function isCurrentFrameIdentity(frame: FrameIdentity, current: FrameIdentity | null | undefined): boolean {
+  return Boolean(
+    current &&
+      frame.sessionId === current.sessionId &&
+      frame.jobId === current.jobId &&
+      frame.frameId === current.frameId &&
+      frame.frameHandle === current.frameHandle
+  );
+}
+
+export function sanitizedRawEnvelope<TPayload extends JsonRecord = JsonRecord>(
+  envelope: BridgeEnvelope<TPayload>
+): BridgeEnvelope {
+  return sanitizeValue(envelope) as BridgeEnvelope;
+}
+
 export function progressTextForSessionStatus(payload: JsonRecord): string | null {
   if (String(payload.state ?? "") !== "running") {
     return null;
@@ -174,6 +197,24 @@ function isKnownJobId(eventJobId: string, state: CurrentBridgeState): boolean {
     eventJobId === state.analysisJobId ||
     eventJobId === state.modelDownloadJobId
   );
+}
+
+function sanitizeValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeValue(item));
+  }
+  const record = asRecord(value);
+  if (!record) {
+    return value;
+  }
+  const sanitized: JsonRecord = {};
+  for (const [key, item] of Object.entries(record)) {
+    if (key === "frameToken" || key === "frameHandle") {
+      continue;
+    }
+    sanitized[key] = sanitizeValue(item) as JsonValue;
+  }
+  return sanitized;
 }
 
 function asRecord(value: unknown): JsonRecord | null {

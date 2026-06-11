@@ -2,25 +2,25 @@
 
 > **Workflow:** design-first
 > **Mode:** strict
-> **Status:** Completed
+> **Status:** Accepted
 > **Current Task:** n/a
 > **Approval:** approved
-> **Last Checkpoint:** 2026-06-11 16:10:57
+> **Last Checkpoint:** 2026-06-11 21:02:42
 > **Branch:** main
-> **Last Known Commit:** 3c41f33
+> **Last Known Commit:** 81c6dfa
 
 ## Resume Summary
 - Goal: 完成桌面栈、打包和迁移文档验收
 - Approved specs: design.md, requirements.md, tasks.md
 - Current task: n/a
-- Next safe action: Run pre-acceptance, then final acceptance.
+- Next safe action: Run spec_status, then continue the current task.
 - Blockers: n/a
 
 ## Active Task State
 - Task ID: n/a
 - Status: done
 - Started at: n/a
-- Verification needed: cmd: npm run verify:desktop => exit 0, frontend build + frontend smoke + cargo check + py_compile + desktop regression 133 passed; cmd: npm run package:windows => exit 0, NSIS installer generated at frontend/src-tauri/target/release/bundle/nsis/Vision 动作识别与评分_0.1.0_x64-setup.exe; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_windows_packaging_smoke.py tests/test_yolo_landmark_mapping.py tests/test_yolo_backend_contract.py tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q => exit 0, 73 passed; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py tests/test_yolo_backend_contract.py tests/test_yolo_landmark_mapping.py tests/test_rule_availability.py tests/test_tech_eval_contract.py -q => exit 0, 82 passed; cmd: git diff --check => exit 0 (line-ending warnings only)
+- Verification needed: Final acceptance passed through acceptance_state.json
 - Files expected to change: `scripts/verify-desktop-stack.ps1`, `scripts/build-tauri-sidecar.ps1`, `frontend/src-tauri/tauri.conf.json`, `docs/yolo_default_switch_decision.md`, `docs/yolo_migration_issues.md`, `change.md`
 
 ## Completed Work Log
@@ -39,4 +39,4 @@
 | T-010 | 2026-06-11 16:10:57 | 3c41f33 | cmd: npm run verify:desktop => exit 0, frontend build + frontend smoke + cargo check + py_compile + desktop regression 133 passed; cmd: npm run package:windows => exit 0, NSIS installer generated at frontend/src-tauri/target/release/bundle/nsis/Vision 动作识别与评分_0.1.0_x64-setup.exe; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_windows_packaging_smoke.py tests/test_yolo_landmark_mapping.py tests/test_yolo_backend_contract.py tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q => exit 0, 73 passed; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py tests/test_yolo_backend_contract.py tests/test_yolo_landmark_mapping.py tests/test_rule_availability.py tests/test_tech_eval_contract.py -q => exit 0, 82 passed; cmd: git diff --check => exit 0 (line-ending warnings only) | 修复 packaged release Manager import 和 sidecar router 对 YOLO runtime 的硬依赖；同步 yolo_default_switch_decision 与 yolo_migration_issues 最终口径；更新 change.md。 |
 
 ## Recovery Notes
-- Completed T-010
+- Final acceptance accepted

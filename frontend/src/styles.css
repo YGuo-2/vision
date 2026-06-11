@@ -371,6 +371,16 @@ button:disabled {
   font-size: 13px;
 }
 
+.warning-strip {
+  border: 1px solid #d7c37a;
+  border-radius: 7px;
+  padding: 10px 12px;
+  background: #fff9df;
+  color: #685412;
+  font-size: 13px;
+  font-weight: 700;
+}
+
 .raw-panel {
   border: 1px solid #d8e1e1;
   border-radius: 7px;

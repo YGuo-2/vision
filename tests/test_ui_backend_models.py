@@ -44,6 +44,12 @@ def _yolo_spec(key: str, filename: str, label: str):
     )
 
 
+def _runtime_yolo_spec(key: str, filename: str, label: str):
+    spec = _yolo_spec(key, filename, label)
+    spec.installed_supported = True
+    return spec
+
+
 def _install_fake_url_opener(monkeypatch: pytest.MonkeyPatch, response) -> None:
     class FakeOpener:
         def open(self, req, timeout):
@@ -82,6 +88,11 @@ def test_model_status_returns_active_missing_and_path_payload(tmp_path: Path) ->
         assert payload["missingKeys"] == ["hand"]
         assert payload["models"][0]["installed"] is True
         assert payload["models"][1]["installed"] is False
+        assert payload["models"][0]["license"]
+        assert payload["models"][0]["purpose"]
+        assert payload["models"][0]["proxy"]
+        assert payload["models"][0]["offlineInstall"]
+        assert payload["models"][0]["downloadHint"]
     finally:
         ui_backend.DEFAULT_MODEL_SERVICE = previous
 
@@ -118,7 +129,76 @@ def test_model_status_lists_yolo_profiles_without_marking_them_download_missing(
         assert by_key["yolo26l"]["installedSupported"] is False
         assert by_key["yolo26x"]["defaultRouteEligible"] is False
         assert payload["yoloRuntime"]["supported"] is False
-        assert "不打包 YOLO runtime" in payload["yoloRuntime"]["message"]
+        assert "YOLO runtime" in payload["yoloRuntime"]["message"]
+        assert by_key["yolo26n"]["license"]
+        assert by_key["yolo26n"]["proxy"]
+        assert by_key["yolo26n"]["offlineInstall"]
+    finally:
+        ui_backend.DEFAULT_MODEL_SERVICE = previous
+
+
+def test_model_status_keeps_installed_yolo_unroutable_when_runtime_not_packaged(tmp_path: Path) -> None:
+    service = ui_backend.ModelManagementService(
+        specs=(
+            _spec("pose_full", "pose.task", "Pose Full"),
+            _yolo_spec("yolo26n", "yolo26n-pose.pt", "YOLO26n"),
+        ),
+        models_dir_func=lambda: tmp_path,
+        is_installed_func=lambda spec: spec.key == "yolo26n",
+        installed_size_func=lambda spec: 6.0 if spec.key == "yolo26n" else None,
+        model_path_func=lambda spec: tmp_path / spec.filename,
+    )
+    previous = _install_model_service(service)
+    try:
+        response = ui_backend.handle_command(
+            ui_backend.CommandRequest(
+                command="model.status",
+                request_id="req-yolo-installed-status",
+                payload={"poseVariant": "full", "enableHands": False},
+            )
+        )
+
+        assert response["ok"] is True
+        payload = response["payload"]
+        by_key = {item["key"]: item for item in payload["models"]}
+        assert by_key["yolo26n"]["installed"] is True
+        assert by_key["yolo26n"]["installedSupported"] is False
+        assert by_key["yolo26n"]["runtimeSupported"] is False
+        assert payload["backendRoute"]["backend"] == "mediapipe"
+        assert payload["backendRoute"]["fallbackReason"]
+        assert payload["yoloRuntime"]["supported"] is False
+    finally:
+        ui_backend.DEFAULT_MODEL_SERVICE = previous
+
+
+def test_model_status_routes_yolo26s_when_runtime_supported_and_only_s_is_installed(tmp_path: Path) -> None:
+    service = ui_backend.ModelManagementService(
+        specs=(
+            _spec("pose_full", "pose.task", "Pose Full"),
+            _runtime_yolo_spec("yolo26n", "yolo26n-pose.pt", "YOLO26n"),
+            _runtime_yolo_spec("yolo26s", "yolo26s-pose.pt", "YOLO26s"),
+        ),
+        models_dir_func=lambda: tmp_path,
+        is_installed_func=lambda spec: spec.key == "yolo26s",
+        installed_size_func=lambda spec: 6.0 if spec.key == "yolo26s" else None,
+        model_path_func=lambda spec: tmp_path / spec.filename,
+        packaged_yolo_runtime=True,
+    )
+    previous = _install_model_service(service)
+    try:
+        response = ui_backend.handle_command(
+            ui_backend.CommandRequest(
+                command="model.status",
+                request_id="req-yolo26s-installed-status",
+                payload={"poseVariant": "full", "enableHands": False},
+            )
+        )
+
+        assert response["ok"] is True
+        payload = response["payload"]
+        assert payload["backendRoute"]["backend"] == "yolo"
+        assert payload["backendRoute"]["modelProfile"] == "yolo26s"
+        assert payload["yoloRuntime"]["supported"] is True
     finally:
         ui_backend.DEFAULT_MODEL_SERVICE = previous
 
@@ -202,6 +282,47 @@ def test_model_download_all_missing_skips_installed_models(tmp_path: Path) -> No
         assert final is not None
         assert final.status == "succeeded"
         assert downloaded == ["hand"]
+    finally:
+        ui_backend.DEFAULT_MODEL_SERVICE = previous
+
+
+def test_model_download_all_missing_skips_non_downloadable_yolo_profiles(tmp_path: Path) -> None:
+    events: list[dict] = []
+    manager = ui_backend.BridgeJobManager(events.append)
+    specs = (
+        _spec("pose_full", "pose.task", "Pose Full"),
+        _yolo_spec("yolo26l", "yolo26l-pose.pt", "YOLO26L"),
+    )
+    downloaded: list[str] = []
+
+    def fake_download(spec, *, progress_cb, should_stop):
+        downloaded.append(spec.key)
+        return tmp_path / spec.filename
+
+    service = ui_backend.ModelManagementService(
+        job_manager=manager,
+        specs=specs,
+        models_dir_func=lambda: tmp_path,
+        is_installed_func=lambda spec: False,
+        installed_size_func=lambda spec: None,
+        model_path_func=lambda spec: tmp_path / spec.filename,
+        download_func=fake_download,
+    )
+    previous = _install_model_service(service)
+    try:
+        response = ui_backend.handle_command(
+            ui_backend.CommandRequest(
+                command="model.download",
+                request_id="req-missing-yolo-filter",
+                payload={"allMissing": True},
+            )
+        )
+        final = manager.wait(response["jobId"], 2.0)
+
+        assert final is not None
+        assert final.status == "succeeded"
+        assert downloaded == ["pose_full"]
+        assert final.result["failed"] == []
     finally:
         ui_backend.DEFAULT_MODEL_SERVICE = previous
 

@@ -4,11 +4,11 @@ use std::env;
 use std::ffi::c_void;
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{mpsc, Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{ipc::Response, AppHandle, Emitter, State};
 
 #[cfg(windows)]
@@ -65,17 +65,63 @@ struct BridgeLaunch {
     cwd: PathBuf,
 }
 
+#[derive(Clone)]
+struct LatestFrameSlot {
+    frame_id: u64,
+    frame_handle: String,
+    bytes: Vec<u8>,
+    payload_bytes: usize,
+    updated_at: Instant,
+}
+
+struct LatestFrameChannel {
+    token: String,
+    port: u16,
+    store: Arc<Mutex<HashMap<String, LatestFrameSlot>>>,
+    dropped_frames: Arc<Mutex<u64>>,
+    served_frames: Arc<Mutex<u64>>,
+}
+
+impl LatestFrameChannel {
+    fn payload(&self) -> serde_json::Value {
+        serde_json::json!({
+            "frameHost": "127.0.0.1",
+            "framePort": self.port,
+            "frameToken": self.token,
+            "frameId": 0,
+            "frameBytes": 0,
+            "publishedFrames": 0,
+            "droppedFrames": 0,
+            "servedFrames": 0,
+            "lastFrameAgeMs": null,
+            "frameTransport": "tcp-length-prefixed"
+        })
+    }
+
+    fn close_for_session(&self, session_id: &str) {
+        if let Ok(mut store) = self.store.lock() {
+            store.remove(session_id);
+        }
+        if let Ok(mut stream) = TcpStream::connect(("127.0.0.1", self.port)) {
+            let _ = writeln!(stream, "CLOSE {} {}", session_id, self.token);
+            let _ = stream.flush();
+        }
+    }
+}
+
 #[derive(Default)]
 struct BridgeState {
     process: Mutex<Option<BridgeProcess>>,
+    frame_channels: Arc<Mutex<HashMap<String, Arc<LatestFrameChannel>>>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LatestFrameRequest {
     pub session_id: String,
-    pub frame_port: u16,
     pub frame_token: String,
+    pub frame_id: u64,
+    pub frame_handle: String,
 }
 
 #[tauri::command]
@@ -214,8 +260,11 @@ fn pick_windows_directory() -> Option<String> {
 fn bridge_command(
     app: AppHandle,
     state: State<'_, BridgeState>,
-    request: BridgeCommandRequest,
+    mut request: BridgeCommandRequest,
 ) -> Result<BridgeEnvelope, String> {
+    if request.command == "session.start" {
+        ensure_latest_frame_channel(&state, &mut request)?;
+    }
     let request_id = request.request_id.clone();
     let line = serde_json::to_string(&request).map_err(|err| err.to_string())?;
     let (tx, rx) = mpsc::channel();
@@ -226,7 +275,10 @@ fn bridge_command(
             .lock()
             .map_err(|_| "bridge process lock poisoned".to_string())?;
         if bridge_needs_start(guard.as_mut()) {
-            *guard = Some(start_bridge_process(app.clone())?);
+            *guard = Some(start_bridge_process(
+                app.clone(),
+                Arc::clone(&state.frame_channels),
+            )?);
         }
         let process = guard
             .as_mut()
@@ -259,32 +311,301 @@ fn bridge_command(
 }
 
 #[tauri::command]
-fn latest_frame(request: LatestFrameRequest) -> Result<Response, String> {
-    let mut stream = TcpStream::connect(("127.0.0.1", request.frame_port))
-        .map_err(|err| format!("failed to connect latest-frame channel: {err}"))?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(2)))
-        .map_err(|err| format!("failed to set latest-frame read timeout: {err}"))?;
-    stream
-        .set_write_timeout(Some(Duration::from_secs(2)))
-        .map_err(|err| format!("failed to set latest-frame write timeout: {err}"))?;
-    let line = format!("GET {} {}\n", request.session_id, request.frame_token);
-    stream
-        .write_all(line.as_bytes())
-        .map_err(|err| format!("failed to request latest frame: {err}"))?;
-    let mut len_buf = [0u8; 4];
-    stream
-        .read_exact(&mut len_buf)
-        .map_err(|err| format!("failed to read latest-frame length: {err}"))?;
-    let len = u32::from_be_bytes(len_buf) as usize;
-    if len == 0 {
-        return Err("latest-frame channel returned no bytes".to_string());
+fn latest_frame(
+    state: State<'_, BridgeState>,
+    request: LatestFrameRequest,
+) -> Result<Response, String> {
+    let channel = {
+        let channels = state
+            .frame_channels
+            .lock()
+            .map_err(|_| "latest-frame channel lock poisoned".to_string())?;
+        channels
+            .get(&request.session_id)
+            .cloned()
+            .ok_or_else(|| "latest-frame channel not found".to_string())?
+    };
+    if request.frame_token != channel.token {
+        return Err("latest-frame token mismatch".to_string());
     }
+    let slot = {
+        let store = channel
+            .store
+            .lock()
+            .map_err(|_| "latest-frame store lock poisoned".to_string())?;
+        store
+            .get(&request.session_id)
+            .cloned()
+            .ok_or_else(|| "latest-frame store is empty".to_string())?
+    };
+    if slot.frame_id != request.frame_id || slot.frame_handle != request.frame_handle {
+        return Err(format!(
+            "latest-frame request is stale: requested={} stored={} bytes={} ageMs={}",
+            request.frame_id,
+            slot.frame_id,
+            slot.payload_bytes,
+            slot.updated_at.elapsed().as_millis()
+        ));
+    }
+    if let Ok(mut served) = channel.served_frames.lock() {
+        *served += 1;
+    }
+    Ok(Response::new(slot.bytes))
+}
+
+fn ensure_latest_frame_channel(
+    state: &State<'_, BridgeState>,
+    request: &mut BridgeCommandRequest,
+) -> Result<(), String> {
+    let session_id = match request.session_id.clone() {
+        Some(value) if !value.trim().is_empty() => value,
+        _ => match request.payload.get("sessionId").and_then(|value| value.as_str()) {
+            Some(value) if !value.trim().is_empty() => {
+                request.session_id = Some(value.to_string());
+                value.to_string()
+            }
+            _ => return Err("session.start requires sessionId for latest-frame channel".to_string()),
+        },
+    };
+    let previous = {
+        let mut channels = state
+            .frame_channels
+            .lock()
+            .map_err(|_| "latest-frame channel lock poisoned".to_string())?;
+        channels.remove(&session_id)
+    };
+    if let Some(old_channel) = previous {
+        old_channel.close_for_session(&session_id);
+    }
+    let channel = {
+        let created = Arc::new(start_latest_frame_channel(session_id.clone())?);
+        let mut channels = state
+            .frame_channels
+            .lock()
+            .map_err(|_| "latest-frame channel lock poisoned".to_string())?;
+        channels.insert(session_id.clone(), Arc::clone(&created));
+        created
+    };
+    if !request.payload.is_object() {
+        request.payload = serde_json::json!({});
+    }
+    if let Some(map) = request.payload.as_object_mut() {
+        map.insert("frameChannel".to_string(), channel.payload());
+    }
+    Ok(())
+}
+
+fn start_latest_frame_channel(session_id: String) -> Result<LatestFrameChannel, String> {
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .map_err(|err| format!("failed to bind latest-frame listener: {err}"))?;
+    let port = listener
+        .local_addr()
+        .map_err(|err| format!("failed to read latest-frame port: {err}"))?
+        .port();
+    listener
+        .set_nonblocking(true)
+        .map_err(|err| format!("failed to configure latest-frame listener: {err}"))?;
+    let channel = LatestFrameChannel {
+        token: random_token(),
+        port,
+        store: Arc::new(Mutex::new(HashMap::new())),
+        dropped_frames: Arc::new(Mutex::new(0)),
+        served_frames: Arc::new(Mutex::new(0)),
+    };
+    let token = channel.token.clone();
+    let store = Arc::clone(&channel.store);
+    let dropped_frames = Arc::clone(&channel.dropped_frames);
+    let served_frames = Arc::clone(&channel.served_frames);
+    std::thread::spawn(move || loop {
+        match listener.accept() {
+            Ok((mut stream, _addr)) => {
+                let should_close = handle_latest_frame_connection(
+                    &mut stream,
+                    &session_id,
+                    &token,
+                    &store,
+                    &dropped_frames,
+                    &served_frames,
+                );
+                if should_close {
+                    break;
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(_) => break,
+        }
+    });
+    Ok(channel)
+}
+
+fn handle_latest_frame_connection(
+    stream: &mut TcpStream,
+    expected_session_id: &str,
+    expected_token: &str,
+    store: &Arc<Mutex<HashMap<String, LatestFrameSlot>>>,
+    dropped_frames: &Arc<Mutex<u64>>,
+    served_frames: &Arc<Mutex<u64>>,
+) -> bool {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+    let mut header = Vec::new();
+    let mut byte = [0u8; 1];
+    while header.len() < 4096 {
+        if stream.read_exact(&mut byte).is_err() {
+            let _ = stream.write_all(b"ERR header\n");
+            return false;
+        }
+        if byte[0] == b'\n' {
+            break;
+        }
+        header.push(byte[0]);
+    }
+    let line = String::from_utf8_lossy(&header);
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    if parts.len() >= 3 && parts[0] == "CLOSE" {
+        if parts[1] == expected_session_id && parts[2] == expected_token {
+            if let Ok(mut guard) = store.lock() {
+                guard.remove(expected_session_id);
+            }
+        }
+        return parts[1] == expected_session_id && parts[2] == expected_token;
+    }
+    if parts.len() < 5 || parts[0] != "PUT" {
+        let _ = stream.write_all(b"ERR bad_request\n");
+        return false;
+    }
+    let session_id = parts[1];
+    let token = parts[2];
+    let frame_id = match parts[3].parse::<u64>() {
+        Ok(value) => value,
+        Err(_) => {
+            let _ = stream.write_all(b"ERR bad_frame_id\n");
+            return false;
+        }
+    };
+    let frame_handle = parts[4].to_string();
+    if session_id != expected_session_id || token != expected_token {
+        let _ = stream.write_all(b"ERR unauthorized\n");
+        return false;
+    }
+    let mut len_buf = [0u8; 4];
+    if stream.read_exact(&mut len_buf).is_err() {
+        let _ = stream.write_all(b"ERR length\n");
+        return false;
+    }
+    let len = u32::from_be_bytes(len_buf) as usize;
     let mut bytes = vec![0u8; len];
-    stream
-        .read_exact(&mut bytes)
-        .map_err(|err| format!("failed to read latest-frame bytes: {err}"))?;
-    Ok(Response::new(bytes))
+    if len > 0 && stream.read_exact(&mut bytes).is_err() {
+        let _ = stream.write_all(b"ERR payload\n");
+        return false;
+    }
+    let mut dropped = 0;
+    if let Ok(mut guard) = store.lock() {
+        if guard.contains_key(session_id) {
+            if let Ok(mut count) = dropped_frames.lock() {
+                *count += 1;
+                dropped = *count;
+            }
+        }
+        guard.insert(
+            session_id.to_string(),
+            LatestFrameSlot {
+                frame_id,
+                frame_handle,
+                payload_bytes: len,
+                bytes,
+                updated_at: Instant::now(),
+            },
+        );
+    }
+    let served = served_frames.lock().map(|value| *value).unwrap_or(0);
+    let ack = format!("OK droppedFrames={dropped} servedFrames={served}\n");
+    let _ = stream.write_all(ack.as_bytes());
+    false
+}
+
+fn random_token() -> String {
+    let mut bytes = [0u8; 16];
+    if fill_random_bytes(&mut bytes) {
+        return bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    }
+    let mut seed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_nanos())
+        .unwrap_or(0);
+    seed ^= (std::process::id() as u128) << 64;
+    let thread_id = format!("{:?}", std::thread::current().id());
+    for byte in thread_id.as_bytes() {
+        seed = seed.rotate_left(5) ^ (*byte as u128);
+    }
+    format!("{seed:032x}")
+}
+
+#[cfg(windows)]
+fn fill_random_bytes(bytes: &mut [u8]) -> bool {
+    #[link(name = "advapi32")]
+    extern "system" {
+        #[link_name = "SystemFunction036"]
+        fn rtl_gen_random(random_buffer: *mut u8, random_buffer_length: u32) -> i32;
+    }
+    unsafe { rtl_gen_random(bytes.as_mut_ptr(), bytes.len() as u32) != 0 }
+}
+
+#[cfg(not(windows))]
+fn fill_random_bytes(_bytes: &mut [u8]) -> bool {
+    false
+}
+
+fn schedule_terminal_frame_channel_cleanup(
+    frame_channels: &Arc<Mutex<HashMap<String, Arc<LatestFrameChannel>>>>,
+    envelope: &BridgeEnvelope,
+) {
+    let event = match envelope.event.as_deref() {
+        Some(value) => value,
+        None => return,
+    };
+    let terminal = match event {
+        "session.status" => envelope
+            .payload
+            .get("state")
+            .and_then(|value| value.as_str())
+            .is_some_and(|state| matches!(state, "completed" | "stopped")),
+        "job.completed" | "job.stopped" | "job.failed" => true,
+        _ => false,
+    };
+    if !terminal {
+        return;
+    }
+    let Some(session_id) = envelope.session_id.clone() else {
+        return;
+    };
+    let expected_channel = {
+        let Ok(channels) = frame_channels.lock() else {
+            return;
+        };
+        channels.get(&session_id).cloned()
+    };
+    let Some(expected_channel) = expected_channel else {
+        return;
+    };
+    let channels_for_cleanup = Arc::clone(frame_channels);
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(2));
+        let removed = {
+            let Ok(mut channels) = channels_for_cleanup.lock() else {
+                return;
+            };
+            match channels.get(&session_id) {
+                Some(current) if Arc::ptr_eq(current, &expected_channel) => channels.remove(&session_id),
+                _ => None,
+            }
+        };
+        if let Some(channel) = removed {
+            channel.close_for_session(&session_id);
+        }
+    });
 }
 
 fn bridge_needs_start(process: Option<&mut BridgeProcess>) -> bool {
@@ -298,7 +619,10 @@ fn bridge_needs_start(process: Option<&mut BridgeProcess>) -> bool {
     }
 }
 
-fn start_bridge_process(app: AppHandle) -> Result<BridgeProcess, String> {
+fn start_bridge_process(
+    app: AppHandle,
+    frame_channels: Arc<Mutex<HashMap<String, Arc<LatestFrameChannel>>>>,
+) -> Result<BridgeProcess, String> {
     let repo_root = repo_root();
     let launch = bridge_launch(&app, &repo_root);
     let mut command = Command::new(&launch.program);
@@ -335,6 +659,7 @@ fn start_bridge_process(app: AppHandle) -> Result<BridgeProcess, String> {
 
     let pending_reader = Arc::clone(&pending);
     let app_reader = app.clone();
+    let frame_channels_reader = Arc::clone(&frame_channels);
     std::thread::spawn(move || {
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
             if line.trim().is_empty() {
@@ -342,6 +667,7 @@ fn start_bridge_process(app: AppHandle) -> Result<BridgeProcess, String> {
             }
             match serde_json::from_str::<BridgeEnvelope>(&line) {
                 Ok(envelope) => {
+                    schedule_terminal_frame_channel_cleanup(&frame_channels_reader, &envelope);
                     let is_response = envelope.r#type == "response";
                     if is_response {
                         if let Some(request_id) = envelope.request_id.clone() {

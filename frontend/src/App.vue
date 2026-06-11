@@ -12,12 +12,15 @@ import {
 } from "./bridge";
 import { stopJobById } from "./bridge-lifecycle";
 import {
+  type FrameIdentity,
   initialSessionProgressText,
+  isCurrentFrameIdentity,
   isBridgeEventForCurrentState,
   modelDownloadStatusFromJobEvent,
   modelDownloadStatusFromPayload,
   progressTextForFrameProgress,
   progressTextForSessionStatus,
+  sanitizedRawEnvelope,
   shouldApplyModelDownloadStartResponse,
   shouldApplySessionStartResponse,
   shouldRenderPreviewFrameAt,
@@ -36,8 +39,14 @@ type ModelItem = {
   profile?: string;
   downloadable?: boolean;
   installedSupported?: boolean;
+  runtimeSupported?: boolean;
   defaultRouteEligible?: boolean;
   note?: string;
+  license?: string;
+  purpose?: string;
+  proxy?: string;
+  offlineInstall?: string;
+  downloadHint?: string;
   path?: string;
   sizeMb?: number | null;
 };
@@ -58,6 +67,8 @@ type PendingFrame = {
   payload: SessionFramePayload;
   sessionId: string | null;
   jobId: string | null;
+  frameId: number;
+  frameHandle: string;
 };
 
 type AnalysisMode = "template" | "analysis";
@@ -92,6 +103,8 @@ const statusText = ref("就绪");
 const actionsText = ref("-");
 const fpsText = ref("--");
 const progressText = ref("等待开始");
+const fallbackNotice = ref("");
+const reviewNotice = ref("");
 const previewCanvas = ref<HTMLCanvasElement | null>(null);
 const frameIndex = ref(0);
 const isRunning = ref(false);
@@ -111,6 +124,7 @@ const analysisWorkers = ref(1);
 const previewOut = ref("");
 const doCompare = ref(true);
 const doTechEval = ref(false);
+const highQualityBodyOnly = ref(false);
 const stance = ref<"left" | "right">("left");
 const viewHint = ref<"auto" | "front" | "side" | "mixed">("auto");
 const debugVideo = ref(false);
@@ -207,6 +221,7 @@ const techIndicatorRows = computed<TechIndicatorRow[]>(() => {
 let unlisten: (() => void) | undefined;
 let lastPreviewFrameAt = 0;
 let pendingFrame: PendingFrame | null = null;
+let latestFrameIdentity: FrameIdentity | null = null;
 let frameRenderRaf: number | null = null;
 // 上限保护:仅在后端异常突发时限速,正常 30fps(帧间隔 ~33ms)不受影响。
 // 取 16ms(~60fps 上限)而非 33ms,避免与 30fps 帧到达相位抖动导致周期性丢帧。
@@ -367,6 +382,8 @@ async function startSession(): Promise<void> {
   statusText.value = "启动中…";
   actionsText.value = "-";
   fpsText.value = "--";
+  fallbackNotice.value = "";
+  reviewNotice.value = "";
   progressText.value = initialSessionProgressText();
   clearPreviewCanvas();
   cancelPendingFrameRender();
@@ -380,7 +397,8 @@ async function startSession(): Promise<void> {
     sourceKind: sourceKind.value,
     poseVariant: poseVariant.value,
     workers: workers.value,
-    enableHands: enableHands.value
+    enableHands: enableHands.value,
+    modelAvailability: routeModelAvailability()
   };
   assignOptionalString(payload, "recordDir", recordDir.value);
   if (sourceKind.value === "camera") {
@@ -408,6 +426,7 @@ async function startSession(): Promise<void> {
   isRunning.value = true;
   sessionId.value = response.sessionId ?? pendingSessionId;
   jobId.value = response.jobId ?? pendingJobId;
+  applyBackendRouteNotice(response.payload.backendRoute);
 }
 
 async function stopSession(): Promise<void> {
@@ -495,8 +514,8 @@ async function runAnalysis(): Promise<void> {
     errorText.value = "模板比对需要填写模板路径";
     return;
   }
-  if (!doCompare.value && !doTechEval.value) {
-    errorText.value = "请至少启用模板比对或直拳技术评估";
+  if (!doCompare.value && !doTechEval.value && !highQualityBodyOnly.value) {
+    errorText.value = "请至少启用模板比对、直拳技术评估或高质量 body-only 分析";
     return;
   }
   analysisMode.value = "analysis";
@@ -511,6 +530,9 @@ async function runAnalysis(): Promise<void> {
     workers: analysisWorkers.value,
     doCompare: doCompare.value,
     doTechEval: doTechEval.value,
+    enableHands: enableHands.value,
+    qualityProfile: highQualityBodyOnly.value ? "high_quality" : "default",
+    modelAvailability: routeModelAvailability(),
     stance: stance.value,
     viewHint: viewHint.value,
     debugVideo: debugVideo.value
@@ -530,6 +552,7 @@ async function runAnalysis(): Promise<void> {
     return;
   }
   analysisJobId.value = response.jobId ?? pendingJobId;
+  applyBackendRouteNotice(response.payload.backendRoute);
 }
 
 async function stopAnalysisJob(): Promise<void> {
@@ -559,6 +582,7 @@ function handleBridgeEvent(event: BridgeEnvelope): void {
       if (nextProgressText) {
         progressText.value = nextProgressText;
       }
+      applyBackendRouteNotice(event.payload.backendRoute);
     }
     if (state === "completed" || state === "stopped") {
       statusText.value = "已停止";
@@ -566,18 +590,14 @@ function handleBridgeEvent(event: BridgeEnvelope): void {
     }
   }
   if (event.event === "session.frame") {
+    const payload = event.payload as SessionFramePayload;
+    if (!acceptLatestFrameIdentity(payload, event.sessionId ?? null, event.jobId ?? null)) {
+      return;
+    }
     if (!shouldRenderPreviewFrame()) {
       return;
     }
-    const payload = event.payload as SessionFramePayload;
     queueLatestFrame(payload, event.sessionId ?? null, event.jobId ?? null);
-    actionsText.value = String(payload.actionsText ?? "-");
-    frameIndex.value = Number(payload.frameIndex ?? 0);
-    fpsText.value = Number(payload.fps ?? 0).toFixed(1);
-    const nextProgressText = progressTextForFrameProgress(payload.progress);
-    if (nextProgressText) {
-      progressText.value = nextProgressText;
-    }
   }
   if (event.event === "record.status") {
     applyRecordPayload(event.payload as unknown as RecordState);
@@ -634,8 +654,27 @@ function handleBridgeEvent(event: BridgeEnvelope): void {
   }
 }
 
+function acceptLatestFrameIdentity(
+  payload: SessionFramePayload,
+  eventSessionId: string | null,
+  eventJobId: string | null
+): boolean {
+  const frameId = Number(payload.frameId ?? 0);
+  const frameHandle = typeof payload.frameHandle === "string" ? payload.frameHandle : "";
+  if (!Number.isFinite(frameId) || frameId <= 0 || !frameHandle) {
+    return false;
+  }
+  latestFrameIdentity = { sessionId: eventSessionId, jobId: eventJobId, frameId, frameHandle };
+  return true;
+}
+
 function queueLatestFrame(payload: SessionFramePayload, eventSessionId: string | null, eventJobId: string | null): void {
-  pendingFrame = { payload, sessionId: eventSessionId, jobId: eventJobId };
+  const frameId = Number(payload.frameId ?? 0);
+  const frameHandle = typeof payload.frameHandle === "string" ? payload.frameHandle : "";
+  if (!Number.isFinite(frameId) || frameId <= 0 || !frameHandle) {
+    return;
+  }
+  pendingFrame = { payload, sessionId: eventSessionId, jobId: eventJobId, frameId, frameHandle };
   if (frameRenderRaf == null) {
     frameRenderRaf = window.requestAnimationFrame(() => {
       frameRenderRaf = null;
@@ -652,14 +691,14 @@ async function renderLatestFrame(frame: PendingFrame): Promise<void> {
   try {
     const bytes = await fetchLatestFrameBytes(frame.payload);
     if (!bytes) return;
-    if (frame.sessionId !== sessionId.value || frame.jobId !== jobId.value) {
+    if (!isPendingFrameCurrent(frame)) {
       return;
     }
     const blob = new Blob([bytes], { type: "image/jpeg" });
     const bitmap = await createImageBitmap(blob);
     try {
       const canvas = previewCanvas.value;
-      if (!canvas || frame.sessionId !== sessionId.value || frame.jobId !== jobId.value) {
+      if (!canvas || !isPendingFrameCurrent(frame)) {
         return;
       }
       canvas.width = bitmap.width;
@@ -668,6 +707,7 @@ async function renderLatestFrame(frame: PendingFrame): Promise<void> {
       if (!ctx) return;
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       ctx.drawImage(bitmap, 0, 0);
+      applyFrameMetadata(frame.payload);
     } finally {
       bitmap.close();
     }
@@ -676,8 +716,65 @@ async function renderLatestFrame(frame: PendingFrame): Promise<void> {
   }
 }
 
+function isPendingFrameCurrent(frame: PendingFrame): boolean {
+  return (
+    frame.sessionId === sessionId.value &&
+    frame.jobId === jobId.value &&
+    isCurrentFrameIdentity(frame, latestFrameIdentity)
+  );
+}
+
+function applyFrameMetadata(payload: SessionFramePayload): void {
+  actionsText.value = String(payload.actionsText ?? "-");
+  frameIndex.value = Number(payload.frameIndex ?? 0);
+  fpsText.value = Number(payload.fps ?? 0).toFixed(1);
+  const nextProgressText = progressTextForFrameProgress(payload.progress);
+  if (nextProgressText) {
+    progressText.value = nextProgressText;
+  }
+  applyBackendRouteNotice(payload.backendRoute);
+  applyReviewNotice(payload);
+}
+
+function applyBackendRouteNotice(routeValue: unknown): void {
+  if (!isJsonRecord(routeValue)) {
+    return;
+  }
+  const requestedBackend = String(routeValue.requestedBackend ?? routeValue.requested_backend ?? "");
+  const fallbackReason = String(routeValue.fallbackReason ?? routeValue.fallback_reason ?? "");
+  if (requestedBackend === "yolo" && fallbackReason) {
+    fallbackNotice.value = `YOLO 预览已回退：${fallbackReason}`;
+  }
+}
+
+function applyReviewNotice(payload: JsonRecord): void {
+  if (payload.multiPersonDetected === true || payload.reviewRequired === true) {
+    const count = Number(payload.personCount ?? 0);
+    reviewNotice.value = count > 1 ? `检测到多人：${count} 人，结果需复核` : "检测到多人，结果需复核";
+  }
+}
+
+function routeModelAvailability(): JsonRecord {
+  const yoloModels = models.value.filter((model) => model.category === "yolo");
+  const byKey = new Map(yoloModels.map((model) => [model.key, model]));
+  const isRoutableYolo = (model: ModelItem | undefined) => Boolean(model?.installed && model.runtimeSupported === true);
+  const yoloRuntimeSupported = yoloModels.some((model) => isRoutableYolo(model));
+  const yoloRealtimeModel = isRoutableYolo(byKey.get("yolo26n"))
+    ? "yolo26n"
+    : isRoutableYolo(byKey.get("yolo26s")) ? "yolo26s" : "";
+  const yoloRealtime = Boolean(yoloRealtimeModel);
+  const yolo26L = isRoutableYolo(byKey.get("yolo26l"));
+  return {
+    yoloSupported: yoloRuntimeSupported,
+    yoloRealtime,
+    yoloRealtimeModel,
+    yolo26L,
+    reason: yoloRuntimeSupported ? "" : (yoloRuntimeMessage.value || "YOLO runtime unavailable")
+  };
+}
+
 function setRawJson(envelope: BridgeEnvelope): void {
-  rawJson.value = JSON.stringify(envelope, null, 2);
+  rawJson.value = JSON.stringify(sanitizedRawEnvelope(envelope), null, 2);
 }
 
 function shouldApplyBridgeEvent(event: BridgeEnvelope): boolean {
@@ -700,6 +797,7 @@ function shouldRenderPreviewFrame(): boolean {
 
 function cancelPendingFrameRender(): void {
   pendingFrame = null;
+  latestFrameIdentity = null;
   if (frameRenderRaf != null) {
     window.cancelAnimationFrame(frameRenderRaf);
     frameRenderRaf = null;
@@ -713,6 +811,8 @@ function markSessionStopped(nextStatus: string, options: { clearSession?: boolea
   if (options.clearSession ?? true) {
     sessionId.value = undefined;
   }
+  fallbackNotice.value = "";
+  reviewNotice.value = "";
   cancelPendingFrameRender();
   if (nextStatus !== "运行失败") {
     clearPreviewCanvas();
@@ -955,6 +1055,10 @@ function applyRecordPayload(payload: RecordState): void {
           <input v-model="doTechEval" type="checkbox" />
           启用直拳技术评估
         </label>
+        <label class="check-row">
+          <input v-model="highQualityBodyOnly" type="checkbox" />
+          高质量 body-only 分析
+        </label>
         <div class="compact-grid">
           <label>
             <span class="field-label">stance</span>
@@ -1026,6 +1130,11 @@ function applyRecordPayload(payload: RecordState): void {
               <strong>{{ model.label }}</strong>
               <span>{{ model.key }} · {{ model.category ?? "mediapipe" }} · {{ model.profile ?? model.key }} · {{ model.defaultRouteEligible === false ? "不进默认路由" : "可进默认路由" }} · {{ model.installed ? "已安装" : "缺失" }} · {{ model.active ? "当前启用" : "未启用" }}</span>
               <span>大小：{{ model.sizeMb ?? "-" }} MB</span>
+              <span>用途：{{ model.purpose ?? "-" }}</span>
+              <span>许可：{{ model.license ?? "-" }}</span>
+              <span>代理：{{ model.proxy ?? "-" }}</span>
+              <span>离线安装：{{ model.offlineInstall ?? "-" }}</span>
+              <span>下载提示：{{ model.downloadHint ?? "-" }}</span>
               <span>path：{{ model.path ?? "-" }}</span>
               <span v-if="model.note">{{ model.note }}</span>
             </div>
@@ -1054,6 +1163,8 @@ function applyRecordPayload(payload: RecordState): void {
           {{ isRunning ? `Frame ${frameIndex}` : "等待开始识别" }}
         </div>
       </div>
+      <div v-if="fallbackNotice" class="warning-strip">{{ fallbackNotice }}</div>
+      <div v-if="reviewNotice" class="warning-strip">{{ reviewNotice }}</div>
       <div class="status-grid">
         <div>
           <span class="metric-label">识别结果</span>

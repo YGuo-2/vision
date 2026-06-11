@@ -119,8 +119,10 @@ def test_ui_high_quality_analysis_runs_yolo26l_internal_body_core():
             "backend": "yolo",
             "pose_variant": "full",
             "model_profile": "yolo26l",
+            "should_stop": calls[0]["should_stop"],
         }
     ]
+    assert callable(calls[0]["should_stop"])
     result = final.result["bodyCoreAnalysis"]
     assert "compare" not in final.result
     assert "techEval" not in final.result
@@ -180,6 +182,16 @@ def test_meta_for_backend_uses_shared_router_contract_for_mediapipe_body_core():
 def test_dual_compare_body_core_row_keeps_debug_scores_out_of_outward_columns(tmp_path):
     meta = yolo_batch_meta({"review_required": False})
     front = SimpleNamespace(
+        template_path=tmp_path / "front.npz",
+        video_path=tmp_path / "student.mp4",
+        backend="yolo",
+        feature_layout="body_core_v1",
+        start_frame=1,
+        end_frame=2,
+        cost=1.3,
+        calibration_status="unvalidated",
+        multi_person_detected=False,
+        multi_person_gate_source="",
         score=0.42,
         avg_cost=1.2,
         valid_frame_ratio=0.9,
@@ -188,6 +200,16 @@ def test_dual_compare_body_core_row_keeps_debug_scores_out_of_outward_columns(tm
         multi_person_frames=0,
     )
     side = SimpleNamespace(
+        template_path=tmp_path / "side.npz",
+        video_path=tmp_path / "student.mp4",
+        backend="yolo",
+        feature_layout="body_core_v1",
+        start_frame=3,
+        end_frame=4,
+        cost=1.4,
+        calibration_status="unvalidated",
+        multi_person_detected=False,
+        multi_person_gate_source="",
         score=0.52,
         avg_cost=1.1,
         valid_frame_ratio=0.8,
@@ -205,6 +227,10 @@ def test_dual_compare_body_core_row_keeps_debug_scores_out_of_outward_columns(tm
     assert row["front_debug_score"] == pytest.approx(0.42)
     assert "front_score" not in row
     assert "combined_percent" not in row
+    debug = batch_dual_compare._body_core_result_dict(front, meta=meta)
+    assert debug["raw_layout"] == "pose33_like_coco17"
+    assert debug["capability"] == "body_only"
+    assert debug["display_scope"] == "internal"
 
 
 def test_dual_compare_body_core_row_marks_multi_person_review(tmp_path):

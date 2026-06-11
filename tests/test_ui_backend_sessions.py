@@ -114,27 +114,93 @@ class FakeWriterFactory:
         return self.writer, self.actual_path, "fake"
 
 
+class FakeRustFrameSink:
+    def __init__(self, *, session_id: str, token: str = "fake-token") -> None:
+        self.session_id = session_id
+        self.token = token
+        self.frames: dict[int, bytes] = {}
+        self.handles: dict[int, str] = {}
+        self.dropped = 0
+        self.served = 0
+        self._closed = threading.Event()
+        self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._socket.bind(("127.0.0.1", 0))
+        self.port = int(self._socket.getsockname()[1])
+        self._socket.listen(4)
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            "frameHost": "127.0.0.1",
+            "framePort": self.port,
+            "frameToken": self.token,
+        }
+
+    def close(self) -> None:
+        self._closed.set()
+        try:
+            with socket.create_connection(("127.0.0.1", self.port), timeout=0.2) as conn:
+                conn.sendall(f"CLOSE {self.session_id} {self.token}\n".encode("utf-8"))
+        except OSError:
+            pass
+        try:
+            self._socket.close()
+        except OSError:
+            pass
+        self._thread.join(timeout=1.0)
+
+    def _serve(self) -> None:
+        while not self._closed.is_set():
+            try:
+                conn, _addr = self._socket.accept()
+            except OSError:
+                break
+            with conn:
+                header = b""
+                while not header.endswith(b"\n"):
+                    chunk = conn.recv(1)
+                    if not chunk:
+                        break
+                    header += chunk
+                parts = header.decode("utf-8", errors="replace").strip().split()
+                if len(parts) >= 3 and parts[0] == "CLOSE":
+                    self.frames.clear()
+                    self.handles.clear()
+                    break
+                if len(parts) < 5 or parts[0] != "PUT":
+                    conn.sendall(b"ERR bad_request\n")
+                    continue
+                session_id, token, raw_frame_id, frame_handle = parts[1:5]
+                if session_id != self.session_id or token != self.token:
+                    conn.sendall(b"ERR unauthorized\n")
+                    continue
+                length = struct.unpack(">I", conn.recv(4))[0]
+                payload = b""
+                while len(payload) < length:
+                    chunk = conn.recv(length - len(payload))
+                    if not chunk:
+                        break
+                    payload += chunk
+                if self.frames:
+                    self.dropped += 1
+                frame_id = int(raw_frame_id)
+                self.frames[frame_id] = payload
+                self.handles[frame_id] = frame_handle
+                conn.sendall(f"OK droppedFrames={self.dropped} servedFrames={self.served}\n".encode("utf-8"))
+
+
 def _install_preview_service(service: ui_backend.PreviewSessionService):
     previous = ui_backend.DEFAULT_PREVIEW_SERVICE
     ui_backend.DEFAULT_PREVIEW_SERVICE = service
     return previous
 
 
-def _fetch_frame_payload(payload: dict[str, Any]) -> bytes:
-    with socket.create_connection(("127.0.0.1", int(payload["framePort"])), timeout=1.0) as conn:
-        conn.sendall(
-            f"GET {payload['sessionId']} {payload['frameToken']}\n".encode("utf-8")
-        )
-        length = struct.unpack(">I", conn.recv(4))[0]
-        chunks: list[bytes] = []
-        remaining = length
-        while remaining:
-            chunk = conn.recv(remaining)
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        return b"".join(chunks)
+def _fetch_frame_payload(payload: dict[str, Any], sink: FakeRustFrameSink) -> bytes:
+    assert payload["frameToken"] == sink.token
+    assert payload["frameHandle"] == sink.handles[payload["frameId"]]
+    return sink.frames[payload["frameId"]]
 
 
 def test_camera_list_command_uses_camera_enumerator(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -176,11 +242,13 @@ def test_session_start_emits_frame_events_and_releases_capture() -> None:
         frame_encoder=lambda frame: b"fake-frame-bytes",
     )
     previous = _install_preview_service(service)
+    sink = FakeRustFrameSink(session_id="session-frame")
     try:
         response = ui_backend.handle_command(
             ui_backend.CommandRequest(
                 command="session.start",
                 request_id="req-start",
+                session_id="session-frame",
                 payload={
                     "sourceKind": "camera",
                     "cameraIndex": 0,
@@ -188,6 +256,7 @@ def test_session_start_emits_frame_events_and_releases_capture() -> None:
                     "workers": 2,
                     "enableHands": False,
                     "frameLimit": 2,
+                    "frameChannel": sink.payload(),
                 },
             )
         )
@@ -198,7 +267,7 @@ def test_session_start_emits_frame_events_and_releases_capture() -> None:
         assert pipe.annotating[1].wait(1.0)
         frame_events = [event for event in events if event["event"] == "session.frame"]
         assert frame_events
-        assert _fetch_frame_payload(frame_events[0]["payload"]) == b"fake-frame-bytes"
+        assert _fetch_frame_payload(frame_events[0]["payload"], sink) == b"fake-frame-bytes"
         pipe.release[1].set()
 
         final = manager.wait(response["jobId"], 2.0)
@@ -207,6 +276,7 @@ def test_session_start_emits_frame_events_and_releases_capture() -> None:
         assert final.status == "succeeded"
         assert final.result["state"] == "completed"
         assert final.result["frames"] == 2
+        assert _fetch_frame_payload(frame_events[-1]["payload"], sink) == b"fake-frame-bytes"
         assert cap.released is True
         assert pipe.closed is False
         assert frame_events[0]["payload"]["actions"] == ["V_SIGN", "SQUAT"]
@@ -216,7 +286,11 @@ def test_session_start_emits_frame_events_and_releases_capture() -> None:
         assert frame_events[0]["payload"]["frameHost"] == "127.0.0.1"
         assert frame_events[0]["payload"]["framePort"] > 0
         assert frame_events[0]["payload"]["frameToken"]
+        assert frame_events[0]["payload"]["frameId"] == 1
+        assert frame_events[0]["payload"]["frameHandle"] == "session-frame:1"
         assert frame_events[0]["payload"]["payloadBytes"] == len(b"fake-frame-bytes")
+        assert frame_events[0]["payload"]["frameStore"]["droppedFrames"] >= 0
+        assert frame_events[0]["payload"]["frameStore"]["lastFrameAgeMs"] is not None
         running_status = next(
             event for event in events if event["event"] == "session.status" and event["payload"]["state"] == "running"
         )
@@ -225,6 +299,7 @@ def test_session_start_emits_frame_events_and_releases_capture() -> None:
     finally:
         pipe.release[0].set()
         pipe.release[1].set()
+        sink.close()
         ui_backend.DEFAULT_PREVIEW_SERVICE = previous
 
 
@@ -330,13 +405,14 @@ def test_camera_preview_drops_stale_frames_when_inference_is_slow() -> None:
         frame_encoder=lambda frame: b"realtime-frame",
     )
     previous = _install_preview_service(service)
+    sink = FakeRustFrameSink(session_id="session-realtime")
     try:
         response = ui_backend.handle_command(
             ui_backend.CommandRequest(
                 command="session.start",
                 request_id="req-realtime",
                 session_id="session-realtime",
-                payload={"source": "0", "frameLimit": 2},
+                payload={"source": "0", "frameLimit": 2, "frameChannel": sink.payload()},
             )
         )
         assert response["ok"] is True
@@ -355,7 +431,10 @@ def test_camera_preview_drops_stale_frames_when_inference_is_slow() -> None:
         assert frame_events[0]["payload"]["sourceFrameAgeMs"] >= 0
         assert "image" not in frame_events[0]["payload"]
         assert frame_events[0]["payload"]["payloadBytes"] == len(b"realtime-frame")
+        assert frame_events[0]["payload"]["frameStore"]["droppedFrames"] >= 0
+        assert frame_events[0]["payload"]["frameStore"]["lastFrameAgeMs"] is not None
     finally:
+        sink.close()
         ui_backend.DEFAULT_PREVIEW_SERVICE = previous
 
 

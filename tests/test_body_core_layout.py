@@ -256,12 +256,15 @@ def test_yolo_body_core_template_and_match_closed_loop(tmp_path):
     meta = dict(d["meta"].item())
     feats = d["features"]
     assert feats.ndim == 3 and feats.shape[1:] == (12, 2)
+    assert meta["raw_layout"] == "pose33_like_coco17"
     assert meta["feature_layout"] == "body_core_v1"
+    assert meta["capability"] == "body_only"
     assert meta["backend"] == "yolo"
     # S3（#10）只落参数，不授权评分；分数仍不得进入对外报告。
     assert meta["calibration_status"] == CALIBRATION_STATUS_UNVALIDATED
     assert meta["baseline_calibrated"] is True
     assert meta["score_authorized"] is False
+    assert meta["display_scope"] == "internal"
     assert "calibration_note" in meta
 
     # 2) 用该模板匹配同一视频，产出分数。

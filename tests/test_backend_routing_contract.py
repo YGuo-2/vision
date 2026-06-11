@@ -28,6 +28,7 @@ from core.backend_router import (  # noqa: E402
     route_for_analysis,
     route_for_preview,
     validate_backend_layout,
+    yolo_metadata,
 )
 from apps import ui_backend  # noqa: E402
 
@@ -52,7 +53,7 @@ def test_realtime_hands_off_uses_yolo_when_model_available():
     )
 
     assert decision.backend == BACKEND_YOLO
-    assert decision.model_profile == "yolo26n/s"
+    assert decision.model_profile == "yolo26n"
     assert decision.raw_layout == "pose33_like_coco17"
     assert decision.feature_layout == FEATURE_LAYOUT_BODY_CORE
     assert decision.capability == "body_only"
@@ -188,6 +189,28 @@ def test_ui_session_start_uses_yolo_preview_pipeline_and_surfaces_frame_meta():
         ui_backend.DEFAULT_PREVIEW_SERVICE = previous
 
 
+def test_ui_session_start_requires_capabilities_prevents_yolo_preview_route():
+    options = ui_backend.normalize_session_options(
+        {
+            "source": "0",
+            "enableHands": False,
+            "requiresCapabilities": [CAPABILITY_FINGERS],
+            "modelAvailability": {
+                "yoloSupported": True,
+                "yoloRealtime": True,
+                "yoloRealtimeModel": "yolo26n",
+            },
+        }
+    )
+
+    assert options.requires_capabilities == (CAPABILITY_FINGERS,)
+    assert options.backend_route["backend"] == BACKEND_MEDIAPIPE
+    assert options.backend_route["modelProfile"] == "pose_only"
+    assert options.backend_route["evalCompleteness"] == "partial"
+    assert options.backend_route["skippedCapabilities"] == [CAPABILITY_FINGERS]
+    assert options.backend_route["requestedBackend"] is None
+
+
 def test_default_pipeline_factory_maps_yolo_realtime_profile_to_yolo26n_without_loading_ultralytics():
     options = ui_backend.normalize_session_options(
         {
@@ -204,6 +227,31 @@ def test_default_pipeline_factory_maps_yolo_realtime_profile_to_yolo26n_without_
     try:
         assert pipe.__class__.__name__ == "YoloPoseAdapter"
         assert pipe.model_path.name == "yolo26n-pose.pt"
+        assert pipe.warmup is True
+        assert "ultralytics" not in sys.modules
+    finally:
+        close = getattr(pipe, "close", None)
+        if close is not None:
+            close()
+
+
+def test_default_pipeline_factory_maps_yolo26s_profile_to_yolo26s_without_loading_ultralytics():
+    options = ui_backend.normalize_session_options(
+        {
+            "source": "0",
+            "enableHands": False,
+            "modelAvailability": {
+                "yoloSupported": True,
+                "yoloRealtime": True,
+                "yoloRealtimeModel": "yolo26s",
+            },
+        }
+    )
+    pipe = ui_backend._default_pipeline_factory(options)
+
+    try:
+        assert pipe.__class__.__name__ == "YoloPoseAdapter"
+        assert pipe.model_path.name == "yolo26s-pose.pt"
         assert pipe.warmup is True
         assert "ultralytics" not in sys.modules
     finally:
@@ -259,6 +307,29 @@ def test_offline_high_quality_yolo26l_available_routes_internal_body_only():
     assert decision.feature_layout == FEATURE_LAYOUT_BODY_CORE
     assert decision.display_scope == "internal"
     assert decision.score_authorized is False
+
+
+def test_high_quality_template_compare_stays_mediapipe_formal_compare():
+    decision = route_for_analysis(
+        enable_hands=False,
+        do_compare=True,
+        do_tech_eval=False,
+        quality_profile=QualityProfile.HIGH_QUALITY.value,
+        model_availability=ModelAvailability(yolo_supported=True, yolo26l=True, yolo_realtime=True),
+    )
+
+    assert decision.backend == BACKEND_MEDIAPIPE
+    assert decision.feature_layout == FEATURE_LAYOUT_POSE33
+    assert decision.model_profile == "pose_only"
+    assert decision.score_authorized is True
+    assert decision.requested_backend is None
+
+
+def test_yolo_metadata_never_inherits_validated_calibration_status():
+    meta = yolo_metadata({"calibration_status": "validated", "score_authorized": True})
+
+    assert meta["calibration_status"] == "unvalidated"
+    assert meta["score_authorized"] is False
 
 
 def test_formal_tech_eval_hands_off_stays_mediapipe_pose_only_and_skips_fingers():

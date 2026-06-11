@@ -1,3 +1,121 @@
+## 2026-06-11: Final acceptance 修复高速帧通道与 YOLO 路由验收问题
+
+### 问题描述
+
+Spce final acceptance round 1 记录 F-001..F-020 共 20 个问题，集中在 YOLO 授权元数据、
+high_quality 与模板比对路由优先级、Rust/Python latest-frame 方向、frameId 绑定、模型清单提示、
+YOLO26L 取消语义、body_core artifact 元数据、前端 fallback/多人可见提示，以及 T-004/T-005
+缺少定量性能/IPC 证据。
+
+### 修改内容
+
+- `core/backend_router.py`：`doCompare=true` 优先于 `qualityProfile=high_quality`，避免模板比对声明
+  YOLO 却执行 MediaPipe；`yolo_metadata()` 强制 `calibration_status=unvalidated` 且
+  `score_authorized=False`。
+- `frontend/src-tauri/src/lib.rs` 与 `apps/ui_backend.py`：latest-frame 通道改为 Rust 监听随机
+  localhost 端口并持有 per-session 单槽 store，Python 只按 `PUT session token frameId frameHandle`
+  写长度前缀 JPEG；`latest_frame` raw IPC 从 Rust store 按 `sessionId/frameToken/frameId/frameHandle`
+  取 bytes，旧帧请求会被拒绝。
+- `frontend/src/App.vue` / `frontend/src/bridge.ts`：前端 raw IPC 请求绑定 `frameId/frameHandle`；
+  仅在对应帧 bytes 成功绘制后更新 actions/FPS/progress，防止同 session/job 旧帧覆盖；新增
+  YOLO fallback 与多人复核可见提示；`session.start` 携带由模型状态推导的 `modelAvailability`。
+- `apps/ui_backend.py` / `core/model_manager.py`：`allMissing` 只自动下载可下载模型；模型状态显式暴露
+  license、purpose、proxy、offlineInstall、downloadHint；本地安装 YOLO26n/s 时 desktop preview route
+  可选择 YOLO。
+- `apps/ui_backend.py` / `core/body_core_compare.py` / `core/yolo_adapter.py`：YOLO26L body-only 分析传递
+  `should_stop`，停止时按 `job.stopped` 收敛；body_core YOLO 模板和 batch debug-match artifact 补齐
+  `raw_layout/capability/display_scope`。
+- `frontend/scripts/frontend-smoke.mjs`、`tests/*`：补齐 high_quality+doCompare、YOLO metadata hostile
+  输入、Rust-owned latest-frame、frameId 绑定、模型 allMissing 过滤、YOLO analysis cancellation、
+  fallback/多人 UI、artifact 元数据等回归。
+- Round 2 修复：
+  - `analysis/spike_yolo_baseline.py` 与 `analysis/calibrate_body_core.py` 为 YOLO spike、raw-cache、
+    pairwise、conf sweep、per-sample、CSV/JSONL/NPZ artifact 补齐
+    `backend/raw_layout/feature_layout/capability/score_authorized/calibration_status/display_scope`。
+  - `apps/ui_backend.py`、`core/backend_router.py`、`frontend/src/App.vue` 收紧安装版 YOLO runtime
+    边界：仅当 runtime 支持且对应权重已安装时才声明 YOLO 可路由；YOLO26s-only 可确定路由到
+    `yolo26s`，不再误加载 `yolo26n-pose.pt`。
+  - `frontend/src/App.vue`、`frontend/src/bridge-state.ts` 增加最新帧身份闸门和 raw JSON 脱敏，
+    防止同 session/job 旧帧在异步取 bytes 后更新 canvas/metadata，并避免 frame token/handle
+    进入 reactive 调试状态。
+  - `frontend/src-tauri/src/lib.rs` 为同一 `sessionId` 重启创建新的 latest-frame channel/token/port，
+    并在关闭时清空 store，避免旧帧污染。
+  - Vue/Tauri 动作分析面板新增“高质量 body-only 分析”入口，发送
+    `qualityProfile=high_quality`、`enableHands` 与 `modelAvailability`，让 T-008 YOLO26L 内部分析
+    从桌面 UI 可达；启动响应立即应用 fallback/route notice。
+- Round 3 修复：
+  - `analysis/calibrate_body_core.py` 为 `calibration_multi_person_gate.csv` 的 `gate_rows` 补齐
+    `yolo_backend/yolo_raw_layout/yolo_feature_layout/yolo_capability/yolo_score_authorized/
+    yolo_calibration_status/yolo_display_scope`，并在
+    `tests/test_yolo_analysis_artifact_metadata.py` 覆盖该真实 CSV 输出路径。
+  - `frontend/src/App.vue` 在 `session.start` 成功响应后立即应用 `backendRoute` fallback notice；
+    `session.frame` 事件先接受最新 `frameId/frameHandle` 身份，再执行渲染节流，确保被节流的新帧也能
+    使旧 pending render 失效。
+  - `apps/ui_backend.py` 让 `session.start` 透传 `requiresCapabilities` 到共享 router；当
+    `enableHands=false` 且请求手指能力时回退 MediaPipe pose-only partial，不误走 YOLO realtime。
+  - `apps/ui_backend.py` 阻止 `qualityProfile=high_quality` + body-only + `enableHands=true` 空跑成功，
+    改为 `bad_request`，要求显式 `enableHands=false` 后才进入 YOLO26L body-only 内部分析。
+  - `frontend/src-tauri/src/lib.rs` 在收到 `session.status` completed/stopped 或 `job.*` 终态事件后，
+    延迟清理对应 Rust `frame_channels` 条目，并用 `Arc::ptr_eq` 防止误删同 `sessionId` 的新 channel。
+  - Round 4 复审将终态后最后一帧 raw IPC 拉取窗口问题升级为 P2；`apps/ui_backend.py` 的
+    Python latest-frame writer 不再在 session `finally` 中立即发送 `CLOSE` 清空 Rust store，
+    统一由 Rust 终态延迟清理负责关闭 channel，保证最后一个 `session.frame` 对应 bytes 在 pending
+    RAF/raw IPC 窗口内仍可拉取。
+- 定量补充证据（合成 1280x720 预览帧，经现有 `_default_frame_encoder`）：JPEG bytes=8789；
+  旧式 JSON/base64 `session.frame` 约 11822 bytes；当前 JSON metadata 约 571 bytes，缩减约 20.7x，
+  低于 8KB；前端 reactive 大帧存储从旧式约 11822 bytes 降为 0；合成实时采集样本
+  captured=20、rendered=2、dropped=18、droppedRate=0.90，验证 single-slot 丢旧帧策略。
+
+### 验证方法
+
+- `.\.venv\Scripts\python.exe -m pytest tests/test_backend_routing_contract.py tests/test_ui_backend_sessions.py tests/test_ui_backend_models.py tests/test_ui_backend_analysis.py tests/test_batch_backend_args.py tests/test_body_core_layout.py tests/test_windows_packaging_smoke.py tests/test_vue_tauri_acceptance_gaps.py -q`
+  → 91 passed
+- `npm --prefix frontend run test`
+  → Frontend behavior smoke checks passed
+- `cargo check --manifest-path frontend/src-tauri/Cargo.toml`
+  → passed
+- `.\.venv\Scripts\python.exe -m py_compile core\backend_router.py apps\ui_backend.py core\body_core_compare.py core\yolo_adapter.py batch\batch_dual_compare.py`
+  → passed
+- `git diff --check`
+  → 退出码 0（仅 Windows 换行提示，无空白错误）
+- Round 2 targeted:
+  - `.\.venv\Scripts\python.exe -m pytest tests/test_ui_backend_models.py tests/test_backend_routing_contract.py tests/test_ui_backend_analysis.py tests/test_yolo_analysis_artifact_metadata.py -q`
+    → 39 passed
+  - `.\.venv\Scripts\python.exe -m pytest tests/test_ui_backend_sessions.py tests/test_windows_packaging_smoke.py tests/test_vue_tauri_acceptance_gaps.py -q`
+    → 23 passed
+  - `.\.venv\Scripts\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py tests/test_yolo_backend_contract.py tests/test_yolo_landmark_mapping.py tests/test_rule_availability.py tests/test_tech_eval_contract.py tests/test_yolo_analysis_artifact_metadata.py -q`
+    → 84 passed
+  - `npm --prefix frontend run build`
+    → vue-tsc + vite build passed
+  - `npm --prefix frontend run test`
+    → Frontend behavior smoke checks passed
+  - `npm run verify:tauri`
+    → cargo check passed
+  - `npm run verify:desktop`
+    → frontend build、frontend smoke、Tauri cargo check、Python py_compile、desktop regression 139 passed
+  - `npm run package:windows`
+    → 重新产出 `frontend/src-tauri/target/release/bundle/nsis/Vision 动作识别与评分_0.1.0_x64-setup.exe`
+  - `.\.venv\Scripts\python.exe -m pytest tests/test_windows_packaging_smoke.py -q`
+    → 9 passed
+  - `.\.venv\Scripts\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py tests/test_yolo_backend_contract.py tests/test_yolo_landmark_mapping.py tests/test_rule_availability.py tests/test_tech_eval_contract.py -q`
+    → 82 passed
+  - Round 3 targeted:
+    - `.\.venv\Scripts\python.exe -m pytest tests/test_yolo_analysis_artifact_metadata.py tests/test_backend_routing_contract.py tests/test_ui_backend_analysis.py tests/test_ui_backend_sessions.py tests/test_windows_packaging_smoke.py -q`
+      → 43 passed
+    - `npm --prefix frontend run test`
+      → Frontend behavior smoke checks passed
+    - `npm run verify:tauri`
+      → cargo check passed
+    - `.\.venv\Scripts\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q`
+      → 31 passed
+  - Round 4 U-004 fix:
+    - `.\.venv\Scripts\python.exe -m pytest tests/test_ui_backend_sessions.py tests/test_windows_packaging_smoke.py -q`
+      → 17 passed
+    - `npm run verify:tauri`
+      → cargo check passed
+    - `.\.venv\Scripts\python.exe -m py_compile apps\ui_backend.py`
+      → passed
+
 ## 2026-06-11: T-010 完成桌面栈、打包和迁移文档验收
 
 ### 问题描述

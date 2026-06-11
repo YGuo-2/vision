@@ -78,6 +78,7 @@ class ModelAvailability:
     """Known model/packaging availability for routing decisions."""
 
     yolo_realtime: bool = False
+    yolo_realtime_model: str = ""
     yolo26l: bool = False
     yolo_supported: bool = True
     reason: str = ""
@@ -186,8 +187,11 @@ def model_availability_from_mapping(values: dict[str, Any] | None) -> ModelAvail
     yolo_supported = bool(values.get("yoloSupported", values.get("yolo_supported", True)))
     return ModelAvailability(
         yolo_realtime=bool(
-            values.get("yoloRealtime", values.get("yolo_realtime", values.get("yolo26n", False)))
+            values.get("yoloRealtime", values.get("yolo_realtime", values.get("yolo26n", values.get("yolo26s", False))))
         ),
+        yolo_realtime_model=str(
+            values.get("yoloRealtimeModel", values.get("yolo_realtime_model", ""))
+        ).strip().lower(),
         yolo26l=bool(values.get("yolo26L", values.get("yolo26l", values.get("yolo_l", False)))),
         yolo_supported=yolo_supported,
         reason=str(values.get("reason") or values.get("message") or ""),
@@ -215,11 +219,12 @@ def route_backend(request: BackendRouteRequest) -> BackendRouteDecision:
                 reason="requested capabilities exceed YOLO body-only preview; enableHands=false keeps hand landmarker disabled",
             )
         if availability.yolo_supported and availability.yolo_realtime:
+            realtime_model = availability.yolo_realtime_model if availability.yolo_realtime_model in {"yolo26n", "yolo26s"} else "yolo26n"
             return _yolo_body_only(
                 required=required,
-                model_profile="yolo26n/s",
+                model_profile=realtime_model,
                 display_scope=DISPLAY_SCOPE_LIMITED,
-                reason="enableHands=false realtime preview with YOLO realtime model available",
+                reason=f"enableHands=false realtime preview with {realtime_model} model available",
                 multi_person_detected=request.multi_person_detected,
                 person_count=request.person_count,
             )
@@ -296,12 +301,12 @@ def route_for_analysis(
     if do_tech_eval:
         task_type = TaskType.FULL_TECH_EVAL.value
         score_mode = ScoreMode.FULL_TECH_EVAL.value
-    elif quality_profile == QualityProfile.HIGH_QUALITY.value:
-        task_type = TaskType.OFFLINE_BODY_ANALYSIS.value
-        score_mode = ScoreMode.INTERNAL.value
     elif do_compare:
         task_type = TaskType.FORMAL_SCORE.value
         score_mode = ScoreMode.FORMAL.value
+    elif quality_profile == QualityProfile.HIGH_QUALITY.value:
+        task_type = TaskType.OFFLINE_BODY_ANALYSIS.value
+        score_mode = ScoreMode.INTERNAL.value
     else:
         task_type = TaskType.OFFLINE_BODY_ANALYSIS.value
         score_mode = ScoreMode.INTERNAL.value
@@ -360,9 +365,7 @@ def yolo_metadata(source_meta: dict[str, Any] | None = None) -> dict[str, Any]:
             "confidence_kind": str(source_meta.get("confidence_kind") or YOLO_CONFIDENCE_KIND),
             "validity_policy": str(source_meta.get("validity_policy") or YOLO_VALIDITY_POLICY),
             "valid_conf_thr": float(source_meta.get("valid_conf_thr", DEFAULT_YOLO_VALID_CONF_THR)),
-            "calibration_status": str(
-                source_meta.get("calibration_status") or YOLO_CALIBRATION_STATUS
-            ),
+            "calibration_status": YOLO_CALIBRATION_STATUS,
             "score_authorized": False,
             "review_required": bool(source_meta.get("review_required", decision.review_required)),
         }

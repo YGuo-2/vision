@@ -99,6 +99,15 @@ YOLO_CONF_THR_GRID: tuple[float, ...] = (0.2, 0.3, 0.4, 0.5, 0.6, 0.7)
 
 # pass/fail 参照阈值（预注册口径，见报告头部）：pose33 分数 >= 该值视为 "pass(相似)"。
 PASS_SCORE_THR: float = 0.55
+YOLO_ARTIFACT_METADATA: dict[str, object] = {
+    "backend": "yolo",
+    "raw_layout": "pose33_like_coco17",
+    "feature_layout": "body_core_v1",
+    "capability": "body_only",
+    "score_authorized": False,
+    "calibration_status": "unvalidated",
+    "display_scope": "internal",
+}
 
 
 # --------------------------------------------------------------------------- #
@@ -207,6 +216,8 @@ def extract_or_load_cache(
                 "yolo_infer_sec": cache.yolo_infer_sec,
                 "yolo_frames": cache.yolo_frames,
                 "yolo_num_persons_per_frame": cache.yolo_num_persons_per_frame,
+                "yolo_artifact_metadata": dict(YOLO_ARTIFACT_METADATA),
+                **{f"yolo_{key}": value for key, value in YOLO_ARTIFACT_METADATA.items()},
             },
             dtype=object,
         ),
@@ -387,6 +398,7 @@ def pairwise_matrix(
                 "mp_bodycore_score": _score(mpbc_cost, baseline_bodycore),
                 "yolo_bodycore_avg_cost": yolobc_cost,
                 "yolo_bodycore_score": _score(yolobc_cost, baseline_bodycore),
+                **{f"yolo_{key}": value for key, value in YOLO_ARTIFACT_METADATA.items()},
             }
         )
     return rows
@@ -573,6 +585,7 @@ def run(args: argparse.Namespace) -> int:
                 "yolo_bodycore_valid_ratio_mean": float(np.mean(valid_ratios)) if valid_ratios else None,
                 "yolo_bodycore_valid_ratio_min": float(np.min(valid_ratios)) if valid_ratios else None,
                 "yolo_bodycore_skip_ratio_max": float(1.0 - np.min(valid_ratios)) if valid_ratios else None,
+                **{f"yolo_{key}": value for key, value in YOLO_ARTIFACT_METADATA.items()},
             }
         )
 
@@ -590,6 +603,7 @@ def run(args: argparse.Namespace) -> int:
                 "review_required": gate["review_required"],
                 "gate_status": gate["gate_status"],
                 "in_calibration_set": sid in single_ids,
+                **{f"yolo_{key}": value for key, value in YOLO_ARTIFACT_METADATA.items()},
             }
         )
 
@@ -612,6 +626,7 @@ def run(args: argparse.Namespace) -> int:
                 "yolo_fail_ratio": round(f.yolo_fail_ratio, 4),
                 "mp_bodycore_valid_ratio": round(f.mp_bodycore_valid_ratio, 4),
                 "yolo_bodycore_valid_ratio": round(f.yolo_bodycore_valid_ratio, 4),
+                **{f"yolo_{key}": value for key, value in YOLO_ARTIFACT_METADATA.items()},
             }
         )
 
@@ -620,6 +635,7 @@ def run(args: argparse.Namespace) -> int:
         "env": _env_table(),
         "pose_variant": args.pose_variant,
         "yolo_model": str(args.yolo_model),
+        "yolo_artifact_metadata": dict(YOLO_ARTIFACT_METADATA),
         "pose33_baseline": POSE33_BASELINE,
         "calib_conf_thr_used": float(args.calib_conf_thr),
         "single_person_sample_ids": single_ids,

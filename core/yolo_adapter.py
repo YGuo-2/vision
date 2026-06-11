@@ -885,6 +885,7 @@ def extract_yolo_landmark_series(
     warmup: bool = False,
     warmup_shape: tuple[int, int] | tuple[int, int, int] | None = None,
     running_mode: str = "video",
+    should_stop=None,
 ) -> tuple[np.ndarray, np.ndarray, dict]:
     """提取 YOLO body-only 关键点序列。
 
@@ -943,11 +944,17 @@ def extract_yolo_landmark_series(
     i = 0
     try:
         while True:
+            if should_stop is not None and should_stop():
+                raise InterruptedError("YOLO landmark extraction cancelled")
             ok, frame = cap.read()
             if not ok:
                 break
             if start_i <= i <= end_i:
+                if should_stop is not None and should_stop():
+                    raise InterruptedError("YOLO landmark extraction cancelled")
                 row, valid, num_persons, track_id = adapter.infer_arrays(frame)
+                if should_stop is not None and should_stop():
+                    raise InterruptedError("YOLO landmark extraction cancelled")
                 rows.append(row)
                 masks.append(valid)
                 num_persons_per_frame.append(int(num_persons))

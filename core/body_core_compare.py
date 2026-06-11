@@ -197,6 +197,7 @@ def _extract_body_core_yolo(
     valid_conf_thr: float | None = None,
     start_frame: int | None = None,
     end_frame: int | None = None,
+    should_stop=None,
 ) -> tuple[np.ndarray, float, dict]:
     """YOLO 路径：抽取 ``body_core_v1`` ``(T,12,2)`` 特征。
 
@@ -222,7 +223,10 @@ def _extract_body_core_yolo(
         valid_conf_thr=thr,
         start_frame=start_frame,
         end_frame=end_frame,
+        should_stop=should_stop,
     )
+    if should_stop is not None and should_stop():
+        raise InterruptedError("YOLO body_core analysis cancelled")
     fps = float(yolo_meta.get("fps") or 30.0)
 
     features, valid_core_frames = _normalize_body_core_sequence(landmarks, valid_mask=valid_mask)
@@ -245,6 +249,7 @@ def extract_body_core_features(
     valid_conf_thr: float | None = None,
     start_frame: int | None = None,
     end_frame: int | None = None,
+    should_stop=None,
 ) -> tuple[np.ndarray, float, dict]:
     """按后端抽取 ``body_core_v1`` ``(T,12,2)`` 特征，返回 ``(features, fps, backend_meta)``。"""
     backend = str(backend).lower()
@@ -264,6 +269,7 @@ def extract_body_core_features(
             valid_conf_thr=valid_conf_thr,
             start_frame=start_frame,
             end_frame=end_frame,
+            should_stop=should_stop,
         )
     raise ValueError(
         f"未知 backend：{backend!r}（body_core_v1 闭环仅支持 "
@@ -331,7 +337,9 @@ def create_body_core_template(
         "auto_start_frame": int(auto_start),
         "auto_end_frame": int(auto_end),
         "backend": backend,
+        "raw_layout": str(backend_meta.get("raw_layout") or ("pose33_like_coco17" if backend == BACKEND_YOLO else "pose33_v3")),
         "feature_layout": BODY_CORE_V1.name,
+        "capability": str(backend_meta.get("capability") or "body_only"),
         "normalizer_version": "body_core_v1",
         "running_mode": "video",
         # S3（#10）已落参数，但结论为仅预览 / 内部标定参考，不授权评分。
@@ -340,6 +348,7 @@ def create_body_core_template(
         "baseline": float(BODY_CORE_V1_CALIBRATED_BASELINE),
         "baseline_calibrated": True,
         "score_authorized": False,
+        "display_scope": str(backend_meta.get("display_scope") or "internal"),
     }
     if backend == BACKEND_MEDIAPIPE:
         meta["pose_variant"] = pose_variant
