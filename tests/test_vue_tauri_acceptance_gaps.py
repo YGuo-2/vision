@@ -125,6 +125,23 @@ def test_frontend_smoke_exercises_behavior_not_only_static_markers():
         assert required in smoke
 
 
+def test_frontend_preview_uses_canvas_bitmap_without_reactive_frame_strings():
+    source = _frontend_source_text()
+    smoke = _frontend_smoke_text()
+
+    assert "previewCanvas" in source
+    assert "<canvas" in source
+    assert "requestAnimationFrame" in source
+    assert "createImageBitmap" in source
+    assert "drawImage" in source
+    assert "fetchLatestFrameBytes(frame.payload)" in source
+    assert "previewImage" not in source
+    assert "payload.image" not in source
+    assert "URL.createObjectURL" not in source
+    assert "<img" not in source
+    assert "preview frames must not be stored in a reactive image string" in smoke
+
+
 def test_verify_desktop_invokes_frontend_interaction_tests():
     root_package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
     frontend_package = json.loads((ROOT / "frontend" / "package.json").read_text(encoding="utf-8"))

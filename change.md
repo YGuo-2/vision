@@ -1,3 +1,36 @@
+## 2026-06-11: T-005 将 Vue 预览迁移到 Canvas/bitmap 渲染
+
+### 问题描述
+
+T-004 已把大帧从 JSON/base64 主桥迁到本机二进制通道，但前端仍把拉到的帧 bytes 转成 blob URL，
+再存进 `previewImage` reactive 字符串并通过 `<img>` 展示。该路径仍会让每帧 URL 进入 Vue reactive
+状态，不符合 T-005 对 Canvas/bitmap、latest-frame 绘制和不保留大图字符串的约束。
+
+### 修改内容
+
+- 将 `frontend/src/App.vue` 的预览状态从 `previewImage` reactive 字符串改为 `previewCanvas` canvas ref；
+  `session.frame` 到达后只保留一个非 reactive `pendingFrame`，通过 `requestAnimationFrame` 合并晚到帧，
+  拉取最新 bytes 后使用 `createImageBitmap` + `drawImage` 绘制到 canvas。
+- 移除 blob object URL 渲染路径，不再使用 `URL.createObjectURL` / `<img>` 展示预览帧；bitmap 绘制后立即
+  `bitmap.close()`，卸载和 session restart 时清理 pending frame 与 canvas。
+- 更新 `frontend/src/styles.css` 的 `.video-frame canvas` 样式，保持预览区域稳定尺寸和 contain 显示。
+- 扩展 `frontend/scripts/frontend-smoke.mjs` 与 `tests/test_vue_tauri_acceptance_gaps.py`，阻断
+  `previewImage`、`payload.image`、`URL.createObjectURL`、`<img>` 回归，并要求 Canvas/ImageBitmap/
+  requestAnimationFrame 路径存在。
+
+### 迁移前后记录型基线
+
+- 丢帧率：继承 T-004 后端 latest-frame 统计；前端每个 animation frame 只处理最新 `pendingFrame`，晚到帧会被覆盖，不进入历史队列。
+- 渲染帧率：由 `requestAnimationFrame` 驱动，最多跟随浏览器刷新节奏；后端 `fps` 显示仍保留，后续桌面验收可用真实摄像头观察渲染侧帧率。
+- 前端内存增长：迁移前每帧创建 blob URL 并存入 reactive 字符串；迁移后不再保存大图字符串/URL，bitmap 绘制后立即关闭，仅保留一个 pending frame 引用。
+- IPC payload 大小：沿用 T-004 二进制帧通道，`session.frame` JSON 继续只携带句柄/指标，不携带图片 bytes/base64。
+
+### 验证方法
+
+- `npm --prefix frontend run test` → Frontend behavior smoke checks passed
+- `.\.venv\Scripts\python.exe -m pytest tests/test_vue_tauri_acceptance_gaps.py -q` → 7 passed
+- `git diff --check` → 退出码 0（仅 Windows 换行提示，无空白错误）
+
 ## 2026-06-11: T-004 设计并实现二进制 latest-frame 预览帧通道
 
 ### 问题描述

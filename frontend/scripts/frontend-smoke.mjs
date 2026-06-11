@@ -112,10 +112,21 @@ for (const marker of ["fetchLatestFrameBytes", "invoke<ArrayBuffer>(\"latest_fra
   assertIncludes(bridge, marker, "bridge.ts");
 }
 
-for (const marker of ["fetchLatestFrameBytes(payload)", "URL.createObjectURL", "URL.revokeObjectURL"]) {
+for (const marker of [
+  "fetchLatestFrameBytes(frame.payload)",
+  "window.requestAnimationFrame",
+  "createImageBitmap(blob)",
+  "ctx.drawImage(bitmap, 0, 0)",
+  "bitmap.close()",
+  "cancelPendingFrameRender"
+]) {
   assertIncludes(app, marker, "App.vue");
 }
 assert(!app.includes("payload.image"), "session.frame JSON payload must not carry image/base64 data");
+assert(!app.includes("previewImage"), "preview frames must not be stored in a reactive image string");
+assert(!app.includes("URL.createObjectURL"), "preview frames must render via Canvas/ImageBitmap, not object URLs");
+assert(!app.includes("<img"), "preview stage must not render frames through an img element");
+assertIncludes(app, "<canvas ref=\"previewCanvas\"", "App.vue");
 
 for (const marker of ["select_directory", "OleInitialize", "OleUninitialize", "SHBrowseForFolderW", "SHGetPathFromIDListW"]) {
   assertIncludes(tauri, marker, "src-tauri lib.rs");

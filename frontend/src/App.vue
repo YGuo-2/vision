@@ -48,6 +48,12 @@ type SessionFramePayload = JsonRecord & {
   progress?: { done: number; total: number; percent: number | null };
 };
 
+type PendingFrame = {
+  payload: SessionFramePayload;
+  sessionId: string | null;
+  jobId: string | null;
+};
+
 type AnalysisMode = "template" | "analysis";
 
 type AnalysisProgress = {
@@ -80,7 +86,7 @@ const statusText = ref("就绪");
 const actionsText = ref("-");
 const fpsText = ref("--");
 const progressText = ref("等待开始");
-const previewImage = ref("");
+const previewCanvas = ref<HTMLCanvasElement | null>(null);
 const frameIndex = ref(0);
 const isRunning = ref(false);
 const sessionId = ref<string | undefined>();
@@ -193,7 +199,8 @@ const techIndicatorRows = computed<TechIndicatorRow[]>(() => {
 
 let unlisten: (() => void) | undefined;
 let lastPreviewFrameAt = 0;
-let previewObjectUrl: string | undefined;
+let pendingFrame: PendingFrame | null = null;
+let frameRenderRaf: number | null = null;
 // 上限保护:仅在后端异常突发时限速,正常 30fps(帧间隔 ~33ms)不受影响。
 // 取 16ms(~60fps 上限)而非 33ms,避免与 30fps 帧到达相位抖动导致周期性丢帧。
 const PREVIEW_FRAME_MIN_INTERVAL_MS = 16;
@@ -242,7 +249,7 @@ watch([poseVariant, enableHands], () => {
 
 onBeforeUnmount(() => {
   stopActiveJobsBeforeUnmount();
-  clearPreviewObjectUrl();
+  cancelPendingFrameRender();
   if (unlisten) unlisten();
 });
 
@@ -344,8 +351,8 @@ async function startSession(): Promise<void> {
   actionsText.value = "-";
   fpsText.value = "--";
   progressText.value = initialSessionProgressText();
-  previewImage.value = "";
-  clearPreviewObjectUrl();
+  clearPreviewCanvas();
+  cancelPendingFrameRender();
   frameIndex.value = 0;
   lastPreviewFrameAt = Number.NEGATIVE_INFINITY;
   const pendingSessionId = nextBridgeId("session");
@@ -540,7 +547,7 @@ function handleBridgeEvent(event: BridgeEnvelope): void {
       return;
     }
     const payload = event.payload as SessionFramePayload;
-    void renderLatestFrame(payload, event.sessionId ?? null, event.jobId ?? null);
+    queueLatestFrame(payload, event.sessionId ?? null, event.jobId ?? null);
     actionsText.value = String(payload.actionsText ?? "-");
     frameIndex.value = Number(payload.frameIndex ?? 0);
     fpsText.value = Number(payload.fps ?? 0).toFixed(1);
@@ -605,22 +612,43 @@ function handleBridgeEvent(event: BridgeEnvelope): void {
   }
 }
 
-async function renderLatestFrame(
-  payload: SessionFramePayload,
-  eventSessionId: string | null,
-  eventJobId: string | null
-): Promise<void> {
+function queueLatestFrame(payload: SessionFramePayload, eventSessionId: string | null, eventJobId: string | null): void {
+  pendingFrame = { payload, sessionId: eventSessionId, jobId: eventJobId };
+  if (frameRenderRaf == null) {
+    frameRenderRaf = window.requestAnimationFrame(() => {
+      frameRenderRaf = null;
+      const next = pendingFrame;
+      pendingFrame = null;
+      if (next) {
+        void renderLatestFrame(next);
+      }
+    });
+  }
+}
+
+async function renderLatestFrame(frame: PendingFrame): Promise<void> {
   try {
-    const bytes = await fetchLatestFrameBytes(payload);
+    const bytes = await fetchLatestFrameBytes(frame.payload);
     if (!bytes) return;
-    if (eventSessionId !== sessionId.value || eventJobId !== jobId.value) {
+    if (frame.sessionId !== sessionId.value || frame.jobId !== jobId.value) {
       return;
     }
     const blob = new Blob([bytes], { type: "image/jpeg" });
-    const nextUrl = URL.createObjectURL(blob);
-    clearPreviewObjectUrl();
-    previewObjectUrl = nextUrl;
-    previewImage.value = nextUrl;
+    const bitmap = await createImageBitmap(blob);
+    try {
+      const canvas = previewCanvas.value;
+      if (!canvas || frame.sessionId !== sessionId.value || frame.jobId !== jobId.value) {
+        return;
+      }
+      canvas.width = bitmap.width;
+      canvas.height = bitmap.height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(bitmap, 0, 0);
+    } finally {
+      bitmap.close();
+    }
   } catch (error) {
     errorText.value = errorMessage(error, "读取最新预览帧失败");
   }
@@ -648,10 +676,20 @@ function shouldRenderPreviewFrame(): boolean {
   return true;
 }
 
-function clearPreviewObjectUrl(): void {
-  if (previewObjectUrl) {
-    URL.revokeObjectURL(previewObjectUrl);
-    previewObjectUrl = undefined;
+function cancelPendingFrameRender(): void {
+  pendingFrame = null;
+  if (frameRenderRaf != null) {
+    window.cancelAnimationFrame(frameRenderRaf);
+    frameRenderRaf = null;
+  }
+}
+
+function clearPreviewCanvas(): void {
+  const canvas = previewCanvas.value;
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
+  if (ctx) {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
   }
 }
 
@@ -971,8 +1009,8 @@ function applyRecordPayload(payload: RecordState): void {
         <div class="status-pill" :class="{ running: isRunning }">{{ statusText }}</div>
       </div>
       <div class="video-frame">
-        <img v-if="previewImage" :src="previewImage" alt="实时识别预览帧" />
-        <div v-else class="skeleton-grid">
+        <canvas ref="previewCanvas" aria-label="实时识别预览帧"></canvas>
+        <div v-if="!isRunning && frameIndex === 0" class="skeleton-grid">
           <span v-for="n in 22" :key="n"></span>
         </div>
         <div class="frame-overlay">
