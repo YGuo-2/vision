@@ -3,25 +3,25 @@
 > **Workflow:** design-first
 > **Mode:** strict
 > **Status:** In Progress
-> **Current Task:** T-007
+> **Current Task:** T-008
 > **Approval:** approved
-> **Last Checkpoint:** 2026-06-11 15:13:21
+> **Last Checkpoint:** 2026-06-11 15:28:06
 > **Branch:** main
-> **Last Known Commit:** 7a1390e
+> **Last Known Commit:** 38474bf
 
 ## Resume Summary
-- Goal: 建立模型档清单与配置状态
+- Goal: 接入 YOLO26n/s 实时 body-only 预览路径
 - Approved specs: design.md, requirements.md, tasks.md
-- Current task: T-007
+- Current task: T-008
 - Next safe action: Run spec_status, then continue the current task.
 - Blockers: n/a
 
 ## Active Task State
-- Task ID: T-007
+- Task ID: T-008
 - Status: pending
 - Started at: n/a
-- Verification needed: cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_ui_backend_models.py tests/test_windows_packaging_smoke.py -q => exit 0, 20 passed; cmd: npm --prefix frontend run test => exit 0, Frontend behavior smoke checks passed; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q => exit 0, 31 passed; cmd: git diff --check => exit 0 (line-ending warnings only)
-- Files expected to change: `apps/ui_backend.py`, `core/model_manager.py`, `ui_backend_sidecar.spec`, `frontend/src/App.vue`, `frontend/src/bridge-state.ts`, `tests/test_ui_backend_models.py`, `tests/test_windows_packaging_smoke.py`, `frontend/scripts/frontend-smoke.mjs`
+- Verification needed: cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_backend_routing_contract.py tests/test_yolo_backend_contract.py -q => exit 0, 33 passed; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q => exit 0, 31 passed; cmd: git diff --check => exit 0 (line-ending warnings only)
+- Files expected to change: `apps/ui_backend.py`, `core/backend_router.py`, `core/yolo_adapter.py`, `tests/test_backend_routing_contract.py`, `tests/test_yolo_backend_contract.py`
 
 ## Completed Work Log
 | Task ID | Time | Commit/State | Verification | Notes |
@@ -33,6 +33,7 @@
 | T-005 | 2026-06-11 14:44:51 | 7bfe692 | cmd: npm --prefix frontend run test => exit 0, Frontend behavior smoke checks passed; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_vue_tauri_acceptance_gaps.py -q => exit 0, 7 passed; cmd: git diff --check => exit 0 (line-ending warnings only) | Vue 预览迁移到 Canvas/ImageBitmap；requestAnimationFrame 合并 latest frame；移除 previewImage、object URL 和 img 帧展示路径；更新 change.md 基线记录。 |
 | T-006 | 2026-06-11 14:54:00 | b795674 | cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_ui_backend_sessions.py tests/test_ui_backend_contract.py -q => exit 0, 24 passed; cmd: npm --prefix frontend run test => exit 0, Frontend behavior smoke checks passed; cmd: git diff --check => exit 0 (line-ending warnings only) | 统一 session/model download/analysis 主动停止和晚到事件清理；job.stop 缺失/未知 jobId 结构化错误测试；更新 change.md。 |
 | T-003 | 2026-06-11 15:13:21 | 7a1390e | cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_ui_backend_models.py tests/test_windows_packaging_smoke.py -q => exit 0, 20 passed; cmd: npm --prefix frontend run test => exit 0, Frontend behavior smoke checks passed; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q => exit 0, 31 passed; cmd: git diff --check => exit 0 (line-ending warnings only) | 补齐 MediaPipe/YOLO26 模型档元数据、默认代理下载、YOLO 手动安装错误、安装版 sidecar YOLO runtime 排除边界和前端展示；更新 change.md。 |
+| T-007 | 2026-06-11 15:28:06 | 38474bf | cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_backend_routing_contract.py tests/test_yolo_backend_contract.py -q => exit 0, 33 passed; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q => exit 0, 31 passed; cmd: git diff --check => exit 0 (line-ending warnings only) | 接入 YOLO26n/s realtime body-only preview pipeline；session.frame 透传 YOLO 授权/多人 meta；保持 MediaPipe 旧默认路径和正式评分边界；更新 change.md。 |
 
 ## Recovery Notes
-- Completed T-003
+- Completed T-007

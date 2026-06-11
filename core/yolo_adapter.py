@@ -81,6 +81,7 @@ YOLO_FEATURE_LAYOUT: str = "body_core_v1"
 YOLO_CAPABILITY: str = "body_only"
 YOLO_DISPLAY_SCOPE_LIMITED: str = "limited"
 YOLO_DISPLAY_SCOPE_INTERNAL: str = "internal"
+YOLO_REALTIME_TARGET_POLICY: str = "select_main_person_largest_box_highest_score"
 
 DEFAULT_YOLO_MODEL_NAME: str = "yolo11n-pose.pt"
 
@@ -718,6 +719,154 @@ class YoloPoseAdapter:
             selected_index=idx,
         )
         return frame_result
+
+    def annotate(
+        self,
+        frame_bgr: np.ndarray,
+        *,
+        timestamp_ms: int | None = None,
+    ) -> tuple[np.ndarray, list[str], dict[str, Any]]:
+        """实时预览路径：YOLO body-only 推理 + 轻量骨架绘制。
+
+        ``timestamp_ms`` 只为兼容 MediaPipe pipeline 接口；YOLO 单帧推理不依赖它。
+        """
+        del timestamp_ms
+        result = self.infer_frame(frame_bgr)
+        out = frame_bgr.copy()
+        h, w = out.shape[:2]
+        pose33 = result.pose33
+        actions = _classify_yolo_body_actions(pose33, w, h)
+        _draw_yolo_body(out, pose33, w, h)
+
+        meta = dict(result.meta or {})
+        person_count = int(meta.get("num_persons", self.last_num_persons) or 0)
+        gate = evaluate_multi_person_gate([person_count])
+        meta.update(
+            {
+                "backend": "yolo",
+                "model_name": self.model_name,
+                "running_mode": "realtime_preview",
+                "multi_person_detected": bool(gate["multi_person_detected"]),
+                "multi_person_frames": int(gate["multi_person_frames"]),
+                "person_count": person_count,
+                "review_required": bool(gate["review_required"]),
+                "gate_status": str(gate["gate_status"]),
+                "gate_note": str(gate["gate_note"]),
+                "target_policy": YOLO_REALTIME_TARGET_POLICY,
+                "track_id": result.track_id,
+            }
+        )
+        return out, actions, meta
+
+
+def _landmark_confidence(lm: Landmark) -> float:
+    if lm.synthetic:
+        return 0.0
+    if lm.confidence is not None:
+        return float(lm.confidence)
+    return float(lm.visibility)
+
+
+def _yolo_pt2d(lm: Landmark, w: int, h: int) -> np.ndarray:
+    return np.array([float(lm.x) * w, float(lm.y) * h], dtype=np.float32)
+
+
+def _yolo_angle_deg(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> float:
+    v1 = a - b
+    v2 = c - b
+    denom = float(np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-6)
+    cos = float(np.clip(np.dot(v1, v2) / denom, -1.0, 1.0))
+    return float(np.degrees(np.arccos(cos)))
+
+
+def _classify_yolo_body_actions(
+    landmarks: tuple[Landmark, ...] | None,
+    w: int,
+    h: int,
+) -> list[str]:
+    if landmarks is None:
+        return []
+
+    l_sh = landmarks[11]
+    r_sh = landmarks[12]
+    l_wrist = landmarks[15]
+    r_wrist = landmarks[16]
+    actions: list[str] = []
+    min_conf = DEFAULT_YOLO_VALID_CONF_THR
+
+    left_hand_up = (
+        _landmark_confidence(l_wrist) >= min_conf
+        and _landmark_confidence(l_sh) >= min_conf
+        and l_wrist.y < l_sh.y - 0.05
+    )
+    right_hand_up = (
+        _landmark_confidence(r_wrist) >= min_conf
+        and _landmark_confidence(r_sh) >= min_conf
+        and r_wrist.y < r_sh.y - 0.05
+    )
+    if left_hand_up and right_hand_up:
+        actions.append("HANDS_UP")
+    elif left_hand_up:
+        actions.append("LEFT_HAND_UP")
+    elif right_hand_up:
+        actions.append("RIGHT_HAND_UP")
+
+    def knee_ok(hip_idx: int, knee_idx: int, ankle_idx: int) -> bool:
+        hip = landmarks[hip_idx]
+        knee = landmarks[knee_idx]
+        ankle = landmarks[ankle_idx]
+        if min(_landmark_confidence(hip), _landmark_confidence(knee), _landmark_confidence(ankle)) < min_conf:
+            return False
+        hip_pt = _yolo_pt2d(hip, w, h)
+        knee_pt = _yolo_pt2d(knee, w, h)
+        ankle_pt = _yolo_pt2d(ankle, w, h)
+        angle = _yolo_angle_deg(hip_pt, knee_pt, ankle_pt)
+        hip_knee_dist = abs((hip_pt[1] - knee_pt[1]) / max(h, 1))
+        return angle < 125.0 and hip_knee_dist < 0.18
+
+    if knee_ok(23, 25, 27) and knee_ok(24, 26, 28):
+        actions.append("SQUAT")
+    return actions
+
+
+def _draw_yolo_body(
+    out_bgr: np.ndarray,
+    landmarks: tuple[Landmark, ...] | None,
+    w: int,
+    h: int,
+) -> None:
+    if landmarks is None:
+        return
+    import cv2
+
+    body_edges = (
+        (11, 12),
+        (11, 13),
+        (13, 15),
+        (12, 14),
+        (14, 16),
+        (11, 23),
+        (12, 24),
+        (23, 24),
+        (23, 25),
+        (25, 27),
+        (24, 26),
+        (26, 28),
+    )
+    min_conf = DEFAULT_YOLO_VALID_CONF_THR
+    for i, j in body_edges:
+        a, b = landmarks[i], landmarks[j]
+        if min(_landmark_confidence(a), _landmark_confidence(b)) < min_conf:
+            continue
+        ax, ay = int(a.x * w), int(a.y * h)
+        bx, by = int(b.x * w), int(b.y * h)
+        cv2.line(out_bgr, (ax, ay), (bx, by), (255, 170, 0), 2, cv2.LINE_AA)
+    for idx in BODY_CORE_V1_VALID_INDICES:
+        lm = landmarks[idx]
+        if _landmark_confidence(lm) < min_conf:
+            continue
+        x, y = int(lm.x * w), int(lm.y * h)
+        cv2.circle(out_bgr, (x, y), 3, (0, 220, 255), -1, cv2.LINE_AA)
 
 
 # --------------------------------------------------------------------------- #

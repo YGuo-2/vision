@@ -1,3 +1,37 @@
+## 2026-06-11: T-007 接入 YOLO26n/s 实时 body-only 预览路径
+
+### 问题描述
+
+T-001 已固化 `enableHands=false` 且 YOLO realtime 可用时必须选择 YOLO26n/s 的路由契约，
+但桌面 `session.start` 运行时仍统一创建 MediaPipe pipeline；即使 `backendRoute.backend=yolo`，
+实际预览帧也不会走 YOLO body-only adapter，且多人复核、评分授权、标定状态等 YOLO meta
+没有随 `session.frame` 透传给前端。
+
+### 修改内容
+
+- `core/yolo_adapter.py` 为 `YoloPoseAdapter` 增加实时 `annotate()` 接口：逐帧推理后绘制
+  body-core skeleton，返回 `(annotated, actions, meta)`，并透传 `backend=yolo`、
+  `raw_layout=pose33_like_coco17`、`feature_layout=body_core_v1`、`score_authorized=False`、
+  `calibration_status=unvalidated`、`display_scope=limited`、多人检测和 `target_policy`。
+- `apps/ui_backend.py` 的默认 pipeline factory 根据 `backendRoute.backend` 选择 MediaPipe 或
+  YOLO；YOLO realtime 档默认映射到 `models/yolo26n-pose.pt`，显式 yolo26s/yolo26l 才使用对应模型。
+- 后台 job 执行时复用 start 阶段已计算的 `backendRoute`，避免内部二次 normalize 因默认安装版
+  YOLO unsupported 而把已批准 YOLO 路由回退成 MediaPipe；外部 request 仍由 availability 重新计算。
+- `session.frame` 增加 `backendMeta` camelCase 透传，并提升 `multiPersonDetected`、
+  `personCount`、`reviewRequired`、`targetPolicy` 等前端可直接消费字段；MediaPipe 原二元
+  `annotate()` 返回保持兼容。
+- 增加 UI 会话路由接线测试和 YOLO realtime annotate 契约测试，证明 YOLO 可用时真实进入
+  YOLO preview pipeline，且不授权正式评分。
+
+### 验证方法
+
+- `.\.venv\Scripts\python.exe -m pytest tests/test_backend_routing_contract.py tests/test_yolo_backend_contract.py -q`
+  → 33 passed
+- `.\.venv\Scripts\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q`
+  → 31 passed
+- `git diff --check`
+  → 退出码 0（仅 Windows 换行提示，无空白错误）
+
 ## 2026-06-11: T-003 建立模型档清单与配置状态
 
 ### 问题描述

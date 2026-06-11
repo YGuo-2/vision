@@ -29,6 +29,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from apps.camera_enum import DEFAULT_SCAN_LIMIT, CameraEntry, InputSourceState, enumerate_cameras
 from core.backend_router import (
+    BACKEND_YOLO,
     CAPABILITY_FINGERS,
     ModelAvailability,
     QualityProfile,
@@ -697,7 +698,7 @@ class TemplateAnalysisService:
         return payload
 
     def run_analysis(self, ctx: JobContext) -> JsonDict:
-        options = normalize_analysis_run_options(ctx.payload)
+        options = normalize_analysis_run_options(ctx.payload, trust_existing_route=True)
         ctx.progress("analysis.status", {"state": "running", **options.to_payload()})
         payload: JsonDict = {
             "state": "running",
@@ -979,8 +980,11 @@ class PreviewSessionService:
         return self._job_manager or DEFAULT_JOB_MANAGER
 
     @staticmethod
-    def _pipeline_cache_key(options: PreviewSessionOptions) -> tuple[str, bool]:
-        return (options.pose_variant, bool(options.enable_hands))
+    def _pipeline_cache_key(options: PreviewSessionOptions) -> tuple[str, str, bool]:
+        route = options.backend_route or {}
+        backend = str(route.get("backend") or "mediapipe")
+        model_profile = str(route.get("modelProfile") or options.pose_variant)
+        return (backend, model_profile, bool(options.enable_hands))
 
     def _acquire_pipeline(self, options: PreviewSessionOptions) -> tuple[Any, bool]:
         """返回 (pipeline, cached)。摄像头命中缓存则复用；否则新建。
@@ -1185,7 +1189,7 @@ class PreviewSessionService:
         )
 
     def run(self, ctx: JobContext) -> JsonDict:
-        options = normalize_session_options(ctx.payload)
+        options = normalize_session_options(ctx.payload, trust_existing_route=True)
         cap = None
         pipe = None
         pipe_cached = False
@@ -1350,7 +1354,8 @@ class PreviewSessionService:
                 started_at=started_at,
                 monotonic=self._monotonic,
             )
-            annotated, actions = pipe.annotate(frame, timestamp_ms=timestamp_ms)
+            annotated_result = pipe.annotate(frame, timestamp_ms=timestamp_ms)
+            annotated, actions, frame_meta = _normalize_annotate_result(annotated_result)
             frame_count += 1
             self._emit_preview_frame(
                 ctx=ctx,
@@ -1361,6 +1366,7 @@ class PreviewSessionService:
                 width=width,
                 height=height,
                 started_at=started_at,
+                frame_meta=frame_meta,
             )
             recorder.write_frame(annotated)
             self._emit_recording_error_if_needed(active)
@@ -1433,7 +1439,8 @@ class PreviewSessionService:
                     started_at=started_at,
                     monotonic=self._monotonic,
                 )
-                annotated, actions = pipe.annotate(item.frame, timestamp_ms=timestamp_ms)
+                annotated_result = pipe.annotate(item.frame, timestamp_ms=timestamp_ms)
+                annotated, actions, frame_meta = _normalize_annotate_result(annotated_result)
                 frame_count += 1
 
                 now = self._monotonic()
@@ -1447,6 +1454,7 @@ class PreviewSessionService:
                         width=width,
                         height=height,
                         started_at=started_at,
+                        frame_meta=frame_meta,
                         extra_payload={
                             "sourceFrameIndex": item.index,
                             "sourceFrameAgeMs": int(max(0.0, (now - item.captured_at) * 1000.0)),
@@ -1481,6 +1489,7 @@ class PreviewSessionService:
         width: int,
         height: int,
         started_at: float,
+        frame_meta: JsonDict | None = None,
         extra_payload: JsonDict | None = None,
     ) -> None:
         elapsed = self._monotonic() - started_at
@@ -1505,6 +1514,19 @@ class PreviewSessionService:
             "payloadBytes": len(encoded),
             "frameTransport": "tcp-length-prefixed",
         }
+        if frame_meta:
+            frame_payload["backendMeta"] = _to_camel_meta(frame_meta)
+            backend = frame_meta.get("backend")
+            if backend:
+                frame_payload["backend"] = str(backend)
+            for source_key, target_key in (
+                ("multi_person_detected", "multiPersonDetected"),
+                ("person_count", "personCount"),
+                ("review_required", "reviewRequired"),
+                ("target_policy", "targetPolicy"),
+            ):
+                if source_key in frame_meta:
+                    frame_payload[target_key] = frame_meta[source_key]
         frame_payload.update(channel_payload)
         if extra_payload:
             frame_payload.update(extra_payload)
@@ -1555,7 +1577,7 @@ def clamp_workers(value: Any) -> int:
     return max(1, min(workers, upper))
 
 
-def normalize_session_options(payload: JsonDict) -> PreviewSessionOptions:
+def normalize_session_options(payload: JsonDict, *, trust_existing_route: bool = False) -> PreviewSessionOptions:
     source = str(payload.get("source") or "").strip()
     source_kind = str(payload.get("sourceKind") or payload.get("source_kind") or "").strip().lower()
     state = InputSourceState()
@@ -1594,10 +1616,14 @@ def normalize_session_options(payload: JsonDict) -> PreviewSessionOptions:
 
     frame_limit = _optional_positive_int(payload.get("frameLimit", payload.get("frame_limit")))
     enable_hands = _payload_bool(payload.get("enableHands", payload.get("enable_hands")), default=True)
-    route = route_for_preview(
-        enable_hands=enable_hands,
-        model_availability=_route_model_availability_from_payload(payload),
-    )
+    route_payload = payload.get("backendRoute") if trust_existing_route else None
+    if isinstance(route_payload, dict):
+        route_dict = dict(route_payload)
+    else:
+        route_dict = route_for_preview(
+            enable_hands=enable_hands,
+            model_availability=_route_model_availability_from_payload(payload),
+        ).to_camel_dict()
     return PreviewSessionOptions(
         source=state.value,
         source_kind=state.kind,
@@ -1606,7 +1632,7 @@ def normalize_session_options(payload: JsonDict) -> PreviewSessionOptions:
         enable_hands=enable_hands,
         record_dir=_optional_str(payload.get("recordDir", payload.get("record_dir"))),
         frame_limit=frame_limit,
-        backend_route=route.to_camel_dict(),
+        backend_route=route_dict,
     )
 
 
@@ -1624,7 +1650,7 @@ def normalize_template_create_options(payload: JsonDict) -> TemplateCreateOption
     )
 
 
-def normalize_analysis_run_options(payload: JsonDict) -> AnalysisRunOptions:
+def normalize_analysis_run_options(payload: JsonDict, *, trust_existing_route: bool = False) -> AnalysisRunOptions:
     video_path = _required_path(payload, "videoPath", "targetVideo", "video")
     do_compare = _payload_bool(
         payload.get("doCompare", payload.get("enableTemplateCompare")),
@@ -1644,14 +1670,18 @@ def normalize_analysis_run_options(payload: JsonDict) -> AnalysisRunOptions:
         raise ValueError("templatePath is required when doCompare is true")
     enable_hands = _payload_bool(payload.get("enableHands", payload.get("enable_hands")), default=True)
     requires_capabilities = tuple(payload.get("requiresCapabilities") or payload.get("requires_capabilities") or ())
-    route = route_for_analysis(
-        enable_hands=enable_hands,
-        do_compare=do_compare,
-        do_tech_eval=do_tech_eval,
-        quality_profile=quality_profile,
-        model_availability=_route_model_availability_from_payload(payload),
-        requires_capabilities=tuple(str(item) for item in requires_capabilities),
-    )
+    route_payload = payload.get("backendRoute") if trust_existing_route else None
+    if isinstance(route_payload, dict):
+        route_dict = dict(route_payload)
+    else:
+        route_dict = route_for_analysis(
+            enable_hands=enable_hands,
+            do_compare=do_compare,
+            do_tech_eval=do_tech_eval,
+            quality_profile=quality_profile,
+            model_availability=_route_model_availability_from_payload(payload),
+            requires_capabilities=tuple(str(item) for item in requires_capabilities),
+        ).to_camel_dict()
     return AnalysisRunOptions(
         video_path=video_path,
         template_path=template_path,
@@ -1666,7 +1696,7 @@ def normalize_analysis_run_options(payload: JsonDict) -> AnalysisRunOptions:
         quality_profile=quality_profile,
         debug_video=_payload_bool(payload.get("debugVideo"), default=False),
         debug_out_path=_optional_str(payload.get("debugOutPath", payload.get("debugVideoPath"))),
-        backend_route=route.to_camel_dict(),
+        backend_route=route_dict,
     )
 
 
@@ -1704,6 +1734,42 @@ def _route_model_availability_from_payload(payload: JsonDict) -> ModelAvailabili
         yolo_supported=_payload_bool(raw.get("yoloSupported", raw.get("yolo_supported")), default=False),
         reason=str(raw.get("reason") or raw.get("message") or ""),
     )
+
+
+def _normalize_annotate_result(value: Any) -> tuple[Any, list[str], JsonDict]:
+    if isinstance(value, tuple) and len(value) == 3:
+        annotated, actions, meta = value
+        return annotated, list(actions or []), dict(meta or {})
+    annotated, actions = value
+    return annotated, list(actions or []), {}
+
+
+def _to_camel_meta(meta: JsonDict) -> JsonDict:
+    key_map = {
+        "raw_layout": "rawLayout",
+        "feature_layout": "featureLayout",
+        "score_authorized": "scoreAuthorized",
+        "calibration_status": "calibrationStatus",
+        "display_scope": "displayScope",
+        "confidence_kind": "confidenceKind",
+        "validity_policy": "validityPolicy",
+        "valid_conf_thr": "validConfThr",
+        "calibration_note": "calibrationNote",
+        "num_persons": "numPersons",
+        "selected_index": "selectedIndex",
+        "track_reset_note": "trackResetNote",
+        "model_name": "modelName",
+        "running_mode": "runningMode",
+        "multi_person_detected": "multiPersonDetected",
+        "multi_person_frames": "multiPersonFrames",
+        "person_count": "personCount",
+        "review_required": "reviewRequired",
+        "gate_status": "gateStatus",
+        "gate_note": "gateNote",
+        "target_policy": "targetPolicy",
+        "track_id": "trackId",
+    }
+    return {key_map.get(str(key), str(key)): value for key, value in meta.items()}
 
 
 def _optional_int(value: Any) -> int | None:
@@ -1752,6 +1818,15 @@ def _default_capture_factory(source: str) -> Any:
 
 def _default_pipeline_factory(options: PreviewSessionOptions) -> Any:
     from core.paths import models_dir
+
+    route = options.backend_route or {}
+    if str(route.get("backend") or "").lower() == BACKEND_YOLO:
+        from core.yolo_adapter import YoloPoseAdapter
+
+        model_profile = str(route.get("modelProfile") or "yolo26n/s")
+        model_name = _yolo_model_name_for_profile(model_profile)
+        return YoloPoseAdapter(model_path=models_dir() / model_name, warmup=True)
+
     from core.vision_pipeline import MediaPipePipeline, PipelineConfig
 
     return MediaPipePipeline(
@@ -1762,6 +1837,15 @@ def _default_pipeline_factory(options: PreviewSessionOptions) -> Any:
             enable_hands=options.enable_hands,
         ),
     )
+
+
+def _yolo_model_name_for_profile(model_profile: str) -> str:
+    normalized = str(model_profile or "").strip().lower()
+    if normalized in {"yolo26s", "yolo26s-pose.pt"}:
+        return "yolo26s-pose.pt"
+    if normalized in {"yolo26l", "yolo26l-pose.pt"}:
+        return "yolo26l-pose.pt"
+    return "yolo26n-pose.pt"
 
 
 def _default_create_template(*args: Any, **kwargs: Any) -> Path:

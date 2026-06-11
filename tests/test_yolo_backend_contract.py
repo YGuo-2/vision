@@ -67,6 +67,41 @@ def test_adapter_import_is_lazy():
     assert "ultralytics" not in sys.modules
 
 
+def test_realtime_annotate_returns_body_only_preview_meta_without_authorizing_score():
+    xy, conf = make_coco17(conf_value=0.9)
+    frame_result = FakeYoloResult.multi(
+        [
+            (xy, conf, (0.3, 0.5, 0.2, 0.4)),
+            (xy, conf, (0.6, 0.5, 0.5, 0.9)),
+        ]
+    )
+
+    class StaticYoloAdapter(YoloPoseAdapter):
+        def __init__(self):
+            super().__init__(model_path="fake-yolo26n-pose.pt")
+
+        def _predict_raw(self, frame):
+            return frame_result
+
+    adapter = StaticYoloAdapter()
+    annotated, actions, meta = adapter.annotate(np.zeros((64, 64, 3), dtype=np.uint8))
+
+    assert annotated.shape == (64, 64, 3)
+    assert isinstance(actions, list)
+    assert meta["backend"] == "yolo"
+    assert meta["model_name"] == "fake-yolo26n-pose.pt"
+    assert meta["running_mode"] == "realtime_preview"
+    assert meta["raw_layout"] == "pose33_like_coco17"
+    assert meta["feature_layout"] == "body_core_v1"
+    assert meta["score_authorized"] is False
+    assert meta["calibration_status"] == "unvalidated"
+    assert meta["display_scope"] == "limited"
+    assert meta["multi_person_detected"] is True
+    assert meta["person_count"] == 2
+    assert meta["review_required"] is True
+    assert meta["target_policy"] == "select_main_person_largest_box_highest_score"
+
+
 # --------------------------------------------------------------------------- #
 # 无人帧 / 空结果
 # --------------------------------------------------------------------------- #
