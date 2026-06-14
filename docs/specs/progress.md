@@ -2,25 +2,25 @@
 
 > **Workflow:** design-first
 > **Mode:** strict
-> **Status:** Completed
+> **Status:** Accepted
 > **Current Task:** n/a
 > **Approval:** approved
-> **Last Checkpoint:** 2026-06-14 23:19:08
+> **Last Checkpoint:** 2026-06-15 00:10:27
 > **Branch:** main
-> **Last Known Commit:** 36bb902
+> **Last Known Commit:** 9e68097
 
 ## Resume Summary
 - Goal: 完成任务收尾、文档同步和变更日志
 - Approved specs: design.md, requirements.md, tasks.md
 - Current task: n/a
-- Next safe action: Run pre-acceptance, then final acceptance.
+- Next safe action: Run spec_status, then continue the current task.
 - Blockers: n/a
 
 ## Active Task State
 - Task ID: n/a
 - Status: done
 - Started at: n/a
-- Verification needed: cmd: python C:\Users\ny\.codex\plugins\cache\Useful-marketplace\spce-workflow\0.2.0\scripts\validate_spec.py docs\specs --workflow design-first --color never => exit 0, 36 checks passed; cmd: python C:\Users\ny\.codex\plugins\cache\Useful-marketplace\spce-workflow\0.2.0\scripts\validate_spec.py docs\specs --resume --color never => exit 0, status=ready current_task=T-010 freeze ok; cmd: git diff --check => exit 0, only CRLF warnings; cmd: npm run verify:desktop => exit 0, frontend build/smoke, Tauri cargo check, Python compile smoke and desktop regression tests passed, 152 passed
+- Verification needed: Final acceptance passed through acceptance_state.json
 - Files expected to change: `docs/performance_optimization_inventory.md`, `docs/specs/design.md`, `docs/specs/requirements.md`, `docs/specs/tasks.md`, `change.md`
 
 ## Completed Work Log
@@ -39,4 +39,4 @@
 | T-010 | 2026-06-14 23:19:08 | 36bb902 | cmd: python C:\Users\ny\.codex\plugins\cache\Useful-marketplace\spce-workflow\0.2.0\scripts\validate_spec.py docs\specs --workflow design-first --color never => exit 0, 36 checks passed; cmd: python C:\Users\ny\.codex\plugins\cache\Useful-marketplace\spce-workflow\0.2.0\scripts\validate_spec.py docs\specs --resume --color never => exit 0, status=ready current_task=T-010 freeze ok; cmd: git diff --check => exit 0, only CRLF warnings; cmd: npm run verify:desktop => exit 0, frontend build/smoke, Tauri cargo check, Python compile smoke and desktop regression tests passed, 152 passed | 完成任务收尾、change.md 置顶同步和桌面整体验证；未修改冻结规范语义。 |
 
 ## Recovery Notes
-- Completed T-010
+- Final acceptance accepted

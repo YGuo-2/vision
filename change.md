@@ -1,3 +1,22 @@
+## 2026-06-15: 完成 Spce final acceptance 并冻结 accepted 状态
+
+### 问题描述
+
+T-001 至 T-010 已全部完成并推送后，Spce workflow 仍需通过 final acceptance 才能宣告整条设计优先流程结束。第一轮验收修复已提交到 `9e68097`，随后需要继续第二轮定向复审 U-005/T-007 与 U-008/T-010，确认 GPU fallback 元数据、完成态规范校验和 acceptance 可恢复状态均已收敛。
+
+### 修改内容
+
+- 通过 `spec_progress.py acceptance-next-round` 启动第二轮定向验收，仅复审第一轮受影响的 U-005/T-007 与 U-008/T-010。
+- 记录第二轮 first-wave 与 adversarial 四个 agent 的 PASS 报告，确认无新增 open issues、无 pending fixes。
+- 通过 `spec_progress.py acceptance-finish docs\specs` 将 `docs/specs/acceptance_state.json` 状态推进为 `accepted`，并同步 `progress.md`、`tasks.md`、`spec.yml` 的最终验收时间与状态。
+
+### 验证方法
+
+- `python C:\Users\ny\.codex\plugins\cache\Useful-marketplace\spce-workflow\0.2.0\scripts\validate_spec.py docs\specs --pre-acceptance --color never`：通过，pre-acceptance passed。
+- `.\.venv\Scripts\python.exe -m pytest tests/test_parallel_pose_engine.py tests/test_ui_backend_sessions.py::test_session_start_uses_parallel_pose_engine_when_workers_gt_one tests/test_ui_backend_sessions.py::test_pipeline_delegate_payload_reports_cpu_fallback -q`：通过，`7 passed`。
+- `python C:\Users\ny\.codex\plugins\cache\Useful-marketplace\spce-workflow\0.2.0\scripts\validate_spec.py docs\specs --workflow design-first --color never`：通过，`36` 项检查全部通过。
+- `python C:\Users\ny\.codex\plugins\cache\Useful-marketplace\spce-workflow\0.2.0\scripts\spec_progress.py acceptance-status docs\specs`：通过，`status=accepted`，open issues `0`，pending fixes `0`，pending agents `0`。
+
 ## 2026-06-14: 修复 final acceptance 第一轮发现的问题
 
 ### 问题描述
