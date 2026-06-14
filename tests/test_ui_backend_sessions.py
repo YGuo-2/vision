@@ -89,11 +89,23 @@ class StepPipeline(FakePipeline):
 
 
 class BlockingParallelPipeline(FakePipeline):
-    def __init__(self, *, started: threading.Event, release: threading.Event, worker_id: int) -> None:
+    def __init__(
+        self,
+        *,
+        started: threading.Event,
+        release: threading.Event,
+        worker_id: int,
+        requested_delegate: str = "cpu",
+        active_delegate: str = "cpu",
+        delegate_fallback_reason: str | None = None,
+    ) -> None:
         super().__init__(["V_SIGN", f"worker={worker_id}"])
         self.started = started
         self.release = release
         self.worker_id = worker_id
+        self.requested_delegate = requested_delegate
+        self.active_delegate = active_delegate
+        self.delegate_fallback_reason = delegate_fallback_reason
 
     def annotate(self, frame, *, timestamp_ms: int | None = None):
         self.started.set()
@@ -433,6 +445,7 @@ def test_session_start_uses_parallel_pose_engine_when_workers_gt_one() -> None:
 
     def parallel_factory(options: ui_backend.PreviewSessionOptions):
         assert options.workers == 2
+        assert options.delegate == "gpu"
 
         def _factory() -> BlockingParallelPipeline:
             with created_lock:
@@ -441,6 +454,9 @@ def test_session_start_uses_parallel_pose_engine_when_workers_gt_one() -> None:
                     started=started[worker_idx],
                     release=releases[worker_idx],
                     worker_id=worker_idx + 1,
+                    requested_delegate="gpu",
+                    active_delegate="cpu",
+                    delegate_fallback_reason="gpu unavailable",
                 )
                 created.append(pipeline)
                 return pipeline
@@ -468,6 +484,7 @@ def test_session_start_uses_parallel_pose_engine_when_workers_gt_one() -> None:
                     "poseVariant": "heavy",
                     "workers": 2,
                     "enableHands": False,
+                    "delegate": "gpu",
                     "frameLimit": 2,
                     "frameChannel": sink.payload(),
                 },
@@ -491,13 +508,33 @@ def test_session_start_uses_parallel_pose_engine_when_workers_gt_one() -> None:
         assert final.result["submittedFrames"] >= 2
         assert final.result["emittedInferenceFrames"] == 2
         assert final.result["pendingInferenceFrames"] >= 0
+        assert final.result["delegate"] == {
+            "requested": "gpu",
+            "active": "cpu",
+            "fallback": True,
+            "fallbackReason": "gpu unavailable",
+        }
         assert len(created) == 2
         assert all(p.closed for p in created)
+        running_status = next(
+            event for event in events if event["event"] == "session.status" and event["payload"]["state"] == "running"
+        )
+        assert running_status["payload"]["delegate"] == {
+            "requested": "gpu",
+            "active": "pending",
+            "fallback": False,
+        }
         parallel_events = [event for event in events if event["event"] == "session.frame"]
         assert parallel_events
         assert parallel_events[0]["payload"]["parallelPreview"] is True
         assert parallel_events[0]["payload"]["workersUsed"] == 2
         assert parallel_events[0]["payload"]["inferenceFrameIndex"] == 0
+        assert parallel_events[0]["payload"]["delegate"] == {
+            "requested": "gpu",
+            "active": "cpu",
+            "fallback": True,
+            "fallbackReason": "gpu unavailable",
+        }
         assert parallel_events[0]["payload"]["sourceFrameIndex"] == 1
         assert parallel_events[0]["payload"]["frameStore"]["publishedFrames"] >= 1
         assert parallel_events[0]["payload"]["frameStore"]["droppedFrames"] >= 0

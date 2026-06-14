@@ -1,3 +1,22 @@
+## 2026-06-14: 修复 final acceptance 第一轮发现的问题
+
+### 问题描述
+
+Spce final acceptance 第一轮 review/adversarial 审查发现 5 个收尾问题：完成态下 `validate_spec --workflow design-first` 因空 execution waves 无法复现 T-010 证据；T-010 文档中存在上一提交号和完成前措辞；并行 camera preview 显式 `delegate=gpu` 后 worker CPU fallback 的元数据未回传到 bridge；`docs/specs/acceptance_state.json` 未纳入提交；`docs/specs/acceptance-fixes.md` 仍是 pre-acceptance 占位文本。
+
+### 修改内容
+
+- 修复 Spce workflow 插件本机 `validate_spec.py`：当所有任务均为 done/skipped 时，空 execution waves 视为合法完成态。
+- 在 `core/parallel_pose_engine.py` 中记录并合并 worker pipeline delegate 元数据，`apps/ui_backend.py` 在并行预览的 running 状态避免误报 `active=gpu`，并在 frame/final payload 中暴露真实 fallback。
+- 更新 `tests/test_ui_backend_sessions.py`，覆盖并行预览 `delegate=gpu` 回退 CPU 时的 running/frame/final 元数据。
+- 刷新 `docs/specs/acceptance-fixes.md` 为真实修复队列，并将 `docs/specs/acceptance_state.json` 纳入版本控制以保证 final acceptance 可恢复。
+
+### 验证方法
+
+- `.\.venv\Scripts\python.exe -m pytest tests/test_parallel_pose_engine.py tests/test_ui_backend_sessions.py::test_session_start_uses_parallel_pose_engine_when_workers_gt_one tests/test_ui_backend_sessions.py::test_pipeline_delegate_payload_reports_cpu_fallback -q`：通过，`7 passed`。
+- `python C:\Users\ny\.codex\plugins\cache\Useful-marketplace\spce-workflow\0.2.0\scripts\validate_spec.py docs\specs --workflow design-first --color never`：通过，`36` 项检查全部通过。
+- `python C:\Users\ny\.codex\plugins\cache\Useful-marketplace\spce-workflow\0.2.0\scripts\validate_spec.py docs\specs --resume --color never`：通过，`status=ready`，freeze ok。
+
 ## 2026-06-14: T-010 完成性能优化任务收尾与桌面整体验证
 
 ### 问题描述
@@ -8,7 +27,7 @@ T-010 要求在 T-002 至 T-009 全部关闭后完成收尾验证、进度同步
 
 - 补齐 `frontend/src/bridge.ts` 中 `LatestFrameBytes.bytes` 的类型为 `Uint8Array<ArrayBuffer>`，保持 `new Uint8Array(response, 8)` 免拷贝视图语义不变。
 - 按 T-010 验证门完成规范结构校验、resume 校验、`git diff --check` 和 `npm run verify:desktop`。
-- 通过 `spec_progress.py start docs\specs T-010` 恢复当前任务 active 状态，并准备使用 `spec_progress.py complete docs\specs T-010` 记录最终证据。
+- 通过 `spec_progress.py start docs\specs T-010` 恢复当前任务 active 状态，并随后使用 `spec_progress.py complete docs\specs T-010` 记录最终证据。
 - 更新本 `change.md` 置顶记录，作为本轮任务链的收尾审计入口。
 
 ### 验证方法

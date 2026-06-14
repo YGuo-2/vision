@@ -52,6 +52,7 @@ class InferResult:
     index: int
     annotated: np.ndarray
     actions: list[str]
+    delegate: dict[str, object] | None = None
 
 
 PipelineFactory = Callable[[], _AnnotatePipeline]
@@ -132,6 +133,8 @@ class ParallelPoseEngine:
 
         self._error: BaseException | None = None
         self._error_lock = threading.Lock()
+        self._delegate_payloads: list[dict[str, object]] = []
+        self._delegate_lock = threading.Lock()
 
         self._worker_threads: list[threading.Thread] = []
         self._collector_thread: threading.Thread | None = None
@@ -228,6 +231,12 @@ class ParallelPoseEngine:
             return self._error
 
     @property
+    def delegate_payload(self) -> dict[str, object]:
+        with self._delegate_lock:
+            payloads = [dict(item) for item in self._delegate_payloads]
+        return _merge_delegate_payloads(payloads)
+
+    @property
     def stats(self) -> dict[str, int]:
         with self._stats_lock:
             return {
@@ -243,10 +252,19 @@ class ParallelPoseEngine:
                 self._error = exc
         self._stop_evt.set()
 
+    def _record_delegate_payload(self, pipe: _AnnotatePipeline) -> dict[str, object] | None:
+        payload = _delegate_payload_from_pipeline(pipe)
+        if payload:
+            with self._delegate_lock:
+                self._delegate_payloads.append(payload)
+        return payload or None
+
     def _worker_loop(self) -> None:
         pipe: _AnnotatePipeline | None = None
+        delegate_payload: dict[str, object] | None = None
         try:
             pipe = self._factory()
+            delegate_payload = self._record_delegate_payload(pipe)
             while not self._stop_evt.is_set():
                 try:
                     item = self._frame_q.get(timeout=0.1)
@@ -258,7 +276,12 @@ class ParallelPoseEngine:
                     break
                 idx, frame = item
                 annotated, actions = pipe.annotate(frame, timestamp_ms=None)
-                result = InferResult(index=idx, annotated=annotated, actions=list(actions))
+                result = InferResult(
+                    index=idx,
+                    annotated=annotated,
+                    actions=list(actions),
+                    delegate=delegate_payload,
+                )
                 # 可中断的有界 put：raw_q 满时不永久阻塞，响应 stop。
                 while not self._stop_evt.is_set():
                     try:
@@ -321,3 +344,39 @@ class ParallelPoseEngine:
                 return
             except Full:
                 continue
+
+
+def _delegate_payload_from_pipeline(pipe: object) -> dict[str, object]:
+    requested = getattr(pipe, "requested_delegate", None)
+    active = getattr(pipe, "active_delegate", None)
+    reason = getattr(pipe, "delegate_fallback_reason", None)
+    if requested is None and active is None and reason is None:
+        return {}
+    payload: dict[str, object] = {
+        "requested": str(requested or active or "cpu"),
+        "active": str(active or requested or "cpu"),
+        "fallback": bool(reason),
+    }
+    if reason:
+        payload["fallbackReason"] = str(reason)
+    return payload
+
+
+def _merge_delegate_payloads(payloads: list[dict[str, object]]) -> dict[str, object]:
+    if not payloads:
+        return {}
+    requested = str(payloads[0].get("requested") or "cpu")
+    active_values = {str(item.get("active") or requested) for item in payloads}
+    fallback_reasons = [
+        str(item.get("fallbackReason"))
+        for item in payloads
+        if item.get("fallbackReason")
+    ]
+    payload: dict[str, object] = {
+        "requested": requested,
+        "active": active_values.pop() if len(active_values) == 1 else "mixed",
+        "fallback": any(bool(item.get("fallback")) for item in payloads),
+    }
+    if fallback_reasons:
+        payload["fallbackReason"] = "; ".join(dict.fromkeys(fallback_reasons))
+    return payload

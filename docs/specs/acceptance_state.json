@@ -1,0 +1,541 @@
+{
+  "affected_units": [
+    "U-005",
+    "U-008"
+  ],
+  "agents": [
+    {
+      "agent_id": "round-1-R-U-001",
+      "completed_at": "2026-06-14 23:31:35",
+      "report": "## Review Unit\n- Unit: U-001 / T-001\n- Status: PASS\n- Completion: complete. docs/specs/tasks.md marks T-001 done and records offline profile, GPU env, backend routing subset and golden/profile pytest evidence; local outputs exist under outputs/perf_baseline/offline_fixture and outputs/perf_baseline/gpu_env.\n- Spec Adherence: strict. design.md requires fixture profile, env-only GPU snapshot and high_quality routing contract results; requirements.md requires blocker handling before optimization. change.md records the TypeError reproduction, user-approved Bugfix, and no T-002+ optimization inside T-001.\n- Over-Fallback: none. backend routing tests cover unavailable YOLO26L structured unavailable, YOLO26L available internal body-only score_authorized=False, and doCompare+high_quality MediaPipe formal compare.\n- Verification: sufficient. Evidence includes offline_matching_profile.py --fixture-smoke, bench_annotate_fps.py --env-only, backend routing subset 2 passed, and tests/test_s5_offline_profile.py tests/test_s5_gpu_recheck.py tests/test_pose33_v3_golden.py -q 31 passed.\n- Issues: n/a",
+      "result": "PASS",
+      "role": "first_wave",
+      "round": 1,
+      "started_at": "2026-06-14 23:24:45",
+      "status": "completed",
+      "task_ids": [
+        "T-001"
+      ],
+      "unit_id": "U-001"
+    },
+    {
+      "agent_id": "round-1-A-U-001",
+      "completed_at": "2026-06-14 23:40:52",
+      "report": "## Review Unit\n- Unit: U-001 / T-001\n- Status: PASS\n- Challenge Summary: adversarial read-only review agrees with first-wave PASS. T-001 baseline evidence, high_quality routing blocker reproduction/fix record, offline profile/GPU env outputs, and routing/golden profile tests are consistent. No unfinished work, spec drift, overbroad fallback, missing verification, unauthorized behavior, or hidden regression found for T-001.\n- Issues: n/a",
+      "result": "PASS",
+      "role": "adversarial",
+      "round": 1,
+      "started_at": "2026-06-14 23:36:19",
+      "status": "completed",
+      "task_ids": [
+        "T-001"
+      ],
+      "unit_id": "U-001"
+    },
+    {
+      "agent_id": "round-1-R-U-002",
+      "completed_at": "2026-06-14 23:35:45",
+      "report": "## Review Unit\n- Unit: U-002 / T-002,T-003,T-004\n- Status: PASS\n- Completion: complete. docs/specs/tasks.md marks T-002/T-003/T-004 done; change.md records problem, changes, and verification for each; HEAD is 36bb902fd380629ce21cf69b478da53847e4c02a.\n- Spec Adherence: strict. T-002 only changes Vue/Tauri preview defaults and preview-copy constants; apps/ui_backend.py defaults lite, enableHands=false, workers=1. T-003 enables parallel only for source_kind=camera && workers>1 && backend=mediapipe. T-004 is cross-video parallelism with per-video workers=1 and index-sorted outputs.\n- Over-Fallback: none. Preview YOLO/MediaPipe authorization boundary still comes from backendRoute with scoreAuthorized/displayScope. YOLO body_core batch remains score_authorized=False/internal/unvalidated.\n- Verification: sufficient. Tests cover lite/hands-off and constants, workers>1 not using old single pipeline and independent worker pipelines, dual-compare/body_core/skeleton concurrent ordering and YOLO metadata. progress.md records related pytest, py_compile, and verify:desktop passing.\n- Issues: n/a",
+      "result": "PASS",
+      "role": "first_wave",
+      "round": 1,
+      "started_at": "2026-06-14 23:24:45",
+      "status": "completed",
+      "task_ids": [
+        "T-002",
+        "T-003",
+        "T-004"
+      ],
+      "unit_id": "U-002"
+    },
+    {
+      "agent_id": "round-1-A-U-002",
+      "completed_at": "2026-06-14 23:41:46",
+      "report": "## Review Unit\n- Unit: U-002 / T-002,T-003,T-004\n- Status: PASS\n- Challenge Summary: adversarial review found no boundary mix-up between T-003/T-004 and T-008. T-004 only did cross-video parallelism with internal workers=1 and index-ordered output; later body_core precompute reuse has separate T-008 approval and records. Preview parallel path is limited to camera + MediaPipe + workers>1, defaults remain lite/pose-only/workers=1, and tests cover preview authorization, worker isolation, latest-frame payload, and batch output order.\n- Issues: n/a",
+      "result": "PASS",
+      "role": "adversarial",
+      "round": 1,
+      "started_at": "2026-06-14 23:36:19",
+      "status": "completed",
+      "task_ids": [
+        "T-002",
+        "T-003",
+        "T-004"
+      ],
+      "unit_id": "U-002"
+    },
+    {
+      "agent_id": "round-1-R-U-003",
+      "completed_at": "2026-06-14 23:31:53",
+      "report": "## Review Unit\n- Unit: U-003 / T-005\n- Status: PASS\n- Completion: complete. HEAD matches 36bb902fd380629ce21cf69b478da53847e4c02a; docs/specs/tasks.md marks T-005 done with required acceptance criteria. Implementation is present in ui_backend_sidecar.spec, scripts/build-tauri-sidecar.ps1, and frontend/src-tauri/src/lib.rs.\n- Spec Adherence: strict. requirements.md requires onedir resources/Rust path/heavy excludes smoke; ui_backend_sidecar.spec keeps torch/ultralytics/core.yolo_adapter excluded, and frontend/src-tauri/tauri.conf.json keeps the resources root mapping.\n- Over-Fallback: none. Release lookup targets resource_dir/vision-ui-backend/vision-ui-backend.exe exactly; debug builds keep the existing Python dev fallback without broadening sidecar packaging behavior.\n- Verification: sufficient. Recorded evidence includes npm run build:sidecar, npm run verify:tauri, npm run package:windows, capabilities diff check, and pytest tests/test_windows_packaging_smoke.py -q => 10 passed. Generated sidecar/dist/target artifacts are ignored and not tracked beyond resources/.gitkeep.\n- Issues: n/a",
+      "result": "PASS",
+      "role": "first_wave",
+      "round": 1,
+      "started_at": "2026-06-14 23:24:46",
+      "status": "completed",
+      "task_ids": [
+        "T-005"
+      ],
+      "unit_id": "U-003"
+    },
+    {
+      "agent_id": "round-1-A-U-003",
+      "completed_at": "2026-06-14 23:40:16",
+      "report": "## Review Unit\n- Unit: U-003 / T-005\n- Status: PASS\n- Challenge Summary: adversarial review found no evidence-backed actionable issue. Packaged path, Tauri resources, capabilities, heavy excludes, generated artifact tracking, and packaging smoke evidence are supported by repository evidence.\n- Issues: n/a",
+      "result": "PASS",
+      "role": "adversarial",
+      "round": 1,
+      "started_at": "2026-06-14 23:36:20",
+      "status": "completed",
+      "task_ids": [
+        "T-005"
+      ],
+      "unit_id": "U-003"
+    },
+    {
+      "agent_id": "round-1-R-U-004",
+      "completed_at": "2026-06-14 23:33:10",
+      "report": "## Review Unit\n- Unit: U-004 / T-006\n- Status: PASS\n- Completion: complete. docs/specs/tasks.md marks T-006 done with required evidence; change.md records the T-006 change summary and verification. HEAD matched 36bb902fd380629ce21cf69b478da53847e4c02a.\n- Spec Adherence: strict. core/pose_features.py keeps exact DTW DP/tie-break/backtrace and only vectorizes local costs; core/action_compare.py keeps joint-error aggregation on DTW path and filters by raw valid_mask; core/rule_scoring.py caches _RULES and batch valid-frame checks without changing rule thresholds/status semantics.\n- Over-Fallback: none found. No DTW bandwidth/window shortcut, no rule-threshold relaxation, no silent valid-point fabrication. Joint errors still gate through raw_mask and rule scoring keeps structured skips for missing/insufficient valid data.\n- Verification: sufficient. Recorded T-006 evidence includes golden/valid_mask/rule/tech_eval subset 49 passed, body/layout/profile subset 39 passed, py_compile, and git diff --check. Later current-HEAD evidence reran the same guard subset during T-008 and T-010 reports npm run verify:desktop 152 passed. Golden fixture diff check produced no output.\n- Issues: n/a",
+      "result": "PASS",
+      "role": "first_wave",
+      "round": 1,
+      "started_at": "2026-06-14 23:24:46",
+      "status": "completed",
+      "task_ids": [
+        "T-006"
+      ],
+      "unit_id": "U-004"
+    },
+    {
+      "agent_id": "round-1-A-U-004",
+      "completed_at": "2026-06-14 23:40:34",
+      "report": "## Review Unit\n- Unit: U-004 / T-006\n- Status: PASS\n- Challenge Summary: adversarial review found no actionable issue. DTW local cost only vectorized, DP tie-break remains diag > up > left, end selection uses earliest argmin; valid_mask remains centrally derived and filters rules/joint errors; rule cache does not change thresholds; golden/valid_mask/rule/tech_eval evidence is recorded and golden fixture is unchanged.\n- Issues: n/a",
+      "result": "PASS",
+      "role": "adversarial",
+      "round": 1,
+      "started_at": "2026-06-14 23:36:20",
+      "status": "completed",
+      "task_ids": [
+        "T-006"
+      ],
+      "unit_id": "U-004"
+    },
+    {
+      "agent_id": "round-1-R-U-005",
+      "completed_at": "2026-06-14 23:32:23",
+      "report": "## Review Unit\n- Unit: U-005 / T-007\n- Status: ACTIONABLE_ISSUES\n- Completion: partially complete. HEAD is 36bb902fd380629ce21cf69b478da53847e4c02a; PipelineConfig.delegate defaults cpu; CLI --delegate defaults cpu; bridge preview defaults cpu and rejects invalid values. However parallel camera preview does not fully expose GPU fallback metadata.\n- Spec Adherence: deviation. REQ-004 / AC-004.2 requires GPU init failure to have structured fallback or CPU fallback with visible evidence. Sequential pipeline complies by recording requested_delegate/active_delegate/delegate_fallback_reason. Formal scoring/full tech_eval defaults remain CPU.\n- Over-Fallback: no broad fallback in formal/default paths. Issue is parallel preview fallback visibility: explicit GPU failure falls back inside worker but bridge status/result may still present active=gpu or omit metadata.\n- Verification: existing tests cover direct pipeline fallback, CLI opt-in, bridge delegate parsing and serialization, but do not cover parallel preview worker fallback metadata.\n- Issues:\n1. severity(P2), evidence: apps/ui_backend.py initializes pipe=None; parallel preview does not create sequential pipe, and running status without pipe reports delegate {requested: options.delegate, active: options.delegate}. If delegate=gpu falls back inside worker, status can wrongly show active=gpu. Final status/result only attach _pipeline_delegate_payload when pipe is not None; parallel stats have no delegate/fallback metadata. core/parallel_pose_engine.py creates worker pipelines internally but InferResult carries no delegate metadata. affected task/file: T-007, apps/ui_backend.py, core/parallel_pose_engine.py, tests/test_ui_backend_sessions.py.",
+      "result": "ACTIONABLE_ISSUES",
+      "role": "first_wave",
+      "round": 1,
+      "started_at": "2026-06-14 23:24:04",
+      "status": "completed",
+      "task_ids": [
+        "T-007"
+      ],
+      "unit_id": "U-005"
+    },
+    {
+      "agent_id": "round-1-A-U-005",
+      "completed_at": "2026-06-14 23:41:31",
+      "report": "## Review Unit\n- Unit: U-005 / T-007\n- Status: PASS\n- Challenge Summary: already-recorded P2 issue is accurate and sufficient. MediaPipePipeline records requested/active/fallback delegates, but parallel camera preview via ParallelPoseEngine leaves bridge without worker fallback metadata and can misreport active delegate. No default formal scoring GPU drift found; severity P2 is appropriate.\n- Issues: n/a",
+      "result": "PASS",
+      "role": "adversarial",
+      "round": 1,
+      "started_at": "2026-06-14 23:36:20",
+      "status": "completed",
+      "task_ids": [
+        "T-007"
+      ],
+      "unit_id": "U-005"
+    },
+    {
+      "agent_id": "round-1-R-U-006",
+      "completed_at": "2026-06-14 23:29:52",
+      "report": "## Review Unit\n- Unit: U-006 / T-008\n- Status: PASS\n- Completion: complete. `git rev-parse HEAD` = `36bb902fd380629ce21cf69b478da53847e4c02a`; `docs/specs/tasks.md` marks T-008 `[x]` and records the explicit approval phrase plus implementation/verification evidence. `change.md` also records the T-008 implementation entry.\n- Spec Adherence: strict. Implementation is limited to raw/body_core reuse: `core/rule_scoring.py` adds `Pose33RawSeries` / `extract_pose_raw_series()` / `slice_pose_raw_series()` and keeps legacy `extract_pose_raw()` behavior; `core/action_compare.py` lazily extracts one full-video raw series and slices it for rules and joint errors; `core/body_core_compare.py` accepts `precomputed_features` and rejects backend mismatch; `batch/batch_dual_compare.py` extracts body_core once per student video and reuses it for front/side. No T-008 diff in `core/pose_features.py`, `core/backend_router.py`, `core/yolo_adapter.py`, or `tests/fixtures/pose33_v3/golden.json` from `943f1c0..36bb902`.\n- Over-Fallback: none found. `valid_mask` remains centralized via `derive_valid_mask`; `score_rules()` only derives when caller lacks a mask. Body_core precompute validates backend consistency instead of silently falling back. YOLO/body_core metadata remains bounded by `calibration_status=unvalidated`, `score_authorized=False`, and internal/debug output paths.\n- Verification: sufficient. Recorded evidence includes `py_compile` for touched T-008 files, `pytest tests/test_t008_single_pass_reuse.py -q => 4 passed`, body_core/batch regressions, `pose33_v3_golden`, `valid_mask`, rule availability, tech_eval, YOLO backend contract subsets, and `analysis/offline_matching_profile.py --fixture-smoke --out outputs\\perf_baseline\\t008_after`. The new test covers slice equivalence, one raw-series extraction for dual rules/errors, precomputed body_core no re-extract, and backend mismatch rejection.\n- Issues: n/a",
+      "result": "PASS",
+      "role": "first_wave",
+      "round": 1,
+      "started_at": "2026-06-14 23:24:04",
+      "status": "completed",
+      "task_ids": [
+        "T-008"
+      ],
+      "unit_id": "U-006"
+    },
+    {
+      "agent_id": "round-1-A-U-006",
+      "completed_at": "2026-06-14 23:42:01",
+      "report": "## Review Unit\n- Unit: U-006 / T-008\n- Status: PASS\n- Challenge Summary: adversarial review found no actionable issue. extract_pose_raw keeps VIDEO-mode prefix inference from frame 0 to end_frame and slices read-only; dual compare rules/errors reuse one full-video raw series; body_core precomputed features reject backend mismatch; no YOLO metadata, DTW/rule threshold, or golden drift. tests/test_t008_single_pass_reuse.py -q was rerun and passed 4.\n- Issues: n/a",
+      "result": "PASS",
+      "role": "adversarial",
+      "round": 1,
+      "started_at": "2026-06-14 23:36:20",
+      "status": "completed",
+      "task_ids": [
+        "T-008"
+      ],
+      "unit_id": "U-006"
+    },
+    {
+      "agent_id": "round-1-R-U-007",
+      "completed_at": "2026-06-14 23:30:50",
+      "report": "## Review Unit\n- Unit: U-007 / T-009\n- Status: PASS\n- Completion: complete. HEAD matches `36bb902fd380629ce21cf69b478da53847e4c02a`; docs/specs/tasks.md marks T-009 `[x] done`, with evidence. change.md records the T-009 change summary and verification.\n- Spec Adherence: strict. Spec requires raw frame IPC preserve session isolation, `frameId` monotonicity, and latest-wins semantics. Implementation keeps those guards: `bridge.ts` validates `sessionId/frameToken/frameHandle/frameId` and returns actual `frameId` plus `new Uint8Array(response, 8)`; `App.vue` filters current bridge events, coalesces via one `pendingFrame`, rechecks `isDrawableFrame`, and rejects frame rollback; Rust `latest_frame` validates channel token, requested/stored frame identity, and session-scoped store.\n- Over-Fallback: none found. T-009 only optimizes transfer/draw/clone paths; no new broad fallback, no queue replacement, no capability expansion. `git diff --exit-code -- frontend/src-tauri/capabilities/default.json` returned exit 0.\n- Verification: sufficient. Recorded evidence includes `npm --prefix frontend run test`, `npm run verify:tauri`, capabilities diff, and `pytest tests/test_vue_tauri_acceptance_gaps.py tests/test_ui_backend_sessions.py -q => 24 passed`. T-010 also records `npm run verify:desktop => ... 152 passed`. Smoke assertions cover current/foreign session frames, older frame rejection, `new Uint8Array(response, 8)`, canvas context caching, and `Arc<Vec<u8>>`.\n- Issues: n/a",
+      "result": "PASS",
+      "role": "first_wave",
+      "round": 1,
+      "started_at": "2026-06-14 23:24:04",
+      "status": "completed",
+      "task_ids": [
+        "T-009"
+      ],
+      "unit_id": "U-007"
+    },
+    {
+      "agent_id": "round-1-A-U-007",
+      "completed_at": "2026-06-14 23:41:16",
+      "report": "## Review Unit\n- Unit: U-007 / T-009\n- Status: PASS\n- Challenge Summary: adversarial read-only review checked TypeScript/Blob type, frameId monotonic guard, session/token/handle validation, Arc<Vec<u8>> clone semantics, canvas context cache cleanup, and capabilities drift. vue-tsc passes; Rust latest_frame validates session channel/token and returns actual frameId; frontend verifies session/job before and after drawing and rejects frames older than lastDrawnFrameId; default capabilities have no diff. No evidence-backed actionable issue found.\n- Issues: n/a",
+      "result": "PASS",
+      "role": "adversarial",
+      "round": 1,
+      "started_at": "2026-06-14 23:36:20",
+      "status": "completed",
+      "task_ids": [
+        "T-009"
+      ],
+      "unit_id": "U-007"
+    },
+    {
+      "agent_id": "round-1-R-U-008",
+      "completed_at": "2026-06-14 23:31:35",
+      "report": "## Review Unit\n- Unit: U-008 / T-010\n- Status: ACTIONABLE_ISSUES\n- Completion: incomplete with evidence: all 10 tasks are checked done and spec_progress.py status docs\\specs reports Completed, but T-010's recorded validate_spec --workflow design-first evidence is not reproducible on current HEAD 36bb902fd380629ce21cf69b478da53847e4c02a.\n- Spec Adherence: deviation with evidence: tasks.md requires structure and resume checks to pass; --resume passes, but --workflow design-first currently exits 1 with tasks.md 无法计算执行 waves.\n- Over-Fallback: present in verification handling: the failed structure gate appears recorded as successful in docs/specs/tasks.md, docs/specs/progress.md, and change.md.\n- Verification: insufficient: git diff --check passes, --resume passes, --pre-acceptance passes, and npm run verify:desktop is recorded, but one required T-010 validation gate fails when rerun.\n- Issues:\n  1. severity(P1), evidence: running python C:\\Users\\ny\\.codex\\plugins\\cache\\Useful-marketplace\\spce-workflow\\0.2.0\\scripts\\validate_spec.py docs\\specs --workflow design-first --color never on HEAD 36bb902 exits 1: 35 passed / 1 failed, failure tasks.md 无法计算执行 waves. The same command is recorded as exit 0 / 36 checks passed in docs/specs/tasks.md, docs/specs/progress.md, and change.md. affected task/file: T-010, docs/specs/tasks.md, docs/specs/progress.md, change.md.\n  2. severity(P3), evidence: pushed HEAD is 36bb902, but docs/specs/progress.md still says Last Known Commit: 943f1c0, and T-010 completion log records 943f1c0 in docs/specs/progress.md / docs/specs/tasks.md. change.md also says it is preparing to use spec_progress.py complete rather than reflecting that T-010 is already completed. affected task/file: T-010, docs/specs/progress.md, docs/specs/tasks.md, change.md.",
+      "result": "ACTIONABLE_ISSUES",
+      "role": "first_wave",
+      "round": 1,
+      "started_at": "2026-06-14 23:24:46",
+      "status": "completed",
+      "task_ids": [
+        "T-010"
+      ],
+      "unit_id": "U-008"
+    },
+    {
+      "agent_id": "round-1-A-U-008",
+      "completed_at": "2026-06-14 23:42:23",
+      "report": "## Review Unit\n- Unit: U-008 / T-010\n- Status: ACTIONABLE_ISSUES\n- Challenge Summary: already-recorded P1/P3 are accurate. validate_spec --workflow design-first fails on HEAD 36bb902 after all tasks completed because spec_progress.py waves docs\\specs returns [] and validate_spec.py treats empty waves as failure; this is a tool contract issue, not just documentation. --pre-acceptance passes.\n- Issues:\n  1. severity(P2), evidence: git status --short shows ?? docs/specs/acceptance_state.json; git ls-files and git show HEAD do not include it, but acceptance-status depends on it and reports agents-running, round 1, 16 agents, and open issues. HEAD cannot self-contain the current resumable final acceptance state. affected task/file: T-010, docs/specs/acceptance_state.json.\n  2. severity(P3), evidence: docs/specs/acceptance-fixes.md still says final acceptance has not started and tasks remain unfinished, while acceptance-status reports final acceptance round 1 running with open issues. affected task/file: T-010, docs/specs/acceptance-fixes.md.",
+      "result": "ACTIONABLE_ISSUES",
+      "role": "adversarial",
+      "round": 1,
+      "started_at": "2026-06-14 23:36:20",
+      "status": "completed",
+      "task_ids": [
+        "T-010"
+      ],
+      "unit_id": "U-008"
+    }
+  ],
+  "completed_at": null,
+  "created_at": "2026-06-14 23:22:10",
+  "deferred_issues": [],
+  "fixes": [
+    {
+      "completed_at": "2026-06-14 23:51:12",
+      "created_at": "2026-06-14 23:42:50",
+      "evidence": "Patched local Spce workflow validate_spec.py so completed workflows with all tasks done/skipped treat empty execution_waves as valid; reran validate_spec.py docs\\\\specs --workflow design-first --color never => exit 0, 36 checks passed with message all tasks closed.",
+      "fix_id": "F-001",
+      "issue_ids": [
+        "I-001"
+      ],
+      "round": 1,
+      "severity": "P1",
+      "started_at": "2026-06-14 23:43:33",
+      "status": "done",
+      "task_ids": [
+        "T-010"
+      ],
+      "title": "T-010 structure validation evidence is not reproducible after completion",
+      "unit_ids": [
+        "U-008"
+      ]
+    },
+    {
+      "completed_at": "2026-06-14 23:51:12",
+      "created_at": "2026-06-14 23:42:50",
+      "evidence": "Updated docs/specs/progress.md Last Known Commit and T-010 completion log, docs/specs/tasks.md T-010 completion log, and change.md wording so T-010 references pushed commit 36bb902 and no longer says it is preparing to complete after completion.",
+      "fix_id": "F-002",
+      "issue_ids": [
+        "I-002"
+      ],
+      "round": 1,
+      "severity": "P3",
+      "started_at": "2026-06-14 23:43:33",
+      "status": "done",
+      "task_ids": [
+        "T-010"
+      ],
+      "title": "T-010 completion metadata references the previous commit and pre-complete wording",
+      "unit_ids": [
+        "U-008"
+      ]
+    },
+    {
+      "completed_at": "2026-06-14 23:51:12",
+      "created_at": "2026-06-14 23:42:50",
+      "evidence": "ParallelPoseEngine now records and merges worker delegate payloads; apps/ui_backend.py reports running active=pending for parallel preview and final/frame delegate fallback payload from engine. Added test coverage for delegate=gpu fallback to cpu in parallel preview. pytest tests/test_parallel_pose_engine.py tests/test_ui_backend_sessions.py tests/test_s5_realtime_latest_frame.py tests/test_s5_hands_toggle.py -q => 36 passed.",
+      "fix_id": "F-003",
+      "issue_ids": [
+        "I-003"
+      ],
+      "round": 1,
+      "severity": "P2",
+      "started_at": "2026-06-14 23:43:33",
+      "status": "done",
+      "task_ids": [
+        "T-007"
+      ],
+      "title": "Parallel preview GPU fallback metadata is not visible through bridge status/result",
+      "unit_ids": [
+        "U-005"
+      ]
+    },
+    {
+      "completed_at": "2026-06-14 23:51:12",
+      "created_at": "2026-06-14 23:42:50",
+      "evidence": "docs/specs/acceptance_state.json is present and will be staged with this acceptance fix commit so final acceptance can resume from HEAD; acceptance-status reads it successfully after all 16 round-1 agents completed.",
+      "fix_id": "F-004",
+      "issue_ids": [
+        "I-004"
+      ],
+      "round": 1,
+      "severity": "P2",
+      "started_at": "2026-06-14 23:43:33",
+      "status": "done",
+      "task_ids": [
+        "T-010"
+      ],
+      "title": "Acceptance state is not committed and final acceptance cannot resume from HEAD",
+      "unit_ids": [
+        "U-008"
+      ]
+    },
+    {
+      "completed_at": "2026-06-14 23:51:12",
+      "created_at": "2026-06-14 23:42:50",
+      "evidence": "acceptance-plan-fixes regenerated docs/specs/acceptance-fixes.md from acceptance_state.json with real round/policy/fix queue, replacing the stale pre-acceptance placeholder.",
+      "fix_id": "F-005",
+      "issue_ids": [
+        "I-005"
+      ],
+      "round": 1,
+      "severity": "P3",
+      "started_at": "2026-06-14 23:43:33",
+      "status": "done",
+      "task_ids": [
+        "T-010"
+      ],
+      "title": "Acceptance fixes document still contains pre-acceptance placeholder text",
+      "unit_ids": [
+        "U-008"
+      ]
+    }
+  ],
+  "full_fix_rounds": 3,
+  "issues": [
+    {
+      "agent_id": "round-1-R-U-008",
+      "created_at": "2026-06-14 23:31:35",
+      "evidence": "On HEAD 36bb902, validate_spec.py docs\\\\specs --workflow design-first --color never exits 1 with 35 passed / 1 failed: tasks.md 无法计算执行 waves, while T-010 evidence records the same command as exit 0 / 36 checks passed.",
+      "fix_id": "F-001",
+      "issue_id": "I-001",
+      "round": 1,
+      "severity": "P1",
+      "status": "fixed",
+      "task_ids": [
+        "T-010"
+      ],
+      "title": "T-010 structure validation evidence is not reproducible after completion",
+      "unit_id": "U-008"
+    },
+    {
+      "agent_id": "round-1-R-U-008",
+      "created_at": "2026-06-14 23:31:35",
+      "evidence": "HEAD/origin/main is 36bb902, but progress.md Last Known Commit and T-010 completion log still reference 943f1c0; change.md says preparing to use spec_progress.py complete after T-010 is already complete.",
+      "fix_id": "F-002",
+      "issue_id": "I-002",
+      "round": 1,
+      "severity": "P3",
+      "status": "fixed",
+      "task_ids": [
+        "T-010"
+      ],
+      "title": "T-010 completion metadata references the previous commit and pre-complete wording",
+      "unit_id": "U-008"
+    },
+    {
+      "agent_id": "round-1-R-U-005",
+      "created_at": "2026-06-14 23:32:23",
+      "evidence": "When camera preview uses ParallelPoseEngine with delegate=gpu, worker pipelines can fall back to CPU internally, but apps/ui_backend.py has no pipe object and reports delegate active=requested in running status or omits delegate payload in final status/result; parallel stats do not include requested/active/fallback metadata.",
+      "fix_id": "F-003",
+      "issue_id": "I-003",
+      "round": 1,
+      "severity": "P2",
+      "status": "fixed",
+      "task_ids": [
+        "T-007"
+      ],
+      "title": "Parallel preview GPU fallback metadata is not visible through bridge status/result",
+      "unit_id": "U-005"
+    },
+    {
+      "agent_id": "round-1-A-U-008",
+      "created_at": "2026-06-14 23:42:23",
+      "evidence": "docs/specs/acceptance_state.json is untracked while acceptance-status depends on it and reports agents-running round 1 with open issues; HEAD 36bb902 does not contain the current acceptance state.",
+      "fix_id": "F-004",
+      "issue_id": "I-004",
+      "round": 1,
+      "severity": "P2",
+      "status": "fixed",
+      "task_ids": [
+        "T-010"
+      ],
+      "title": "Acceptance state is not committed and final acceptance cannot resume from HEAD",
+      "unit_id": "U-008"
+    },
+    {
+      "agent_id": "round-1-A-U-008",
+      "created_at": "2026-06-14 23:42:23",
+      "evidence": "docs/specs/acceptance-fixes.md still says final acceptance has not started and tasks remain unfinished, while acceptance-status reports round 1 running with open issues.",
+      "fix_id": "F-005",
+      "issue_id": "I-005",
+      "round": 1,
+      "severity": "P3",
+      "status": "fixed",
+      "task_ids": [
+        "T-010"
+      ],
+      "title": "Acceptance fixes document still contains pre-acceptance placeholder text",
+      "unit_id": "U-008"
+    }
+  ],
+  "max_rounds": 6,
+  "notes": [],
+  "original_task_digest": "0627a4c2b3c8",
+  "original_task_ids": [
+    "T-001",
+    "T-002",
+    "T-003",
+    "T-004",
+    "T-005",
+    "T-006",
+    "T-007",
+    "T-008",
+    "T-009",
+    "T-010"
+  ],
+  "policy": "rounds 1-3 fix all actionable issues; round 4+ auto-fix P0-P2 only",
+  "review_units": [
+    {
+      "adversarial_status": "pass",
+      "last_result": "PASS",
+      "phase": "阶段 1：基线与保护栏",
+      "review_status": "pass",
+      "round_started": null,
+      "status": "pass",
+      "task_ids": [
+        "T-001"
+      ],
+      "unit_id": "U-001"
+    },
+    {
+      "adversarial_status": "pass",
+      "last_result": "PASS",
+      "phase": "阶段 2：低数值风险的预览、编排与打包优化",
+      "review_status": "pass",
+      "round_started": null,
+      "status": "pass",
+      "task_ids": [
+        "T-002",
+        "T-003",
+        "T-004"
+      ],
+      "unit_id": "U-002"
+    },
+    {
+      "adversarial_status": "pass",
+      "last_result": "PASS",
+      "phase": "阶段 2：低数值风险的预览、编排与打包优化",
+      "review_status": "pass",
+      "round_started": null,
+      "status": "pass",
+      "task_ids": [
+        "T-005"
+      ],
+      "unit_id": "U-003"
+    },
+    {
+      "adversarial_status": "pass",
+      "last_result": "PASS",
+      "phase": "阶段 3：数值等价离线优化",
+      "review_status": "pass",
+      "round_started": null,
+      "status": "pass",
+      "task_ids": [
+        "T-006"
+      ],
+      "unit_id": "U-004"
+    },
+    {
+      "adversarial_status": "pass",
+      "last_result": "ACTIONABLE_ISSUES",
+      "phase": "阶段 4：显式 GPU 与评分语义风险项",
+      "review_status": "issues",
+      "round_started": null,
+      "status": "issues",
+      "task_ids": [
+        "T-007"
+      ],
+      "unit_id": "U-005"
+    },
+    {
+      "adversarial_status": "pass",
+      "last_result": "PASS",
+      "phase": "阶段 4：显式 GPU 与评分语义风险项",
+      "review_status": "pass",
+      "round_started": null,
+      "status": "pass",
+      "task_ids": [
+        "T-008"
+      ],
+      "unit_id": "U-006"
+    },
+    {
+      "adversarial_status": "pass",
+      "last_result": "PASS",
+      "phase": "阶段 5：传输、前端绘制与最终验收",
+      "review_status": "pass",
+      "round_started": null,
+      "status": "pass",
+      "task_ids": [
+        "T-009"
+      ],
+      "unit_id": "U-007"
+    },
+    {
+      "adversarial_status": "issues",
+      "last_result": "ACTIONABLE_ISSUES",
+      "phase": "阶段 5：传输、前端绘制与最终验收",
+      "review_status": "issues",
+      "round_started": null,
+      "status": "issues",
+      "task_ids": [
+        "T-010"
+      ],
+      "unit_id": "U-008"
+    }
+  ],
+  "round": 1,
+  "schema_version": 1,
+  "status": "fixes-complete",
+  "task_count": 10,
+  "updated_at": "2026-06-14 23:51:12",
+  "workflow": "design-first"
+}

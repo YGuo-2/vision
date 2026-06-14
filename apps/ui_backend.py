@@ -1479,6 +1479,11 @@ class PreviewSessionService:
             use_parallel_preview = _use_parallel_camera_preview(options)
             if not use_parallel_preview:
                 pipe, pipe_cached = self._acquire_pipeline(options)
+            delegate_payload = _pipeline_delegate_payload(pipe) or {
+                "requested": options.delegate,
+                "active": "pending" if use_parallel_preview else options.delegate,
+                "fallback": False,
+            }
             started_at = self._monotonic()
             ctx.progress(
                 "session.status",
@@ -1493,10 +1498,7 @@ class PreviewSessionService:
                     "backendRoute": options.backend_route,
                     "workers": options.workers,
                     "parallelPreview": use_parallel_preview,
-                    "delegate": _pipeline_delegate_payload(pipe) or {
-                        "requested": options.delegate,
-                        "active": options.delegate,
-                    },
+                    "delegate": delegate_payload,
                 },
             )
 
@@ -1864,6 +1866,8 @@ class PreviewSessionService:
                         "workersUsed": options.workers,
                         "inferenceFrameIndex": result.index,
                     }
+                    if result.delegate:
+                        extra_payload["delegate"] = result.delegate
                     if item is not None:
                         extra_payload.update(
                             {
@@ -1894,10 +1898,11 @@ class PreviewSessionService:
             if capture_errors and not ctx.stopped():
                 raise RuntimeError(f"摄像头采集失败：{capture_errors[0]}")
             stats = engine.stats
+            delegate_payload = engine.delegate_payload
             with meta_lock:
                 captured = capture_stats["captured"]
                 pending_meta = len(meta_by_idx)
-            return frame_count, {
+            realtime_stats: JsonDict = {
                 "parallelPreview": True,
                 "workersUsed": options.workers,
                 "capturedFrames": captured,
@@ -1907,6 +1912,9 @@ class PreviewSessionService:
                 "emittedInferenceFrames": stats["emitted"],
                 "pendingInferenceFrames": pending_meta,
             }
+            if delegate_payload:
+                realtime_stats["delegate"] = delegate_payload
+            return frame_count, realtime_stats
         finally:
             capture_stop.set()
             engine.signal_input_done()
