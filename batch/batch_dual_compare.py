@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, is_dataclass
 from datetime import datetime
 from pathlib import Path
@@ -78,6 +79,7 @@ def main() -> None:
     ap.add_argument("--rules", action="store_true", help="Enable rule-based scoring")
     ap.add_argument("--action", default="both", choices=["stance", "punch", "both"], help="Rule action scope")
     ap.add_argument("--error-analysis", action="store_true", help="Export error analysis CSVs (rules + joints)")
+    ap.add_argument("--workers", type=int, default=1, help="Number of videos to process concurrently (default: 1)")
     add_backend_layout_args(ap)
     args = ap.parse_args()
     backend, feature_layout = normalize_backend_layout(args.backend, args.feature_layout)
@@ -134,80 +136,99 @@ def main() -> None:
     error_rules_rows: list[dict[str, Any]] = []
     error_joints_rows: list[dict[str, Any]] = []
     jsonl_path = out_dir / "compare_results.jsonl"
+    video_workers = max(1, int(args.workers))
+
+    def _process_pose33_video(idx: int, v: Path) -> tuple[int, Any, dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+        res = ac.compare_video_to_dual_templates(
+            front_tpl,
+            side_tpl,
+            v,
+            workers=1,
+            enable_rules=bool(args.rules),
+            action_scope=str(args.action),
+            enable_error_analysis=enable_error_analysis,
+        )
+        per_video_rule_rows: list[dict[str, Any]] = []
+        per_video_joint_rows: list[dict[str, Any]] = []
+        if enable_error_analysis and bool(args.rules):
+            for view, violations in (
+                ("front", res.front_rule_violations),
+                ("side", res.side_rule_violations),
+            ):
+                if not violations:
+                    continue
+                for rv in violations:
+                    per_video_rule_rows.append(
+                        {
+                            "video": str(v.name),
+                            "view": str(view),
+                            "rule_id": str(rv.rule_id),
+                            "rule_name": str(rv.name),
+                            "violation_ratio": float(rv.violation_ratio),
+                            "penalty": int(rv.penalty),
+                            "valid_frames": int(rv.valid_frames),
+                            "total_frames": int(rv.total_frames),
+                            # YOLO 迁移 S4 / Issue #11：结构化三态写入报告，
+                            # 未评估原因清晰，不把不可评估当合格/不合格。
+                            "state": str(getattr(rv, "state", "") or ""),
+                            "skip_reason": str(getattr(rv, "skip_reason", "") or ""),
+                            "missing_landmarks": ",".join(getattr(rv, "missing_landmarks", ()) or ()),
+                        }
+                    )
+        if enable_error_analysis:
+            for view, joints in (
+                ("front", res.front_joint_errors),
+                ("side", res.side_joint_errors),
+            ):
+                if not joints:
+                    continue
+                for je in joints:
+                    per_video_joint_rows.append(
+                        {
+                            "video": str(v.name),
+                            "view": str(view),
+                            "joint": str(je.joint),
+                            "mean_dist": "" if je.mean_dist is None else float(je.mean_dist),
+                            "p90_dist": "" if je.p90_dist is None else float(je.p90_dist),
+                            "max_dist": "" if je.max_dist is None else float(je.max_dist),
+                            "valid_frames": int(je.valid_frames),
+                        }
+                    )
+        row = {
+            "video": str(v),
+            "front_score": float(res.front_score),
+            "side_score": float(res.side_score),
+            "combined_percent": int(res.combined_percent),
+            "front_rule_score": "" if res.front_rule_score is None else int(res.front_rule_score),
+            "side_rule_score": "" if res.side_rule_score is None else int(res.side_rule_score),
+            "front_rule_deduction": "" if res.front_rule_deduction is None else int(res.front_rule_deduction),
+            "side_rule_deduction": "" if res.side_rule_deduction is None else int(res.side_rule_deduction),
+            "front_segment": "" if res.front_segment is None else f"{res.front_segment[0]}..{res.front_segment[1]}",
+            "side_segment": "" if res.side_segment is None else f"{res.side_segment[0]}..{res.side_segment[1]}",
+            "front_matches": int(len(res.front_matches)),
+            "side_matches": int(len(res.side_matches)),
+            "pose_variant": str(res.pose_variant),
+            "fps": float(res.fps),
+        }
+        return idx, res, row, per_video_rule_rows, per_video_joint_rows
+
+    compare_results: list[tuple[int, Any, dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]] = []
+    if video_workers <= 1:
+        for i, v in enumerate(student_videos):
+            compare_results.append(_process_pose33_video(i, v))
+    else:
+        with ThreadPoolExecutor(max_workers=video_workers) as ex:
+            futures = [ex.submit(_process_pose33_video, i, v) for i, v in enumerate(student_videos)]
+            for fut in as_completed(futures):
+                compare_results.append(fut.result())
+    compare_results.sort(key=lambda item: item[0])
+
     with jsonl_path.open("w", encoding="utf-8") as jf:
-        for v in student_videos:
-            res = ac.compare_video_to_dual_templates(
-                front_tpl,
-                side_tpl,
-                v,
-                workers=1,
-                enable_rules=bool(args.rules),
-                action_scope=str(args.action),
-                enable_error_analysis=enable_error_analysis,
-            )
+        for _idx, res, row, per_video_rule_rows, per_video_joint_rows in compare_results:
             jf.write(json.dumps(_jsonable(res), ensure_ascii=False) + "\n")
-            if enable_error_analysis and bool(args.rules):
-                for view, violations in (
-                    ("front", res.front_rule_violations),
-                    ("side", res.side_rule_violations),
-                ):
-                    if not violations:
-                        continue
-                    for rv in violations:
-                        error_rules_rows.append(
-                            {
-                                "video": str(v.name),
-                                "view": str(view),
-                                "rule_id": str(rv.rule_id),
-                                "rule_name": str(rv.name),
-                                "violation_ratio": float(rv.violation_ratio),
-                                "penalty": int(rv.penalty),
-                                "valid_frames": int(rv.valid_frames),
-                                "total_frames": int(rv.total_frames),
-                                # YOLO 迁移 S4 / Issue #11：结构化三态写入报告，
-                                # 未评估原因清晰，不把不可评估当合格/不合格。
-                                "state": str(getattr(rv, "state", "") or ""),
-                                "skip_reason": str(getattr(rv, "skip_reason", "") or ""),
-                                "missing_landmarks": ",".join(getattr(rv, "missing_landmarks", ()) or ()),
-                            }
-                        )
-            if enable_error_analysis:
-                for view, joints in (
-                    ("front", res.front_joint_errors),
-                    ("side", res.side_joint_errors),
-                ):
-                    if not joints:
-                        continue
-                    for je in joints:
-                        error_joints_rows.append(
-                            {
-                                "video": str(v.name),
-                                "view": str(view),
-                                "joint": str(je.joint),
-                                "mean_dist": "" if je.mean_dist is None else float(je.mean_dist),
-                                "p90_dist": "" if je.p90_dist is None else float(je.p90_dist),
-                                "max_dist": "" if je.max_dist is None else float(je.max_dist),
-                                "valid_frames": int(je.valid_frames),
-                            }
-                        )
-            rows.append(
-                {
-                    "video": str(v),
-                    "front_score": float(res.front_score),
-                    "side_score": float(res.side_score),
-                    "combined_percent": int(res.combined_percent),
-                    "front_rule_score": "" if res.front_rule_score is None else int(res.front_rule_score),
-                    "side_rule_score": "" if res.side_rule_score is None else int(res.side_rule_score),
-                    "front_rule_deduction": "" if res.front_rule_deduction is None else int(res.front_rule_deduction),
-                    "side_rule_deduction": "" if res.side_rule_deduction is None else int(res.side_rule_deduction),
-                    "front_segment": "" if res.front_segment is None else f"{res.front_segment[0]}..{res.front_segment[1]}",
-                    "side_segment": "" if res.side_segment is None else f"{res.side_segment[0]}..{res.side_segment[1]}",
-                    "front_matches": int(len(res.front_matches)),
-                    "side_matches": int(len(res.side_matches)),
-                    "pose_variant": str(res.pose_variant),
-                    "fps": float(res.fps),
-                }
-            )
+            rows.append(row)
+            error_rules_rows.extend(per_video_rule_rows)
+            error_joints_rows.extend(per_video_joint_rows)
 
     # Export standard raw (front/side) if requested.
     if args.export_raw:
@@ -368,38 +389,53 @@ def _run_body_core_batch(*, args, backend: str, front_video: Path, side_video: P
 
     rows: list[dict[str, Any]] = []
     jsonl_path = out_dir / "compare_results.jsonl"
+    video_workers = max(1, int(getattr(args, "workers", 1)))
+
+    def _process_body_core_video(idx: int, v: Path) -> tuple[int, dict[str, Any], dict[str, Any]]:
+        front_res = match_body_core_template(
+            front_tpl,
+            v,
+            backend=backend,
+            pose_variant=args.pose,
+            reject_multi_person=False,
+            yolo_model=yolo_model,
+        )
+        side_res = match_body_core_template(
+            side_tpl,
+            v,
+            backend=backend,
+            pose_variant=args.pose,
+            reject_multi_person=False,
+            yolo_model=yolo_model,
+        )
+        row = _body_core_row(v, front_res, side_res, meta=batch_meta)
+        payload = {
+            "video_path": str(v),
+            "backend": backend,
+            "feature_layout": FEATURE_LAYOUT_BODY_CORE,
+            "meta": {**batch_meta, "review_required": bool(row["review_required"])},
+            "front_debug_match": _body_core_result_dict(front_res, meta=batch_meta),
+            "side_debug_match": _body_core_result_dict(side_res, meta=batch_meta),
+        }
+        return idx, row, payload
+
+    body_core_results: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
+    if video_workers <= 1:
+        for i, v in enumerate(student_videos):
+            body_core_results.append(_process_body_core_video(i, v))
+    else:
+        with ThreadPoolExecutor(max_workers=video_workers) as ex:
+            futures = [ex.submit(_process_body_core_video, i, v) for i, v in enumerate(student_videos)]
+            for fut in as_completed(futures):
+                body_core_results.append(fut.result())
+    body_core_results.sort(key=lambda item: item[0])
+
     with jsonl_path.open("w", encoding="utf-8") as jf:
-        for v in student_videos:
-            front_res = match_body_core_template(
-                front_tpl,
-                v,
-                backend=backend,
-                pose_variant=args.pose,
-                reject_multi_person=False,
-                yolo_model=yolo_model,
-            )
-            side_res = match_body_core_template(
-                side_tpl,
-                v,
-                backend=backend,
-                pose_variant=args.pose,
-                reject_multi_person=False,
-                yolo_model=yolo_model,
-            )
-            row = _body_core_row(v, front_res, side_res, meta=batch_meta)
+        for _idx, row, payload in body_core_results:
             rows.append(row)
             jf.write(
                 json.dumps(
-                    _jsonable(
-                        {
-                            "video_path": str(v),
-                            "backend": backend,
-                            "feature_layout": FEATURE_LAYOUT_BODY_CORE,
-                            "meta": {**batch_meta, "review_required": bool(row["review_required"])},
-                            "front_debug_match": _body_core_result_dict(front_res, meta=batch_meta),
-                            "side_debug_match": _body_core_result_dict(side_res, meta=batch_meta),
-                        }
-                    ),
+                    _jsonable(payload),
                     ensure_ascii=False,
                 )
                 + "\n"

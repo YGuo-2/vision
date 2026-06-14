@@ -169,8 +169,15 @@ def _ensure_file(url: str, path: Path) -> None:
     urllib.request.urlretrieve(url, path)  # nosec - official model asset
 
 
-def _base_options(model_path: Path, *, delegate: str) -> mp.tasks.BaseOptions:
+def _normalize_delegate(delegate: str) -> str:
     delegate_norm = (delegate or "cpu").strip().lower()
+    if delegate_norm in {"cpu", "gpu"}:
+        return delegate_norm
+    raise ValueError(f"Unsupported MediaPipe delegate: {delegate!r} (use 'cpu' or 'gpu')")
+
+
+def _base_options(model_path: Path, *, delegate: str) -> mp.tasks.BaseOptions:
+    delegate_norm = _normalize_delegate(delegate)
     if delegate_norm == "cpu":
         return mp.tasks.BaseOptions(model_asset_path=str(model_path))
     if delegate_norm == "gpu":
@@ -179,7 +186,7 @@ def _base_options(model_path: Path, *, delegate: str) -> mp.tasks.BaseOptions:
         if gpu_delegate is None:
             raise RuntimeError("MediaPipe BaseOptions.Delegate.GPU is not available in this mediapipe build")
         return mp.tasks.BaseOptions(model_asset_path=str(model_path), delegate=gpu_delegate)
-    raise ValueError(f"Unsupported MediaPipe delegate: {delegate!r} (use 'cpu' or 'gpu')")
+    raise AssertionError("unreachable delegate branch")
 
 
 @dataclass(frozen=True)
@@ -191,6 +198,7 @@ class PipelineConfig:
     draw_pose_face: bool = False  # Disable by default to avoid visual confusion when hands are near the face.
     enable_hands: bool = True  # Set False for pose-only extraction (faster), e.g. template matching.
     delegate: str = "cpu"  # Explicit opt-in only: "cpu" keeps the legacy BaseOptions path, "gpu" probes GPU delegate.
+    delegate_fallback_to_cpu: bool = True
     min_pose_detection_confidence: float = 0.5
     min_pose_presence_confidence: float = 0.5
     min_pose_tracking_confidence: float = 0.5
@@ -203,6 +211,9 @@ class MediaPipePipeline:
     def __init__(self, *, models_dir: Path, cfg: PipelineConfig = PipelineConfig()) -> None:
         self.cfg = cfg
         self.models_dir = models_dir
+        self.requested_delegate = _normalize_delegate(cfg.delegate)
+        self.active_delegate = self.requested_delegate
+        self.delegate_fallback_reason: str | None = None
 
         pose_path = self.models_dir / f"pose_landmarker_{cfg.pose_variant}.task"
         _ensure_file(_pose_model_url(cfg.pose_variant), pose_path)
@@ -224,9 +235,47 @@ class MediaPipePipeline:
         self.pose_landmarker = None
         self.hand_landmarker = None
         try:
+            self._create_landmarkers(
+                pose_path=pose_path,
+                hand_path=hand_path,
+                mp_mode=mp_mode,
+                delegate=self.requested_delegate,
+            )
+        except Exception as exc:
+            if self.requested_delegate != "gpu" or not bool(cfg.delegate_fallback_to_cpu):
+                raise
+            self.delegate_fallback_reason = str(exc)
+            self.active_delegate = "cpu"
+            try:
+                self._create_landmarkers(
+                    pose_path=pose_path,
+                    hand_path=hand_path,
+                    mp_mode=mp_mode,
+                    delegate="cpu",
+                )
+            except Exception as cpu_exc:
+                raise RuntimeError(
+                    "MediaPipe GPU delegate failed and CPU fallback also failed"
+                ) from cpu_exc
+
+        self._t0 = time.monotonic()
+        self._frame_index = 0
+
+    def _create_landmarkers(
+        self,
+        *,
+        pose_path: Path,
+        hand_path: Path | None,
+        mp_mode: object,
+        delegate: str,
+    ) -> None:
+        cfg = self.cfg
+        self.pose_landmarker = None
+        self.hand_landmarker = None
+        try:
             self.pose_landmarker = mp.tasks.vision.PoseLandmarker.create_from_options(
                 mp.tasks.vision.PoseLandmarkerOptions(
-                    base_options=_base_options(pose_path, delegate=cfg.delegate),
+                    base_options=_base_options(pose_path, delegate=delegate),
                     running_mode=mp_mode,
                     num_poses=cfg.num_poses,
                     min_pose_detection_confidence=cfg.min_pose_detection_confidence,
@@ -237,7 +286,7 @@ class MediaPipePipeline:
             if cfg.enable_hands and hand_path is not None:
                 self.hand_landmarker = mp.tasks.vision.HandLandmarker.create_from_options(
                     mp.tasks.vision.HandLandmarkerOptions(
-                        base_options=_base_options(hand_path, delegate=cfg.delegate),
+                        base_options=_base_options(hand_path, delegate=delegate),
                         running_mode=mp_mode,
                         num_hands=cfg.num_hands,
                         min_hand_detection_confidence=cfg.min_hand_detection_confidence,
@@ -248,9 +297,6 @@ class MediaPipePipeline:
         except Exception:
             self.close()
             raise
-
-        self._t0 = time.monotonic()
-        self._frame_index = 0
 
     def next_timestamp_ms(self, *, is_file: bool, fps_for_ts: float) -> int:
         if is_file:

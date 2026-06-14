@@ -291,11 +291,9 @@ def normalize_pose_xy_v1(pose_landmarks) -> np.ndarray | None:
     L_SHOULDER, R_SHOULDER = 11, 12
     L_HIP, R_HIP = 23, 24
 
-    def xy(i: int) -> np.ndarray:
-        return np.array([lm[i].x, lm[i].y], dtype=np.float32)
-
-    ls, rs = xy(L_SHOULDER), xy(R_SHOULDER)
-    lh, rh = xy(L_HIP), xy(R_HIP)
+    pts = _landmark_xy_array(lm, range(33))
+    ls, rs = pts[L_SHOULDER], pts[R_SHOULDER]
+    lh, rh = pts[L_HIP], pts[R_HIP]
 
     center = 0.5 * (lh + rh)
     if not np.isfinite(center).all():
@@ -312,14 +310,7 @@ def normalize_pose_xy_v1(pose_landmarks) -> np.ndarray | None:
     ca, sa = float(np.cos(-ang)), float(np.sin(-ang))
     R = np.array([[ca, -sa], [sa, ca]], dtype=np.float32)
 
-    feats: list[np.ndarray] = []
-    for i in range(11, 33):
-        p = xy(i)
-        p = (p - center) / scale
-        p = R @ p
-        feats.append(p)
-
-    out = np.stack(feats, axis=0)
+    out = _transform_xy_points(pts[11:33], center=center, scale=scale, rot=R, clip=None)
     if not np.isfinite(out).all():
         return None
     return out
@@ -344,11 +335,9 @@ def normalize_pose_xy(pose_landmarks) -> np.ndarray | None:
     L_SHOULDER, R_SHOULDER = 11, 12
     L_HIP, R_HIP = 23, 24
 
-    def xy(i: int) -> np.ndarray:
-        return np.array([lm[i].x, lm[i].y], dtype=np.float32)
-
-    ls, rs = xy(L_SHOULDER), xy(R_SHOULDER)
-    lh, rh = xy(L_HIP), xy(R_HIP)
+    pts = _landmark_xy_array(lm, range(33))
+    ls, rs = pts[L_SHOULDER], pts[R_SHOULDER]
+    lh, rh = pts[L_HIP], pts[R_HIP]
 
     center = 0.5 * (lh + rh)
     if not np.isfinite(center).all():
@@ -369,16 +358,7 @@ def normalize_pose_xy(pose_landmarks) -> np.ndarray | None:
     ca, sa = float(np.cos(-ang)), float(np.sin(-ang))
     R = np.array([[ca, -sa], [sa, ca]], dtype=np.float32)
 
-    feats: list[np.ndarray] = []
-    for i in range(11, 33):
-        p = xy(i)
-        p = (p - center) / scale
-        p = R @ p
-        # Clip extreme outliers; if we get too many, treat as invalid below.
-        p = np.clip(p, -5.0, 5.0)
-        feats.append(p)
-
-    out = np.stack(feats, axis=0)
+    out = _transform_xy_points(pts[11:33], center=center, scale=scale, rot=R, clip=5.0)
     if (not np.isfinite(out).all()) or float(np.max(np.abs(out))) > 5.0:
         return None
     return out
@@ -404,11 +384,9 @@ def normalize_pose_xy_v3(pose_landmarks) -> np.ndarray | None:
     L_SHOULDER, R_SHOULDER = 11, 12
     L_HIP, R_HIP = 23, 24
 
-    def xy(i: int) -> np.ndarray:
-        return np.array([lm[i].x, lm[i].y], dtype=np.float32)
-
-    ls, rs = xy(L_SHOULDER), xy(R_SHOULDER)
-    lh, rh = xy(L_HIP), xy(R_HIP)
+    pts = _landmark_xy_array(lm, range(33))
+    ls, rs = pts[L_SHOULDER], pts[R_SHOULDER]
+    lh, rh = pts[L_HIP], pts[R_HIP]
 
     if (not np.isfinite(ls).all()) or (not np.isfinite(rs).all()) or (not np.isfinite(lh).all()) or (not np.isfinite(rh).all()):
         return None
@@ -449,15 +427,7 @@ def normalize_pose_xy_v3(pose_landmarks) -> np.ndarray | None:
         ca, sa = float(np.cos(rot)), float(np.sin(rot))
     R = np.array([[ca, -sa], [sa, ca]], dtype=np.float32)
 
-    feats: list[np.ndarray] = []
-    for i in range(11, 33):
-        p = xy(i)
-        p = (p - center) / float(scale)
-        p = R @ p
-        p = np.clip(p, -5.0, 5.0)
-        feats.append(p)
-
-    out = np.stack(feats, axis=0)
+    out = _transform_xy_points(pts[11:33], center=center, scale=float(scale), rot=R, clip=5.0)
     if (not np.isfinite(out).all()) or float(np.max(np.abs(out))) > 5.0:
         return None
     return out
@@ -497,6 +467,28 @@ def _blaze33_xy_getter(pose_landmarks):
         return np.array([float(lm[i].x), float(lm[i].y)], dtype=np.float32)
 
     return _get_obj
+
+
+def _landmark_xy_array(pose_landmarks, indices) -> np.ndarray:
+    """Return landmark ``(x, y)`` rows as float32 for vectorized normalizers."""
+    return np.asarray(
+        [[float(pose_landmarks[int(i)].x), float(pose_landmarks[int(i)].y)] for i in indices],
+        dtype=np.float32,
+    )
+
+
+def _transform_xy_points(
+    points: np.ndarray,
+    *,
+    center: np.ndarray,
+    scale: float,
+    rot: np.ndarray,
+    clip: float | None,
+) -> np.ndarray:
+    out = ((points.astype(np.float32, copy=False) - center) / float(scale)) @ rot.T
+    if clip is not None:
+        out = np.clip(out, -float(clip), float(clip))
+    return out.astype(np.float32, copy=False)
 
 
 def normalize_pose_body_core_v1(pose_landmarks) -> np.ndarray | None:
@@ -575,15 +567,8 @@ def normalize_pose_body_core_v1(pose_landmarks) -> np.ndarray | None:
         ca, sa = float(np.cos(rot)), float(np.sin(rot))
     R = np.array([[ca, -sa], [sa, ca]], dtype=np.float32)
 
-    feats: list[np.ndarray] = []
-    for src in BODY_CORE_V1.source_indices:
-        p = get_xy(int(src))
-        p = (p - center) / float(scale)
-        p = R @ p
-        p = np.clip(p, -5.0, 5.0)
-        feats.append(p)
-
-    out = np.stack(feats, axis=0)
+    pts = np.stack([get_xy(int(src)) for src in BODY_CORE_V1.source_indices], axis=0)
+    out = _transform_xy_points(pts, center=center, scale=float(scale), rot=R, clip=5.0)
     if (not np.isfinite(out).all()) or float(np.max(np.abs(out))) > 5.0:
         return None
     return out
@@ -650,11 +635,10 @@ def subsequence_dtw(query: np.ndarray, seq: np.ndarray) -> tuple[float, int, int
     prev = np.zeros((n + 1, m + 1), dtype=np.int8)  # 0 diag, 1 up, 2 left
     dp[0, :] = 0.0
 
+    local_cost = _dtw_local_cost(q, s)
     for i in range(1, n + 1):
-        qi = q[i - 1]
         for j in range(1, m + 1):
-            sj = s[j - 1]
-            cost = float(np.linalg.norm(qi - sj))
+            cost = float(local_cost[i - 1, j - 1])
             a = dp[i - 1, j - 1]
             b = dp[i - 1, j]
             c = dp[i, j - 1]
@@ -697,11 +681,10 @@ def subsequence_dtw_with_path(query: np.ndarray, seq: np.ndarray) -> tuple[float
     prev = np.zeros((n + 1, m + 1), dtype=np.int8)  # 0 diag, 1 up, 2 left
     dp[0, :] = 0.0
 
+    local_cost = _dtw_local_cost(q, s)
     for i in range(1, n + 1):
-        qi = q[i - 1]
         for j in range(1, m + 1):
-            sj = s[j - 1]
-            cost = float(np.linalg.norm(qi - sj))
+            cost = float(local_cost[i - 1, j - 1])
             a = dp[i - 1, j - 1]
             b = dp[i - 1, j]
             c = dp[i, j - 1]
@@ -734,3 +717,9 @@ def subsequence_dtw_with_path(query: np.ndarray, seq: np.ndarray) -> tuple[float
     start = max(1, int(j))
     path = list(reversed(path_rev))
     return best_cost, start - 1, end - 1, path
+
+
+def _dtw_local_cost(q: np.ndarray, s: np.ndarray) -> np.ndarray:
+    diff = q[:, None, :] - s[None, :, :]
+    sq = np.sum(diff * diff, axis=2, dtype=np.float32)
+    return np.sqrt(sq).astype(np.float32, copy=False)

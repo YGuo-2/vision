@@ -62,7 +62,7 @@ def test_vue_frontend_exposes_settings_model_download_flow():
 def test_vue_frontend_exposes_record_directory_picker_and_default_semantics():
     source = _frontend_source_text()
 
-    assert "选择目录" in source
+    assert "选择…" in source
     assert "selectRecordDir" in source or "pickRecordDir" in source
     assert "outputsDir" in source or "defaultRecordDir" in source
 
@@ -96,7 +96,6 @@ def test_frontend_smoke_exercises_behavior_not_only_static_markers():
         "sessionStatusFromJobEvent",
         "shouldApplyModelDownloadStartResponse",
         "shouldApplySessionStartResponse",
-        "shouldRenderPreviewFrameAt",
         "bridgeCommandFailureResponse",
         "sessionStartFailureState",
         "foreign analysis.status must be ignored",
@@ -110,9 +109,8 @@ def test_frontend_smoke_exercises_behavior_not_only_static_markers():
         "early model download stop must keep stopped status after late start response",
         "invoke failure must become an ok=false bridge envelope",
         "failed session.start must clear pending session id",
-        "first session.frame after a new session must render immediately",
-        "rapid session.frame events must be throttled",
-        "later session.frame events must be accepted",
+        "same-session newer latest-frame identity must be accepted",
+        "same-session older drawn frame identity must not roll back",
         "preassigned current analysis.status must be accepted before response",
         "failed model download must be shown as failed",
         "job.failed model download must be shown as failed",

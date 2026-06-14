@@ -88,6 +88,21 @@ class StepPipeline(FakePipeline):
         return super().annotate(frame, timestamp_ms=timestamp_ms)
 
 
+class BlockingParallelPipeline(FakePipeline):
+    def __init__(self, *, started: threading.Event, release: threading.Event, worker_id: int) -> None:
+        super().__init__(["V_SIGN", f"worker={worker_id}"])
+        self.started = started
+        self.release = release
+        self.worker_id = worker_id
+
+    def annotate(self, frame, *, timestamp_ms: int | None = None):
+        self.started.set()
+        assert self.release.wait(1.0)
+        annotated, actions = super().annotate(frame, timestamp_ms=timestamp_ms)
+        annotated["workerId"] = self.worker_id
+        return annotated, actions
+
+
 class FakeWriter:
     def __init__(self, *, fail_on_write: bool = False) -> None:
         self.fail_on_write = fail_on_write
@@ -158,37 +173,51 @@ class FakeRustFrameSink:
             except OSError:
                 break
             with conn:
-                header = b""
-                while not header.endswith(b"\n"):
-                    chunk = conn.recv(1)
-                    if not chunk:
+                while not self._closed.is_set():
+                    header = b""
+                    while not header.endswith(b"\n"):
+                        chunk = conn.recv(1)
+                        if not chunk:
+                            break
+                        header += chunk
+                    if not header:
                         break
-                    header += chunk
-                parts = header.decode("utf-8", errors="replace").strip().split()
-                if len(parts) >= 3 and parts[0] == "CLOSE":
-                    self.frames.clear()
-                    self.handles.clear()
-                    break
-                if len(parts) < 5 or parts[0] != "PUT":
-                    conn.sendall(b"ERR bad_request\n")
-                    continue
-                session_id, token, raw_frame_id, frame_handle = parts[1:5]
-                if session_id != self.session_id or token != self.token:
-                    conn.sendall(b"ERR unauthorized\n")
-                    continue
-                length = struct.unpack(">I", conn.recv(4))[0]
-                payload = b""
-                while len(payload) < length:
-                    chunk = conn.recv(length - len(payload))
-                    if not chunk:
+                    parts = header.decode("utf-8", errors="replace").strip().split()
+                    if len(parts) >= 3 and parts[0] == "CLOSE":
+                        self.frames.clear()
+                        self.handles.clear()
+                        self._closed.set()
                         break
-                    payload += chunk
-                if self.frames:
-                    self.dropped += 1
-                frame_id = int(raw_frame_id)
-                self.frames[frame_id] = payload
-                self.handles[frame_id] = frame_handle
-                conn.sendall(f"OK droppedFrames={self.dropped} servedFrames={self.served}\n".encode("utf-8"))
+                    if len(parts) < 5 or parts[0] != "PUT":
+                        conn.sendall(b"ERR bad_request\n")
+                        continue
+                    session_id, token, raw_frame_id, frame_handle = parts[1:5]
+                    if session_id != self.session_id or token != self.token:
+                        conn.sendall(b"ERR unauthorized\n")
+                        continue
+                    length_buf = b""
+                    while len(length_buf) < 4:
+                        chunk = conn.recv(4 - len(length_buf))
+                        if not chunk:
+                            break
+                        length_buf += chunk
+                    if len(length_buf) != 4:
+                        break
+                    length = struct.unpack(">I", length_buf)[0]
+                    payload = b""
+                    while len(payload) < length:
+                        chunk = conn.recv(length - len(payload))
+                        if not chunk:
+                            break
+                        payload += chunk
+                    if len(payload) != length:
+                        break
+                    if self.frames:
+                        self.dropped += 1
+                    frame_id = int(raw_frame_id)
+                    self.frames[frame_id] = payload
+                    self.handles[frame_id] = frame_handle
+                    conn.sendall(f"OK droppedFrames={self.dropped} servedFrames={self.served}\n".encode("utf-8"))
 
 
 def _install_preview_service(service: ui_backend.PreviewSessionService):
@@ -201,6 +230,90 @@ def _fetch_frame_payload(payload: dict[str, Any], sink: FakeRustFrameSink) -> by
     assert payload["frameToken"] == sink.token
     assert payload["frameHandle"] == sink.handles[payload["frameId"]]
     return sink.frames[payload["frameId"]]
+
+
+def _wait_frame_events(events: list[dict], count: int = 1, timeout: float = 1.0) -> list[dict]:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        frame_events = [event for event in events if event["event"] == "session.frame"]
+        if len(frame_events) >= count:
+            return frame_events
+        time.sleep(0.01)
+    return [event for event in events if event["event"] == "session.frame"]
+
+
+def test_latest_frame_channel_reuses_persistent_connection() -> None:
+    sink = FakeRustFrameSink(session_id="session-channel")
+    channel = ui_backend.LatestFrameChannel.from_payload(session_id="session-channel", payload=sink.payload())
+    assert channel is not None
+    try:
+        first = channel.publish(b"frame-1")
+        second = channel.publish(b"frame-2")
+
+        assert first["frameId"] == 1
+        assert second["frameId"] == 2
+        assert sink.frames[1] == b"frame-1"
+        assert sink.frames[2] == b"frame-2"
+        assert channel.snapshot()["publishedFrames"] == 2
+        assert channel.snapshot()["lastError"] is None
+    finally:
+        channel.close()
+        sink.close()
+
+
+def test_latest_frame_channel_reconnects_once_after_disconnect() -> None:
+    sink = FakeRustFrameSink(session_id="session-reconnect")
+    channel = ui_backend.LatestFrameChannel.from_payload(session_id="session-reconnect", payload=sink.payload())
+    assert channel is not None
+    try:
+        first = channel.publish(b"before-close")
+        assert first["frameId"] == 1
+        with channel._lock:  # noqa: SLF001 - unit-test forced transport failure path.
+            channel._drop_connection_locked()  # noqa: SLF001
+
+        second = channel.publish(b"after-close")
+
+        assert second["frameId"] == 2
+        assert sink.frames[2] == b"after-close"
+        assert channel.snapshot()["lastError"] is None
+    finally:
+        channel.close()
+        sink.close()
+
+
+def test_preview_publish_buffer_keeps_only_newest_and_counts_drops() -> None:
+    buffer = ui_backend._LatestPreviewPublishBuffer()  # noqa: SLF001
+    buffer.put(
+        ui_backend._PreviewPublishFrame(  # noqa: SLF001
+            annotated={"frame": 1},
+            actions=["V_SIGN"],
+            frame_count=1,
+            total=0,
+            width=320,
+            height=240,
+            started_at=0.0,
+        )
+    )
+    buffer.put(
+        ui_backend._PreviewPublishFrame(  # noqa: SLF001
+            annotated={"frame": 2},
+            actions=["SQUAT"],
+            frame_count=2,
+            total=0,
+            width=320,
+            height=240,
+            started_at=0.0,
+        )
+    )
+
+    latest = buffer.get_latest(timeout=0.01)
+    assert latest is not None
+    assert latest.frame_count == 2
+    buffer.mark_published()
+    snapshot = buffer.snapshot()
+    assert snapshot["submittedFrames"] == 2
+    assert snapshot["publishedPreviewFrames"] == 1
+    assert snapshot["droppedPreviewFrames"] == 1
 
 
 def test_camera_list_command_uses_camera_enumerator(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -253,7 +366,7 @@ def test_session_start_emits_frame_events_and_releases_capture() -> None:
                     "sourceKind": "camera",
                     "cameraIndex": 0,
                     "poseVariant": "heavy",
-                    "workers": 2,
+                    "workers": 1,
                     "enableHands": False,
                     "frameLimit": 2,
                     "frameChannel": sink.payload(),
@@ -265,7 +378,7 @@ def test_session_start_emits_frame_events_and_releases_capture() -> None:
         assert pipe.annotating[0].wait(1.0)
         pipe.release[0].set()
         assert pipe.annotating[1].wait(1.0)
-        frame_events = [event for event in events if event["event"] == "session.frame"]
+        frame_events = _wait_frame_events(events)
         assert frame_events
         assert _fetch_frame_payload(frame_events[0]["payload"], sink) == b"fake-frame-bytes"
         pipe.release[1].set()
@@ -276,6 +389,7 @@ def test_session_start_emits_frame_events_and_releases_capture() -> None:
         assert final.status == "succeeded"
         assert final.result["state"] == "completed"
         assert final.result["frames"] == 2
+        frame_events = _wait_frame_events(events, count=2)
         assert _fetch_frame_payload(frame_events[-1]["payload"], sink) == b"fake-frame-bytes"
         assert cap.released is True
         assert pipe.closed is False
@@ -291,14 +405,106 @@ def test_session_start_emits_frame_events_and_releases_capture() -> None:
         assert frame_events[0]["payload"]["payloadBytes"] == len(b"fake-frame-bytes")
         assert frame_events[0]["payload"]["frameStore"]["droppedFrames"] >= 0
         assert frame_events[0]["payload"]["frameStore"]["lastFrameAgeMs"] is not None
+        assert frame_events[0]["payload"].get("parallelPreview") in (None, False)
         running_status = next(
             event for event in events if event["event"] == "session.status" and event["payload"]["state"] == "running"
         )
+        assert running_status["payload"]["parallelPreview"] is False
         assert running_status["payload"]["frameChannel"]["frameToken"] == frame_events[0]["payload"]["frameToken"]
         assert any(event["event"] == "session.status" for event in events)
     finally:
         pipe.release[0].set()
         pipe.release[1].set()
+        sink.close()
+        ui_backend.DEFAULT_PREVIEW_SERVICE = previous
+
+
+def test_session_start_uses_parallel_pose_engine_when_workers_gt_one() -> None:
+    events: list[dict] = []
+    manager = ui_backend.BridgeJobManager(events.append)
+    cap = FakeCapture([{"frame": 1}, {"frame": 2}, {"frame": 3}])
+    started = [threading.Event(), threading.Event()]
+    releases = [threading.Event(), threading.Event()]
+    created: list[BlockingParallelPipeline] = []
+    created_lock = threading.Lock()
+
+    def pipeline_factory(options: ui_backend.PreviewSessionOptions):
+        pytest.fail("legacy sequential pipeline should not be used when workers > 1")
+
+    def parallel_factory(options: ui_backend.PreviewSessionOptions):
+        assert options.workers == 2
+
+        def _factory() -> BlockingParallelPipeline:
+            with created_lock:
+                worker_idx = len(created)
+                pipeline = BlockingParallelPipeline(
+                    started=started[worker_idx],
+                    release=releases[worker_idx],
+                    worker_id=worker_idx + 1,
+                )
+                created.append(pipeline)
+                return pipeline
+
+        return _factory
+
+    service = ui_backend.PreviewSessionService(
+        job_manager=manager,
+        capture_factory=lambda source: cap,
+        pipeline_factory=pipeline_factory,
+        parallel_pipeline_factory=parallel_factory,
+        frame_encoder=lambda frame: b"parallel-frame-bytes",
+    )
+    previous = _install_preview_service(service)
+    sink = FakeRustFrameSink(session_id="session-parallel")
+    try:
+        response = ui_backend.handle_command(
+            ui_backend.CommandRequest(
+                command="session.start",
+                request_id="req-parallel",
+                session_id="session-parallel",
+                payload={
+                    "sourceKind": "camera",
+                    "cameraIndex": 0,
+                    "poseVariant": "heavy",
+                    "workers": 2,
+                    "enableHands": False,
+                    "frameLimit": 2,
+                    "frameChannel": sink.payload(),
+                },
+            )
+        )
+        assert response["ok"] is True
+        assert started[0].wait(1.0)
+        assert started[1].wait(1.0)
+        releases[0].set()
+        releases[1].set()
+
+        final = manager.wait(response["jobId"], 2.0)
+
+        assert final is not None
+        assert final.status == "succeeded"
+        assert final.result["state"] == "completed"
+        assert final.result["frames"] == 2
+        assert final.result["parallelPreview"] is True
+        assert final.result["workersUsed"] == 2
+        assert final.result["capturedFrames"] >= 2
+        assert final.result["submittedFrames"] >= 2
+        assert final.result["emittedInferenceFrames"] == 2
+        assert final.result["pendingInferenceFrames"] >= 0
+        assert len(created) == 2
+        assert all(p.closed for p in created)
+        parallel_events = [event for event in events if event["event"] == "session.frame"]
+        assert parallel_events
+        assert parallel_events[0]["payload"]["parallelPreview"] is True
+        assert parallel_events[0]["payload"]["workersUsed"] == 2
+        assert parallel_events[0]["payload"]["inferenceFrameIndex"] == 0
+        assert parallel_events[0]["payload"]["sourceFrameIndex"] == 1
+        assert parallel_events[0]["payload"]["frameStore"]["publishedFrames"] >= 1
+        assert parallel_events[0]["payload"]["frameStore"]["droppedFrames"] >= 0
+        assert parallel_events[0]["payload"]["frameStore"]["lastFrameAgeMs"] is not None
+    finally:
+        releases[0].set()
+        releases[1].set()
         sink.close()
         ui_backend.DEFAULT_PREVIEW_SERVICE = previous
 
@@ -450,6 +656,70 @@ def test_session_start_rejects_missing_source() -> None:
     assert response["ok"] is False
     assert response["error"]["code"] == "bad_request"
     assert "source" in response["error"]["message"]
+
+
+def test_preview_session_defaults_to_lite_pose_only() -> None:
+    options = ui_backend.normalize_session_options({"source": "0"})
+
+    assert options.pose_variant == "lite"
+    assert options.enable_hands is False
+    assert options.delegate == "cpu"
+    assert options.backend_route["backend"] in {"mediapipe", "yolo"}
+    assert options.backend_route["scoreAuthorized"] is False
+
+
+def test_preview_session_accepts_explicit_gpu_delegate() -> None:
+    options = ui_backend.normalize_session_options({"source": "0", "delegate": "gpu"})
+
+    assert options.delegate == "gpu"
+
+
+def test_preview_session_rejects_unknown_delegate() -> None:
+    with pytest.raises(ValueError, match="delegate must be one of"):
+        ui_backend.normalize_session_options({"source": "0", "delegate": "metal"})
+
+
+def test_preview_slimming_constants_are_low_load() -> None:
+    assert ui_backend.PREVIEW_JPEG_QUALITY <= 60
+    assert ui_backend.PREVIEW_MAX_EDGE <= 720
+    assert ui_backend.PREVIEW_FRAME_EVENT_MIN_INTERVAL_S >= 1.0 / 20.0
+    assert ui_backend.PREVIEW_CAPTURE_IDLE_SLEEP_S >= 0.003
+
+
+def test_default_pipeline_factory_passes_explicit_delegate_to_mediapipe(monkeypatch, tmp_path) -> None:
+    from core import paths, vision_pipeline
+
+    captured = []
+
+    class FakePipeline:
+        def __init__(self, *, models_dir, cfg) -> None:
+            captured.append((models_dir, cfg))
+
+    monkeypatch.setattr(paths, "models_dir", lambda: tmp_path)
+    monkeypatch.setattr(vision_pipeline, "MediaPipePipeline", FakePipeline)
+
+    options = ui_backend.normalize_session_options({"source": "0", "delegate": "gpu"})
+
+    ui_backend._default_pipeline_factory(options)  # noqa: SLF001
+
+    assert captured
+    assert captured[0][0] == tmp_path
+    assert captured[0][1].delegate == "gpu"
+    assert captured[0][1].enable_hands is False
+
+
+def test_pipeline_delegate_payload_reports_cpu_fallback() -> None:
+    class FakePipelineWithFallback:
+        requested_delegate = "gpu"
+        active_delegate = "cpu"
+        delegate_fallback_reason = "gpu unavailable"
+
+    assert ui_backend._pipeline_delegate_payload(FakePipelineWithFallback()) == {  # noqa: SLF001
+        "requested": "gpu",
+        "active": "cpu",
+        "fallback": True,
+        "fallbackReason": "gpu unavailable",
+    }
 
 
 def test_record_toggle_and_stop_share_session_recording_controller() -> None:

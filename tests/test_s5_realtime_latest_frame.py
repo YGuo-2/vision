@@ -93,6 +93,7 @@ def test_cli_latest_frame_smoke_is_opt_in(monkeypatch, capsys):
             "show": False,
             "pose_variant": "full",
             "enable_hands": False,
+            "delegate": "cpu",
             "limit_frames": 5,
         }
     ]
@@ -102,19 +103,48 @@ def test_cli_latest_frame_smoke_is_opt_in(monkeypatch, capsys):
 
 
 def test_default_cli_still_uses_run_not_latest_frame(monkeypatch):
-    calls: list[str] = []
+    calls: list[dict[str, object]] = []
 
     monkeypatch.setattr(sys, "argv", ["main.py", "--source", "0", "--no-show"])
-    monkeypatch.setattr(app_main, "run", lambda *args, **kwargs: calls.append("run"))
+    monkeypatch.setattr(app_main, "run", lambda source, **kwargs: calls.append({"source": source, **kwargs}))
     monkeypatch.setattr(
         app_main,
         "run_realtime_latest_frame_smoke",
-        lambda *args, **kwargs: calls.append("latest"),
+        lambda *args, **kwargs: calls.append({"source": "latest"}),
     )
 
     app_main.main()
 
-    assert calls == ["run"]
+    assert calls == [
+        {
+            "source": "0",
+            "show": False,
+            "out_path": None,
+            "pose_variant": "full",
+            "enable_hands": True,
+            "delegate": "cpu",
+        }
+    ]
+
+
+def test_cli_delegate_gpu_is_explicit_opt_in(monkeypatch):
+    calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(sys, "argv", ["main.py", "--source", "0", "--no-show", "--delegate", "gpu"])
+    monkeypatch.setattr(app_main, "run", lambda source, **kwargs: calls.append({"source": source, **kwargs}))
+
+    app_main.main()
+
+    assert calls == [
+        {
+            "source": "0",
+            "show": False,
+            "out_path": None,
+            "pose_variant": "full",
+            "enable_hands": True,
+            "delegate": "gpu",
+        }
+    ]
 
 
 def test_latest_frame_smoke_runs_with_fake_capture_and_pipeline(monkeypatch):
@@ -160,6 +190,7 @@ def test_latest_frame_smoke_runs_with_fake_capture_and_pipeline(monkeypatch):
         show=False,
         pose_variant="heavy",
         enable_hands=False,
+        delegate="gpu",
         limit_frames=4,
     )
 
@@ -171,6 +202,7 @@ def test_latest_frame_smoke_runs_with_fake_capture_and_pipeline(monkeypatch):
     assert pipeline_cfgs[0].pose_variant == "heavy"
     assert pipeline_cfgs[0].enable_hands is False
     assert pipeline_cfgs[0].running_mode == "video"
+    assert pipeline_cfgs[0].delegate == "gpu"
 
 
 def test_latest_frame_smoke_reraises_worker_failures(monkeypatch):

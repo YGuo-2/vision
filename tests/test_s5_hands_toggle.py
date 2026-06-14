@@ -35,6 +35,7 @@ def test_cli_no_hands_defaults_to_hands_enabled(monkeypatch):
             "out_path": None,
             "pose_variant": "full",
             "enable_hands": True,
+            "delegate": "cpu",
         }
     ]
 

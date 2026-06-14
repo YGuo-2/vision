@@ -529,10 +529,10 @@ def _mediapipe_pose_only_partial(
     )
 
 
-def _mediapipe_body_core(reason: str) -> BackendRouteDecision:
+def _mediapipe_body_core(reason: str, *, model_profile: str = "pose_body_core") -> BackendRouteDecision:
     return BackendRouteDecision(
         backend=BACKEND_MEDIAPIPE,
-        model_profile="pose_body_core",
+        model_profile=model_profile,
         raw_layout=RAW_LAYOUT_POSE33,
         feature_layout=FEATURE_LAYOUT_BODY_CORE,
         capability=CAPABILITY_BODY_ONLY,

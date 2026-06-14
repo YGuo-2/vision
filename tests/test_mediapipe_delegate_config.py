@@ -55,6 +55,56 @@ def test_base_options_rejects_unknown_delegate():
 
 def test_pipeline_config_delegate_defaults_to_cpu():
     assert vision_pipeline.PipelineConfig().delegate == "cpu"
+    assert vision_pipeline.PipelineConfig().delegate_fallback_to_cpu is True
+
+
+def test_pipeline_falls_back_to_cpu_when_explicit_gpu_fails(tmp_path, monkeypatch):
+    calls = []
+
+    class FakeLandmarker:
+        def close(self) -> None:
+            pass
+
+    class FakePoseFactory:
+        @staticmethod
+        def create_from_options(options):
+            delegate = getattr(options.base_options, "delegate", None)
+            calls.append(delegate or "cpu")
+            if delegate == "GPU":
+                raise RuntimeError("gpu unavailable")
+            return FakeLandmarker()
+
+    monkeypatch.setattr(vision_pipeline, "_ensure_file", lambda url, path: None)
+
+    class FakeBaseOptions:
+        Delegate = SimpleNamespace(GPU="GPU")
+
+        def __init__(self, **kwargs) -> None:
+            self.model_asset_path = kwargs["model_asset_path"]
+            self.delegate = kwargs.get("delegate")
+
+    monkeypatch.setattr(vision_pipeline.mp.tasks, "BaseOptions", FakeBaseOptions)
+    monkeypatch.setattr(
+        vision_pipeline.mp.tasks,
+        "vision",
+        SimpleNamespace(
+            RunningMode=SimpleNamespace(VIDEO="VIDEO", IMAGE="IMAGE"),
+            PoseLandmarker=FakePoseFactory,
+            PoseLandmarkerOptions=lambda **kwargs: SimpleNamespace(**kwargs),
+            HandLandmarker=FakePoseFactory,
+            HandLandmarkerOptions=lambda **kwargs: SimpleNamespace(**kwargs),
+        ),
+    )
+
+    pipe = vision_pipeline.MediaPipePipeline(
+        models_dir=tmp_path,
+        cfg=vision_pipeline.PipelineConfig(enable_hands=False, delegate="gpu"),
+    )
+
+    assert calls == ["GPU", "cpu"]
+    assert pipe.requested_delegate == "gpu"
+    assert pipe.active_delegate == "cpu"
+    assert pipe.delegate_fallback_reason
 
 
 def test_pipeline_closes_pose_landmarker_when_hand_creation_fails(tmp_path, monkeypatch):

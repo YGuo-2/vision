@@ -6,6 +6,7 @@ from __future__ import annotations
 import csv
 import json
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -261,6 +262,146 @@ def test_dual_compare_body_core_row_marks_multi_person_review(tmp_path):
     assert row["multi_person_frames"] == 4
 
 
+def test_dual_compare_parallel_video_workers_keep_order_and_inner_workers_one(tmp_path, monkeypatch):
+    front = tmp_path / "front.mp4"
+    side = tmp_path / "side.mp4"
+    front.write_bytes(b"fake")
+    side.write_bytes(b"fake")
+    student_dir = tmp_path / "students"
+    student_dir.mkdir()
+    slow = student_dir / "a_slow.mp4"
+    fast = student_dir / "b_fast.mp4"
+    slow.write_bytes(b"fake")
+    fast.write_bytes(b"fake")
+    out_dir = tmp_path / "out"
+    calls: list[tuple[str, int]] = []
+
+    def fake_template(video_path, *, pose_variant: str, out_path: Path):
+        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(
+            out_path,
+            features=np.zeros((2, 22, 2), dtype=np.float32),
+            meta=np.array({"pose_variant": pose_variant, "feature_layout": "pose33_v3"}, dtype=object),
+        )
+        return Path(out_path)
+
+    def fake_compare(front_tpl, side_tpl, video_path, **kwargs):
+        video_path = Path(video_path)
+        calls.append((video_path.name, int(kwargs["workers"])))
+        if video_path.name.startswith("a_"):
+            time.sleep(0.05)
+        return batch_dual_compare.ac.DualCompareResult(
+            front_template_path=Path(front_tpl),
+            side_template_path=Path(side_tpl),
+            video_path=video_path,
+            pose_variant="full",
+            fps=30.0,
+            front_score=0.7,
+            side_score=0.8,
+            combined_score=0.75,
+            combined_percent=75 if video_path.name.startswith("a_") else 85,
+            front_matches=(batch_dual_compare.ac.RepetitionMatch(1, 2, 0.1, 0.9),),
+            side_matches=(batch_dual_compare.ac.RepetitionMatch(3, 4, 0.2, 0.8),),
+            front_segment=(1, 2),
+            side_segment=(3, 4),
+        )
+
+    monkeypatch.setattr(batch_dual_compare.ac, "create_template_from_video", fake_template)
+    monkeypatch.setattr(batch_dual_compare.ac, "compare_video_to_dual_templates", fake_compare)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "batch_dual_compare.py",
+            "--front",
+            str(front),
+            "--side",
+            str(side),
+            "--student_dir",
+            str(student_dir),
+            "--out_dir",
+            str(out_dir),
+            "--workers",
+            "2",
+        ],
+    )
+
+    batch_dual_compare.main()
+
+    rows = list(csv.DictReader((out_dir / "compare_results.csv").open(encoding="utf-8-sig")))
+    assert [Path(row["video"]).name for row in rows] == ["a_slow.mp4", "b_fast.mp4"]
+    payloads = [json.loads(line) for line in (out_dir / "compare_results.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [Path(payload["video_path"]).name for payload in payloads] == ["a_slow.mp4", "b_fast.mp4"]
+    assert sorted(calls) == [("a_slow.mp4", 1), ("b_fast.mp4", 1)]
+
+
+def test_dual_compare_body_core_parallel_keeps_order_and_yolo_metadata(tmp_path, monkeypatch):
+    from core import body_core_compare
+
+    student_dir = tmp_path / "students"
+    student_dir.mkdir()
+    slow = student_dir / "a_slow.mp4"
+    fast = student_dir / "b_fast.mp4"
+    slow.write_bytes(b"fake")
+    fast.write_bytes(b"fake")
+    out_dir = tmp_path / "out"
+
+    def fake_create_body_core_template(video_path, *, backend, pose_variant, out_path, yolo_model):
+        meta = yolo_batch_meta({"model_name": "fake-yolo.pt"})
+        meta.update({"backend": backend, "pose_variant": pose_variant})
+        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(
+            out_path,
+            features=np.zeros((2, 12, 2), dtype=np.float32),
+            meta=np.array(meta, dtype=object),
+        )
+        return Path(out_path)
+
+    def fake_match_body_core_template(template_path, video_path, **kwargs):
+        video_path = Path(video_path)
+        if video_path.name.startswith("a_"):
+            time.sleep(0.05)
+        return SimpleNamespace(
+            template_path=Path(template_path),
+            video_path=video_path,
+            backend="yolo",
+            feature_layout="body_core_v1",
+            start_frame=1,
+            end_frame=2,
+            cost=1.0,
+            avg_cost=0.5,
+            score=0.4,
+            calibration_status="unvalidated",
+            valid_frame_ratio=0.9,
+            review_required=False,
+            multi_person_detected=False,
+            max_persons=1,
+            multi_person_frames=0,
+            multi_person_gate_source="",
+        )
+
+    monkeypatch.setattr(body_core_compare, "create_body_core_template", fake_create_body_core_template)
+    monkeypatch.setattr(body_core_compare, "match_body_core_template", fake_match_body_core_template)
+
+    batch_dual_compare._run_body_core_batch(
+        args=SimpleNamespace(pose="full", rules=False, workers=2),
+        backend="yolo",
+        front_video=tmp_path / "front.mp4",
+        side_video=tmp_path / "side.mp4",
+        student_dir=student_dir,
+        out_dir=out_dir,
+    )
+
+    rows = list(csv.DictReader((out_dir / "compare_results.csv").open(encoding="utf-8-sig")))
+    assert [Path(row["video"]).name for row in rows] == ["a_slow.mp4", "b_fast.mp4"]
+    assert all(row["score_authorized"] == "False" for row in rows)
+
+    payloads = [json.loads(line) for line in (out_dir / "compare_results.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [Path(payload["video_path"]).name for payload in payloads] == ["a_slow.mp4", "b_fast.mp4"]
+    assert all(payload["front_debug_match"]["score_authorized"] is False for payload in payloads)
+    assert all(payload["front_debug_match"]["display_scope"] == "internal" for payload in payloads)
+
+
 def test_export_skeleton_body_core_npz_meta_contains_issue24_fields(tmp_path, monkeypatch):
     src = tmp_path / "src"
     src.mkdir()
@@ -392,6 +533,65 @@ def test_export_skeleton_skip_existing_body_core_keeps_manifest_meta(tmp_path, m
     assert rows[1]["video_name"] == "b_new.mp4"
     assert rows[1]["backend"] == "yolo"
     assert rows[1]["model_name"] == "new-yolo.pt"
+
+
+def test_export_skeleton_parallel_workers_keep_manifest_order(tmp_path, monkeypatch):
+    src = tmp_path / "src"
+    src.mkdir()
+    slow = src / "a_slow.mp4"
+    fast = src / "b_fast.mp4"
+    slow.write_bytes(b"fake")
+    fast.write_bytes(b"fake")
+    out_dir = tmp_path / "out"
+
+    def fake_iter(_root: Path, *, skip_keywords: tuple[str, ...]):
+        return [slow, fast]
+
+    def fake_extract(video_path: Path, *, backend: str, pose_variant: str):
+        if video_path.name.startswith("a_"):
+            time.sleep(0.05)
+        features = np.zeros((2, 12, 2), dtype=np.float32)
+        meta = yolo_batch_meta({"model_name": f"{video_path.stem}.pt"})
+        meta.update(
+            {
+                "video": str(video_path),
+                "name": video_path.stem,
+                "fps": 30.0,
+                "frame_count": 2,
+                "width": 1280,
+                "height": 720,
+                "landmark_layout": "body_core_v1_normalized_xy",
+                "skeleton_video": None,
+            }
+        )
+        return features, meta
+
+    monkeypatch.setattr(batch_export_skeleton, "_iter_videos", fake_iter)
+    monkeypatch.setattr(batch_export_skeleton, "_extract_body_core_features", fake_extract)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "batch_export_skeleton.py",
+            "--source_dir",
+            str(src),
+            "--out_dir",
+            str(out_dir),
+            "--backend",
+            "yolo",
+            "--feature-layout",
+            "body_core_v1",
+            "--workers",
+            "2",
+        ],
+    )
+
+    batch_export_skeleton.main()
+
+    rows = list(csv.DictReader((out_dir / "manifest.csv").open(encoding="utf-8-sig")))
+    assert [row["video_name"] for row in rows] == ["a_slow.mp4", "b_fast.mp4"]
+    assert [row["model_name"] for row in rows] == ["a_slow.pt", "b_fast.pt"]
+    assert all(row["score_authorized"] == "False" for row in rows)
 
 
 def test_tech_eval_yolo_body_core_skips_outward_scoring(tmp_path):

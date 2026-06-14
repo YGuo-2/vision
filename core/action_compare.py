@@ -1028,40 +1028,56 @@ def compare_video_to_dual_templates(
                     end_frame=int(seg_offset + int(seg_seq.shape[0]) - 1),
                 )
                 raw_mask = _valid_mask_from_raw(raw, raw_meta)
-                dists: list[list[float]] = [[] for _ in range(num_joints)]
-                for qi, sj in path:
-                    qi_i = int(qi)
-                    sj_i = int(sj)
-                    if qi_i < 0 or qi_i >= int(q_eff.shape[0]) or sj_i < 0 or sj_i >= int(seg_seq.shape[0]):
-                        continue
-                    visible = raw_mask[sj_i, src_idx]
-                    a = q_eff[qi_i].astype(np.float32)
-                    b = seg_seq[sj_i].astype(np.float32)
-                    for k in range(num_joints):
-                        if not bool(visible[k]):
-                            continue
-                        d = float(np.linalg.norm(a[k] - b[k]))
-                        if np.isfinite(d):
-                            dists[k].append(d)
-
+                path_arr = np.asarray(path, dtype=np.int64)
+                if path_arr.size:
+                    valid_path = (
+                        (path_arr[:, 0] >= 0)
+                        & (path_arr[:, 0] < int(q_eff.shape[0]))
+                        & (path_arr[:, 1] >= 0)
+                        & (path_arr[:, 1] < int(seg_seq.shape[0]))
+                    )
+                    path_arr = path_arr[valid_path]
                 names = joint_names if not mirrored else [_swap_lr(n) for n in joint_names]
                 joint_stats = []
-                for k in range(num_joints):
-                    arr = np.array(dists[k], dtype=np.float32)
-                    if arr.size == 0:
-                        joint_stats.append(
-                            JointErrorStat(joint=str(names[k]), mean_dist=None, p90_dist=None, max_dist=None, valid_frames=0)
-                        )
-                    else:
-                        joint_stats.append(
-                            JointErrorStat(
-                                joint=str(names[k]),
-                                mean_dist=float(np.mean(arr)),
-                                p90_dist=float(np.percentile(arr, 90)),
-                                max_dist=float(np.max(arr)),
-                                valid_frames=int(arr.size),
+                if path_arr.size:
+                    q_path = q_eff[path_arr[:, 0]].astype(np.float32, copy=False)
+                    s_path = seg_seq[path_arr[:, 1]].astype(np.float32, copy=False)
+                    distances = np.linalg.norm(q_path - s_path, axis=2).astype(np.float32, copy=False)
+                    visible = np.asarray(raw_mask[path_arr[:, 1]][:, src_idx], dtype=bool)
+                    finite = np.isfinite(distances)
+                    for k in range(num_joints):
+                        arr = distances[visible[:, k] & finite[:, k], k]
+                        if arr.size == 0:
+                            joint_stats.append(
+                                JointErrorStat(
+                                    joint=str(names[k]),
+                                    mean_dist=None,
+                                    p90_dist=None,
+                                    max_dist=None,
+                                    valid_frames=0,
+                                )
                             )
+                        else:
+                            joint_stats.append(
+                                JointErrorStat(
+                                    joint=str(names[k]),
+                                    mean_dist=float(np.mean(arr)),
+                                    p90_dist=float(np.percentile(arr, 90)),
+                                    max_dist=float(np.max(arr)),
+                                    valid_frames=int(arr.size),
+                                )
+                            )
+                else:
+                    joint_stats = [
+                        JointErrorStat(
+                            joint=str(name),
+                            mean_dist=None,
+                            p90_dist=None,
+                            max_dist=None,
+                            valid_frames=0,
                         )
+                        for name in names
+                    ]
 
         return _trimmed_mean(scores), matches, joint_stats
 

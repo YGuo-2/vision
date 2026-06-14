@@ -18,7 +18,8 @@ SIDECAR_SPEC = ROOT / "ui_backend_sidecar.spec"
 SIDECAR_SCRIPT = ROOT / "scripts" / "build-tauri-sidecar.ps1"
 SIDECAR_RUNTIME_HOOK = ROOT / "packaging" / "pyinstaller" / "pyi_rth_video_writer_alias.py"
 RESOURCE_KEEP = ROOT / "frontend" / "src-tauri" / "resources" / ".gitkeep"
-RESOURCE_SIDECAR_EXE = ROOT / "frontend" / "src-tauri" / "resources" / "vision-ui-backend.exe"
+RESOURCE_SIDECAR_DIR = ROOT / "frontend" / "src-tauri" / "resources" / "vision-ui-backend"
+RESOURCE_SIDECAR_EXE = RESOURCE_SIDECAR_DIR / "vision-ui-backend.exe"
 
 
 def test_tauri_windows_bundle_includes_sidecar_resources() -> None:
@@ -34,8 +35,11 @@ def test_tauri_windows_bundle_includes_sidecar_resources() -> None:
 def test_rust_bridge_prefers_packaged_sidecar_and_keeps_dev_fallback() -> None:
     source = TAURI_LIB.read_text(encoding="utf-8")
 
-    assert 'BRIDGE_SIDECAR_NAME: &str = "vision-ui-backend.exe"' in source
+    assert 'BRIDGE_SIDECAR_DIR: &str = "vision-ui-backend"' in source
+    assert 'BRIDGE_SIDECAR_EXE: &str = "vision-ui-backend.exe"' in source
     assert "packaged_bridge_executable" in source
+    assert "packaged_bridge_candidate" in source
+    assert 'join(BRIDGE_SIDECAR_DIR).join(BRIDGE_SIDECAR_EXE)' in source
     assert "resource_dir" in source
     assert ".venv" in source
     assert "apps" in source and "ui_backend.py" in source
@@ -65,7 +69,8 @@ def test_rust_bridge_prefers_packaged_sidecar_and_keeps_dev_fallback() -> None:
     assert 'matches!(state, "completed" | "stopped")' in source
     assert "Arc::ptr_eq(current, &expected_channel)" in source
     assert "guard.remove(expected_session_id)" in source
-    assert "Response::new(slot.bytes)" in source
+    assert "response.extend_from_slice(&slot.frame_id.to_be_bytes())" in source
+    assert "Response::new(response)" in source
 
 
 def test_rust_directory_picker_initializes_com_for_shell32_dialog() -> None:
@@ -90,6 +95,10 @@ def test_sidecar_spec_targets_bridge_without_yolo_or_tkinter_entry() -> None:
 
     assert '["apps/ui_backend.py"]' in source
     assert 'name="vision-ui-backend"' in source
+    assert "exclude_binaries=True" in source
+    assert "COLLECT(" in source
+    assert "a.binaries" in source
+    assert "a.datas" in source
     assert '"apps.app_ui"' not in source
     hiddenimports = source[source.index("hiddenimports += [") : source.index("heavy_excludes = [")]
     heavy_excludes = source[source.index("heavy_excludes = [") : source.index("a = Analysis(")]
@@ -106,22 +115,29 @@ def test_sidecar_spec_targets_bridge_without_yolo_or_tkinter_entry() -> None:
     assert "pyi_rth_video_writer_alias.py" in source
 
 
-def test_sidecar_build_script_copies_exe_into_tauri_resources() -> None:
+def test_sidecar_build_script_copies_onedir_into_tauri_resources() -> None:
     source = SIDECAR_SCRIPT.read_text(encoding="utf-8")
 
     assert "ui_backend_sidecar.spec" in source
+    assert "dist\\vision-ui-backend" in source
     assert "dist\\vision-ui-backend.exe" in source
     assert "frontend\\src-tauri\\resources" in source
-    assert "Remove-Item -LiteralPath $SidecarExe -Force" in source
+    assert "vision-ui-backend.exe" in source
+    assert "Remove-Item -LiteralPath $SidecarDir -Recurse -Force" in source
+    assert "Remove-Item -LiteralPath $LegacySidecarExe -Force" in source
+    assert "Remove-Item -LiteralPath $ResourceSidecarDir -Recurse -Force" in source
+    assert "Remove-Item -LiteralPath $ResourceLegacyExe -Force" in source
     assert "$PyInstallerExitCode = $LASTEXITCODE" in source
     assert "PyInstaller failed with exit code" in source
     assert "Copy-Item" in source
-    assert source.index("Remove-Item -LiteralPath $SidecarExe -Force") < source.index(
+    assert source.index("Remove-Item -LiteralPath $SidecarDir -Recurse -Force") < source.index(
         "& $PythonExe -m PyInstaller"
     )
     assert source.index("$PyInstallerExitCode = $LASTEXITCODE") < source.index(
-        "Copy-Item -LiteralPath $SidecarExe"
+        "Copy-Item -LiteralPath $SidecarDir"
     )
+    assert "-Recurse -Force" in source
+    assert "Copy-Item -LiteralPath $SidecarDir -Destination $ResourceSidecarDir -Recurse -Force" in source
 
 
 def test_sidecar_runtime_hook_aliases_video_writer(monkeypatch) -> None:

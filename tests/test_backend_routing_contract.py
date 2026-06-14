@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -31,6 +32,16 @@ from core.backend_router import (  # noqa: E402
     yolo_metadata,
 )
 from apps import ui_backend  # noqa: E402
+
+
+def _wait_frame_events(events: list[dict], count: int = 1, timeout: float = 1.0) -> list[dict]:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        frame_events = _wait_frame_events(events)
+        if len(frame_events) >= count:
+            return frame_events
+        time.sleep(0.01)
+    return [event for event in events if event["event"] == "session.frame"]
 
 
 def test_enable_hands_true_routes_to_mediapipe_full_with_hand_landmarker():

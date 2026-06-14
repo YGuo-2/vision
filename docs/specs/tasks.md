@@ -1,232 +1,242 @@
 # Design-First 任务清单 (Task Breakdown)
 
-> **功能名称:** Vue/Tauri 高速帧通道与 MediaPipe/YOLO 后端路由架构
-> **关联规范:** `docs/specs/design.md` · `docs/specs/requirements.md`
-> **状态:** Accepted
-> **当前任务:** n/a
-> **进度:** 10 / 10 已完成
-> **最后更新:** 2026-06-11 21:02:42
+> **功能名称：** 性能优化清单落地
+> **关联规范：** `docs/specs/design.md` · `docs/specs/requirements.md`
+> **状态：** Blocked
+> **当前任务：** T-008
+> **进度：** 7 / 10 已完成
+> **最后更新：** 2026-06-14 21:32:12
 
 ---
 
 ## 执行规则
 
-1. **设计优先：** 任务必须首先满足 `design.md` 中已批准的约束与边界。
-2. **受控入口：** 任务开始、完成、阻塞、跳过必须通过 `spec_progress.py` CLI 或 MCP 工具更新；工具会同步顶部状态、当前任务、进度和完成日志。
-3. **需求从设计派生：** 若 `requirements.md` 与 `design.md` 冲突，必须暂停实现、更新文档、运行 sync-check 并重新获得批准。
-4. **单任务约束：** 每个任务完成后必须记录验证证据，才可标记为完成。
-5. **禁止越界：** 不得实现未在 `design.md` 明确支撑的能力。
-6. **任务日志：** 每个任务完成时必须同步更新根目录 `change.md`，记录修改日期、问题描述、修改内容和验证方法。
-7. **验收修复隔离：** final acceptance 发现的问题不得追加到本文件；修复项必须写入 `docs/specs/acceptance-fixes.md`。
+1. 设计优先：任务必须首先满足 `design.md` 中的默认路径保护、YOLO 授权边界和分轨执行约束。
+2. 受控入口：批准后先运行 `spec_progress.py approve docs/specs/ --evidence "<批准依据>"` 或 MCP `spec_approve` 冻结基线；任务开始、完成、阻塞、跳过必须通过进度工具更新。
+3. 需求从设计派生：若 `requirements.md` 与 `design.md` 冲突，必须暂停实现、运行 `sync-check --write` 标记 `reapproval-required`，更新文档并重新获得批准。
+4. 单任务约束：每个任务完成后必须记录验证证据，才可标记完成。
+5. 禁止越界：不得实现未在 `design.md` 明确支撑的能力。
+6. 冻结边界：批准后 `design.md`、`requirements.md` 和任务计划被冻结；只允许通过工具更新进度字段、证据、阻塞原因、完成日志、`progress.md` 和当前任务索引。
+7. 验收修复隔离：final acceptance 发现的问题不得追加到本文件；修复项必须写入 `docs/specs/acceptance-fixes.md`。
+8. 高风险评分门禁：首次 `批准规范，启动执行` 不授权 `T-008` 的单次抽帧业务实现；`T-008` 只能产出风险评估和二次审批包。实施必须另等 `批准 T-008 高风险评分变更，启动执行`，并重新冻结基线或进入独立 Spce 规范。
 
 ---
 
-## 阶段 1：契约与路由基础
+## 验证标准与证据规则
 
-- [x] **T-001:** 固化后端路由决策契约
+- 每个任务的验证证据必须包含实际命令和结果摘要。
+- 触碰评分语义、DTW、规则评分或 MediaPipe pipeline 的任务必须运行金标或合同测试。
+- 触碰 Vue/Tauri bridge、raw frame 或 sidecar 的任务必须运行前端 smoke、相关 Python bridge 测试或 Windows packaging smoke。
+- 触碰 Tauri Rust 或 capabilities 的任务必须运行 `npm run verify:tauri`，并说明 `frontend/src-tauri/capabilities/default.json` 是否发生权限漂移。
+- 每批完成后更新 `change.md`，最新记录置顶。
 
+---
+
+## 阶段 1：基线与保护栏
+
+- [x] **T-001:** 固化性能基线、合同边界和执行前证据
   - 状态: done
-  - 验证证据: cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_backend_routing_contract.py tests/test_ui_backend_contract.py tests/test_batch_backend_args.py -q => exit 0, 35 passed; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q => exit 0, 31 passed; cmd: git diff --check => exit 0 (line-ending warnings only)
-  - 完成时间: 2026-06-11 13:58:19
-  - 备注: 新增 core/backend_router.py 唯一路由决策点；UI bridge 和 batch helper 消费共享 router；更新 change.md。
-  - 涉及文件: `core/backend_router.py`, `batch/backend_options.py`, `apps/ui_backend.py`, `core/feature_layout.py`, `core/yolo_adapter.py`, `tests/test_backend_routing_contract.py`, `tests/test_ui_backend_contract.py`, `tests/test_batch_backend_args.py`
-  - 验证命令: `.\.venv\Scripts\python.exe -m pytest tests/test_backend_routing_contract.py tests/test_ui_backend_contract.py tests/test_batch_backend_args.py -q`
+  - 验证证据: cmd: .\\.venv\\Scripts\\python.exe analysis\\offline_matching_profile.py --fixture-smoke --out outputs\\perf_baseline\\offline_fixture => exit 0, wrote offline_matching_profile.json/.csv; cmd: .\\.venv\\Scripts\\python.exe analysis\\bench_annotate_fps.py --env-only --out outputs\\perf_baseline\\gpu_env => exit 0, wrote gpu_recheck_env.json; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_backend_routing_contract.py::test_offline_high_quality_yolo26l_available_routes_internal_body_only tests/test_backend_routing_contract.py::test_high_quality_template_compare_stays_mediapipe_formal_compare -q => exit 0, 2 passed; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_s5_offline_profile.py tests/test_s5_gpu_recheck.py tests/test_pose33_v3_golden.py -q => exit 0, 31 passed
+  - 完成时间: 2026-06-14 20:09:37
+  - 备注: 解除 T-001 blocker：恢复 high_quality+YOLO26L available 既有 backend routing 合同；bench_annotate_fps.py 可从仓库根目录原命令运行；未实施 T-002 及后续性能优化。
+  - 阻塞原因: T-001 采证已执行：offline profile 原命令通过并写入 outputs/perf_baseline/offline_fixture/offline_matching_profile.json 与 .csv；GPU/env 快照原命令失败，ModuleNotFoundError: No module named 'core'，使用临时 PYTHONPATH=仓库根目录后写入 outputs/perf_baseline/gpu_env/gpu_recheck_env.json；high_quality backend routing 子集原命令复现 1 failed / 1 passed，失败为 core/backend_router.py:249 TypeError: _mediapipe_body_core() got an unexpected keyword argument 'model_profile'；相关 pytest tests/test_s5_offline_profile.py tests/test_s5_gpu_recheck.py tests/test_pose33_v3_golden.py -q 通过，31 passed。按已批准规范与用户硬约束，T-001 阻塞性能优化实施，需先转 Bugfix 或重新审批，未修改业务代码。
+  - 涉及文件: `docs/performance_optimization_inventory.md`, `analysis/offline_matching_profile.py`, `analysis/bench_annotate_fps.py`, `core/backend_router.py`, `tests/test_backend_routing_contract.py`, `tests/test_s5_offline_profile.py`, `tests/test_s5_gpu_recheck.py`, `tests/test_pose33_v3_golden.py`
+  - 验证命令: `.\.venv\Scripts\python.exe analysis\offline_matching_profile.py --fixture-smoke --out outputs\perf_baseline\offline_fixture`; `.\.venv\Scripts\python.exe analysis\bench_annotate_fps.py --env-only --out outputs\perf_baseline\gpu_env`; `.\.venv\Scripts\python.exe -m pytest tests/test_backend_routing_contract.py::test_offline_high_quality_yolo26l_available_routes_internal_body_only tests/test_backend_routing_contract.py::test_high_quality_template_compare_stays_mediapipe_formal_compare -q`; `.\.venv\Scripts\python.exe -m pytest tests/test_s5_offline_profile.py tests/test_s5_gpu_recheck.py tests/test_pose33_v3_golden.py -q`
   - 依赖: 无
   - 风险: high
-  - 覆盖: REQ-001, REQ-002, REQ-003, AC-001.1, AC-001.2, AC-002.1, AC-002.2, AC-002.3, AC-002.4, AC-002.5, AC-002.6, AC-002.7, AC-002.8, AC-003.1, AC-003.6
+  - 覆盖: REQ-001, REQ-002, REQ-005, NFR-001
   - 可并行: 否
-  - 验证标准: 新增 `core/backend_router.py` 作为唯一决策点；`apps/ui_backend.py` 和 `batch/backend_options.py` 只能调用共享 router，不得复制规则；路由函数不能只依赖 `enableHands`；`enableHands=false` + 手指指标必须走 MediaPipe pose-only partial 并标 `skippedCapabilities=fingers`，不得静默启用 hand landmarker；YOLO realtime 模型不可用时必须回退 MediaPipe 并记录 `fallbackReason/requestedBackend`；YOLO26L 离线高质量 body-only 模型不可用时必须返回结构化下载/安装错误，不静默回退；YOLO 路由必须输出 backend、modelProfile、rawLayout、featureLayout、capabilities、requiresCapabilities、calibrationStatus、布尔 scoreAuthorized、displayScope、evalCompleteness、reason。
-  - 预估工程量: 4-6 小时
+  - 验收口径: 记录执行前 profile 基线、GPU 环境快照和 backend routing 合同边界；若 high_quality 路由子集仍因 `core/backend_router.py` 的 `_mediapipe_body_core(..., model_profile=...)` 参数不匹配失败，则阻塞性能优化实施并先走 Bugfix 或重新审批；本任务不修改业务代码
+  - 已知审查证据: 2026-06-14 使用 `.\.venv\Scripts\python.exe -m pytest tests/test_backend_routing_contract.py::test_offline_high_quality_yolo26l_available_routes_internal_body_only tests/test_backend_routing_contract.py::test_high_quality_template_compare_stays_mediapipe_formal_compare -q` 复现 1 failed / 1 passed，失败点为 `core/backend_router.py:249` 的 `TypeError`
+  - 预估工程量: 1-2 小时
 
-- [x] **T-002:** 补齐 YOLO 能力和评分授权元数据
+---
 
+## 阶段 2：低数值风险的预览、编排与打包优化
+
+- [x] **T-002:** 落地预览默认降载与预览常量调档
   - 状态: done
-  - 验证证据: cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_yolo_backend_contract.py tests/test_yolo_landmark_mapping.py tests/test_rule_availability.py tests/test_ui_backend_analysis.py -q => exit 0, 46 passed; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q => exit 0, 31 passed; cmd: git diff --check => exit 0 (line-ending warnings only)
-  - 完成时间: 2026-06-11 14:12:26
-  - 备注: YOLO adapter 边界层与序列 artifact 统一补齐 raw_layout/feature_layout/capability/score_authorized/display_scope；UI camelCase route 与 COCO17 missing capability 测试上锁；更新 change.md。
-  - 涉及文件: `core/yolo_adapter.py`, `batch/batch_dual_compare.py`, `batch/batch_tech_eval.py`, `apps/ui_backend.py`, `tests/test_yolo_backend_contract.py`, `tests/test_rule_availability.py`, `tests/test_ui_backend_analysis.py`
-  - 验证命令: `.\.venv\Scripts\python.exe -m pytest tests/test_yolo_backend_contract.py tests/test_yolo_landmark_mapping.py tests/test_rule_availability.py tests/test_ui_backend_analysis.py -q`
-  - 依赖: T-001
-  - 风险: high
-  - 覆盖: REQ-003, AC-003.1, AC-003.2, AC-003.3, AC-003.4, AC-003.5, AC-003.6, NFR-003
-  - 可并行: 否
-  - 验证标准: 任意 YOLO payload/artifact 均显式标识 `backend=yolo`、raw layout、`featureLayout=body_core_v1`、`capability=body_only`、`calibrationStatus=unvalidated`、布尔 `scoreAuthorized=false`；受限显示只使用 `displayScope=limited|internal` / `display_scope=limited|internal`，不得引入等价字段；Python snake_case 与前端 camelCase 字段一一映射；缺失点继续通过 `valid_mask=False` 和 missing capability 呈现。
-  - 预估工程量: 2-4 小时
-
-- [x] **T-003:** 建立模型档清单与配置状态
-
-  - 状态: done
-  - 验证证据: cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_ui_backend_models.py tests/test_windows_packaging_smoke.py -q => exit 0, 20 passed; cmd: npm --prefix frontend run test => exit 0, Frontend behavior smoke checks passed; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q => exit 0, 31 passed; cmd: git diff --check => exit 0 (line-ending warnings only)
-  - 完成时间: 2026-06-11 15:13:21
-  - 备注: 补齐 MediaPipe/YOLO26 模型档元数据、默认代理下载、YOLO 手动安装错误、安装版 sidecar YOLO runtime 排除边界和前端展示；更新 change.md。
-  - 涉及文件: `apps/ui_backend.py`, `core/model_manager.py`, `ui_backend_sidecar.spec`, `frontend/src/App.vue`, `frontend/src/bridge-state.ts`, `tests/test_ui_backend_models.py`, `tests/test_windows_packaging_smoke.py`, `frontend/scripts/frontend-smoke.mjs`
-  - 验证命令: 分步运行 `.\.venv\Scripts\python.exe -m pytest tests/test_ui_backend_models.py tests/test_windows_packaging_smoke.py -q` 和 `npm --prefix frontend run test`，每步必须退出码 0
+  - 验证证据: cmd: npm --prefix frontend run test => exit 0, Frontend behavior smoke checks passed; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_ui_backend_sessions.py tests/test_s5_hands_toggle.py tests/test_s5_realtime_latest_frame.py -q => exit 0, 25 passed
+  - 完成时间: 2026-06-14 20:15:28
+  - 备注: 实时预览默认降载为 lite + hands off；预览 JPEG/尺寸/FPS/idle sleep 常量调低；保持正式评分/CLI/Tkinter 默认路径不变，并恢复 Tkinter UiState.out_path 兼容字段以通过既有测试。
+  - 涉及文件: `apps/ui_backend.py`, `frontend/src/App.vue`, `frontend/scripts/frontend-smoke.mjs`, `tests/test_ui_backend_sessions.py`, `tests/test_s5_hands_toggle.py`, `tests/test_s5_realtime_latest_frame.py`
+  - 验证命令: `npm --prefix frontend run test`; `.\.venv\Scripts\python.exe -m pytest tests/test_ui_backend_sessions.py tests/test_s5_hands_toggle.py tests/test_s5_realtime_latest_frame.py -q`
   - 依赖: T-001
   - 风险: medium
-  - 覆盖: REQ-007, AC-007.1, AC-007.2, AC-007.3
-  - 可并行: 否
-  - 验证标准: Python 侧负责模型清单、下载执行和代理/离线提示；开发侧模型下载走 `http://127.0.0.1:7890` 代理，安装版用户侧需处理下载源不可达提示；Rust 侧只负责资源路径、sidecar 打包和安装版资源发现；模型状态区分 MediaPipe pose full/heavy + hands、YOLO26n/s、YOLO26L、YOLO26X；YOLO26X 不进入默认路由；YOLO realtime 模型不可用时 router 能产生可见回退/下载提示，YOLO26L 缺失时能产生结构化下载/安装错误；安装版是否支持 YOLO 与 sidecar 依赖策略一致；下载/取消事件仍保持现有 envelope 契约。
-  - 预估工程量: 2-3 小时
+  - 覆盖: REQ-003, AC-003.1, AC-003.2, NFR-001
+  - 可并行: 是
+  - 验收口径: 只影响预览副本和预览能力声明，不改变正式评分默认链路
+  - 预估工程量: 2-4 小时
 
----
-
-## 阶段 2：高速帧通道和前端渲染
-
-- [x] **T-004:** 设计并实现二进制 latest-frame 预览帧通道
-
+- [x] **T-003:** 将实时 camera preview 接入 `ParallelPoseEngine`
   - 状态: done
-  - 验证证据: cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_ui_backend_sessions.py tests/test_windows_packaging_smoke.py -q => exit 0, 16 passed; cmd: npm run verify:tauri => exit 0, cargo check passed; cmd: npm --prefix frontend run test => exit 0, Frontend behavior smoke checks passed; cmd: git diff --check => exit 0 (line-ending warnings only)
-  - 完成时间: 2026-06-11 14:35:56
-  - 备注: 实现 Python 127.0.0.1 TCP length-prefixed latest-frame 通道与 Tauri raw IPC latest_frame；session.frame JSON 不再携带 image/base64/bytes，仅传 frame handle、token 和指标；更新 change.md 基线记录。
-  - 涉及文件: `frontend/src-tauri/src/lib.rs`, `apps/ui_backend.py`, `tests/test_ui_backend_sessions.py`, `tests/test_windows_packaging_smoke.py`, `frontend/scripts/frontend-smoke.mjs`
-  - 验证命令: 分步运行 `.\.venv\Scripts\python.exe -m pytest tests/test_ui_backend_sessions.py tests/test_windows_packaging_smoke.py -q`、`npm run verify:tauri` 和 `npm --prefix frontend run test`，每步必须退出码 0
-  - 依赖: T-001
-  - 风险: high
-  - 覆盖: REQ-004, AC-004.1, AC-004.2, AC-004.3, NFR-001, NFR-006
+  - 验证证据: cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_parallel_pose_engine.py tests/test_ui_backend_sessions.py tests/test_s5_realtime_latest_frame.py -q => exit 0, 25 passed; cmd: git diff --check -- apps/ui_backend.py tests/test_ui_backend_sessions.py core/parallel_pose_engine.py tests/test_parallel_pose_engine.py tests/test_s5_realtime_latest_frame.py => exit 0, only CRLF warnings
+  - 完成时间: 2026-06-14 20:56:06
+  - 备注: 实时 camera preview 在 MediaPipe 路由且 workers>1 时接入 ParallelPoseEngine，每个 worker 使用独立 IMAGE-mode pipeline factory；默认 workers=1、视频文件和 YOLO 路由继续走既有单管线路径；late stop 通过 ctx.stopped/capture_stop/engine.close 保持终态不复活。
+  - 涉及文件: `apps/ui_backend.py`, `core/parallel_pose_engine.py`, `tests/test_parallel_pose_engine.py`, `tests/test_ui_backend_sessions.py`, `tests/test_s5_realtime_latest_frame.py`
+  - 验证命令: `.\.venv\Scripts\python.exe -m pytest tests/test_parallel_pose_engine.py tests/test_ui_backend_sessions.py tests/test_s5_realtime_latest_frame.py -q`
+  - 依赖: T-002
+  - 风险: medium
+  - 覆盖: REQ-003, NFR-004
   - 可并行: 否
-  - 验证标准: 首选实现为 Python->Rust 仅绑定 `127.0.0.1` 的 TCP 长度前缀帧流（随机端口 + 会话 token 经 JSON bridge 握手下发）+ Rust->Vue Tauri 2 raw IPC `tauri::ipc::Response` 二进制 `ArrayBuffer`；Windows named pipe / Tauri custom protocol 仅作备选，切换原因必须写入任务证据和 `change.md`；禁止以 JSON/base64 回传大帧兜底；`session.frame` JSON event 不再携带大图 base64/bytes；同一 session 只保留最新帧并记录 dropped/rendered/payload/age 指标；迁移前后基线证据覆盖丢帧率、渲染帧率、前端内存增长、IPC payload 大小。
-  - 预估工程量: 8-12 小时
-
-- [x] **T-005:** 将 Vue 预览迁移到 Canvas/bitmap 渲染
-
-  - 状态: done
-  - 验证证据: cmd: npm --prefix frontend run test => exit 0, Frontend behavior smoke checks passed; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_vue_tauri_acceptance_gaps.py -q => exit 0, 7 passed; cmd: git diff --check => exit 0 (line-ending warnings only)
-  - 完成时间: 2026-06-11 14:44:51
-  - 备注: Vue 预览迁移到 Canvas/ImageBitmap；requestAnimationFrame 合并 latest frame；移除 previewImage、object URL 和 img 帧展示路径；更新 change.md 基线记录。
-  - 涉及文件: `frontend/src/App.vue`, `frontend/src/bridge.ts`, `frontend/src/bridge-state.ts`, `frontend/scripts/frontend-smoke.mjs`, `tests/test_vue_tauri_acceptance_gaps.py`
-  - 验证命令: 分步运行 `npm --prefix frontend run test` 和 `.\.venv\Scripts\python.exe -m pytest tests/test_vue_tauri_acceptance_gaps.py -q`，每步必须退出码 0
-  - 依赖: T-004
-  - 风险: high
-  - 覆盖: REQ-005, AC-005.1, AC-005.2, AC-005.3, NFR-001, NFR-006
-  - 可并行: 否
-  - 验证标准: 前端不再用 `previewImage` 或等价 reactive 大图字符串保存每帧；Canvas/bitmap 只绘制最新帧；通过 `requestAnimationFrame` 节流拉取最新帧并经 `createImageBitmap` 绘制 canvas；session/job/frame id 可过滤晚到帧；frontend smoke 需证明 frame handle 不进入历史数组或 reactive 队列；任务证据和 `change.md` 需记录迁移前后丢帧率、渲染帧率、前端内存增长、IPC payload 大小。
+  - 验收口径: `workers>1` 时启用多 worker，默认 workers=1 行为保守不变，late response 不复活终态
   - 预估工程量: 4-6 小时
 
-- [x] **T-006:** 打通 Rust/Python 双侧任务状态机和取消语义
-
+- [x] **T-004:** 为 batch dual-compare 与 skeleton export 增加跨视频并行
   - 状态: done
-  - 验证证据: cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_ui_backend_sessions.py tests/test_ui_backend_contract.py -q => exit 0, 24 passed; cmd: npm --prefix frontend run test => exit 0, Frontend behavior smoke checks passed; cmd: git diff --check => exit 0 (line-ending warnings only)
-  - 完成时间: 2026-06-11 14:54:00
-  - 备注: 统一 session/model download/analysis 主动停止和晚到事件清理；job.stop 缺失/未知 jobId 结构化错误测试；更新 change.md。
-  - 涉及文件: `frontend/src-tauri/src/lib.rs`, `apps/ui_backend.py`, `frontend/src/bridge-state.ts`, `frontend/src/bridge-lifecycle.ts`, `tests/test_ui_backend_sessions.py`, `tests/test_ui_backend_contract.py`, `frontend/scripts/frontend-smoke.mjs`
-  - 验证命令: 分步运行 `.\.venv\Scripts\python.exe -m pytest tests/test_ui_backend_sessions.py tests/test_ui_backend_contract.py -q` 和 `npm --prefix frontend run test`，每步必须退出码 0
-  - 依赖: T-004
-  - 风险: high
-  - 覆盖: REQ-006, AC-006.1, AC-006.2, NFR-006
-  - 可并行: 否
-  - 验证标准: session、analysis、model download 的停止和晚到事件处理一致；sidecar 异常、decode error、timeout 都返回结构化错误；窗口卸载不留下活动任务。
+  - 验证证据: cmd: .\\.venv\\Scripts\\python.exe -m py_compile batch\\batch_dual_compare.py batch\\batch_export_skeleton.py => exit 0; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_batch_backend_args.py tests/test_yolo_backend_contract.py -q => exit 0, 38 passed
+  - 完成时间: 2026-06-14 20:24:52
+  - 备注: 为 batch dual-compare 与 skeleton export 增加 --workers 跨视频并行；每个 worker 独立执行视频处理，主线程按输入 index 排序写 CSV/JSONL/manifest；YOLO body_core 授权元数据保持 score_authorized=False/internal/unvalidated；未实现单次抽帧复用。
+  - 涉及文件: `batch/batch_dual_compare.py`, `batch/batch_export_skeleton.py`, `tests/test_batch_backend_args.py`, `tests/test_yolo_backend_contract.py`
+  - 验证命令: `.\.venv\Scripts\python.exe -m py_compile batch\batch_dual_compare.py batch\batch_export_skeleton.py`; `.\.venv\Scripts\python.exe -m pytest tests/test_batch_backend_args.py tests/test_yolo_backend_contract.py -q`
+  - 依赖: T-001
+  - 风险: medium
+  - 覆盖: REQ-001, REQ-002, NFR-004
+  - 可并行: 是
+  - 验收口径: 每线程独立 pipeline，manifest/CSV 输出顺序与输入顺序稳定，YOLO 授权元数据不漂移；测试必须覆盖并行结果排序
   - 预估工程量: 3-5 小时
 
+- [x] **T-005:** 将 sidecar 从 PyInstaller onefile 改为 onedir
+  - 状态: done
+  - 验证证据: cmd: npm run build:sidecar => exit 0, PyInstaller onedir copied to frontend\\src-tauri\\resources\\vision-ui-backend; cmd: npm run verify:tauri => exit 0, cargo check finished; cmd: npm run package:windows => exit 0, NSIS installer generated at frontend\\src-tauri\\target\\release\\bundle\\nsis\\Vision 动作识别与评分_0.1.0_x64-setup.exe; cmd: git diff --exit-code -- frontend/src-tauri/capabilities/default.json => exit 0; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_windows_packaging_smoke.py -q => exit 0, 10 passed
+  - 完成时间: 2026-06-14 20:39:06
+  - 备注: 将 Python bridge sidecar 从 PyInstaller onefile 切换为 onedir COLLECT；构建脚本清理旧 exe 并复制整个 onedir 到 Tauri resources；Rust 安装版路径解析为 resource_dir/vision-ui-backend/vision-ui-backend.exe；heavy excludes 未放宽，capabilities 无权限漂移。
+  - 涉及文件: `ui_backend_sidecar.spec`, `scripts/build-tauri-sidecar.ps1`, `frontend/src-tauri/tauri.conf.json`, `frontend/src-tauri/src/lib.rs`, `tests/test_windows_packaging_smoke.py`
+  - 验证命令: `npm run build:sidecar`; `npm run verify:tauri`; `npm run package:windows`; `git diff --exit-code -- frontend/src-tauri/capabilities/default.json`; `.\.venv\Scripts\python.exe -m pytest tests/test_windows_packaging_smoke.py -q`
+  - 依赖: T-001
+  - 风险: medium
+  - 覆盖: REQ-006, AC-006.1, NFR-005
+  - 可并行: 是
+  - 验收口径: Windows 安装包能找到 onedir sidecar，heavy excludes 不放宽，打包产物不提交，Tauri Rust 编译通过且 capabilities 不发生权限漂移
+  - 预估工程量: 4-6 小时
+
 ---
 
-## 阶段 3：后端路径接入和阶段演进保护
+## 阶段 3：数值等价离线优化
 
-- [x] **T-007:** 接入 YOLO26n/s 实时 body-only 预览路径
-
+- [x] **T-006:** 向量化 DTW 局部代价、姿态归一化和误差聚合
   - 状态: done
-  - 验证证据: cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_backend_routing_contract.py tests/test_yolo_backend_contract.py -q => exit 0, 33 passed; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q => exit 0, 31 passed; cmd: git diff --check => exit 0 (line-ending warnings only)
-  - 完成时间: 2026-06-11 15:28:06
-  - 备注: 接入 YOLO26n/s realtime body-only preview pipeline；session.frame 透传 YOLO 授权/多人 meta；保持 MediaPipe 旧默认路径和正式评分边界；更新 change.md。
-  - 涉及文件: `apps/ui_backend.py`, `core/backend_router.py`, `core/yolo_adapter.py`, `tests/test_backend_routing_contract.py`, `tests/test_yolo_backend_contract.py`
-  - 验证命令: `.\.venv\Scripts\python.exe -m pytest tests/test_backend_routing_contract.py tests/test_yolo_backend_contract.py -q`
-  - 依赖: T-002, T-003, T-004
+  - 验证证据: cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py tests/test_rule_availability.py tests/test_tech_eval_contract.py -q => exit 0, 49 passed; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_body_core_layout.py tests/test_layout_shape_param.py tests/test_s5_offline_profile.py -q => exit 0, 39 passed; cmd: .\\.venv\\Scripts\\python.exe -m py_compile core\\pose_features.py core\\action_compare.py core\\rule_scoring.py => exit 0; cmd: git diff --check -- core/pose_features.py core/action_compare.py core/rule_scoring.py tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py tests/test_rule_availability.py tests/test_tech_eval_contract.py => exit 0, only CRLF warnings
+  - 完成时间: 2026-06-14 21:04:53
+  - 备注: 向量化 DTW 局部代价矩阵、pose normalizer 坐标变换、双模板关节误差统计；规则评分缓存模块级 _RULES 并批量计算 valid_mask 行有效性。金标、规则状态、valid_mask 语义和误差统计验证不漂移。
+  - 涉及文件: `core/pose_features.py`, `core/action_compare.py`, `core/rule_scoring.py`, `tests/test_pose33_v3_golden.py`, `tests/test_valid_mask_migration.py`, `tests/test_rule_availability.py`, `tests/test_tech_eval_contract.py`
+  - 验证命令: `.\.venv\Scripts\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py tests/test_rule_availability.py tests/test_tech_eval_contract.py -q`
+  - 依赖: T-003, T-004, T-005
   - 风险: high
-  - 覆盖: REQ-002, REQ-003, AC-002.2, AC-002.7, AC-002.9, AC-003.1, NFR-003
+  - 覆盖: REQ-002, REQ-005, AC-005.1, AC-005.2
   - 可并行: 否
-  - 验证标准: 无手部实时预览在 YOLO26n/s 可用时必须选择 YOLO26n/s；模型不可用或安装版不支持时必须回退 MediaPipe 并输出 `fallbackReason/requestedBackend` 与 UI fallback 提示；实时多人时沿用 `core/yolo_adapter.py` 既有 `select_main_person` 最大框/最高分策略，只渲染 primary target，输出 `multiPersonDetected/personCount/reviewRequired/targetPolicy`；完整 track 延续/中心最近/tie-break 策略本期不做；需要手部或缺失关键点时回退 MediaPipe 或 partial，不得启用 YOLO。
+  - 验收口径: 金标、规则状态、valid_mask 语义和误差统计不漂移；若漂移则停止并要求重新审批
+  - 预估工程量: 4-8 小时
+
+---
+
+## 阶段 4：显式 GPU 与评分语义风险项
+
+- [x] **T-007:** 贯通 MediaPipe GPU delegate opt-in 与 CPU fallback
+  - 状态: done
+  - 验证证据: cmd: .\\.venv\\Scripts\\python.exe -m py_compile core\\vision_pipeline.py apps\\main.py apps\\ui_backend.py core\\backend_router.py => exit 0; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_mediapipe_delegate_config.py tests/test_s5_gpu_recheck.py tests/test_backend_routing_contract.py tests/test_pose33_v3_golden.py -q => exit 0, 48 passed; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_ui_backend_sessions.py tests/test_s5_realtime_latest_frame.py tests/test_s5_hands_toggle.py -q => exit 0, 31 passed; cmd: git diff --check -- core/vision_pipeline.py apps/main.py apps/ui_backend.py core/backend_router.py core/parallel_pose_engine.py tests/test_mediapipe_delegate_config.py tests/test_s5_gpu_recheck.py tests/test_backend_routing_contract.py tests/test_ui_backend_sessions.py tests/test_s5_realtime_latest_frame.py => exit 0, only CRLF warnings
+  - 完成时间: 2026-06-14 21:20:10
+  - 备注: MediaPipe delegate 仍默认 cpu；CLI/bridge/parallel preview 仅在显式 delegate=gpu 时请求 GPU；MediaPipePipeline 在 GPU 初始化失败时回退 CPU 并暴露 requested/active/fallbackReason 元数据；正式评分和 full tech_eval 默认路径不进入 GPU。
+  - 涉及文件: `core/vision_pipeline.py`, `apps/main.py`, `apps/ui_backend.py`, `core/backend_router.py`, `tests/test_mediapipe_delegate_config.py`, `tests/test_s5_gpu_recheck.py`, `tests/test_backend_routing_contract.py`
+  - 验证命令: `.\.venv\Scripts\python.exe -m py_compile core\vision_pipeline.py apps\main.py apps\ui_backend.py core\backend_router.py`; `.\.venv\Scripts\python.exe -m pytest tests/test_mediapipe_delegate_config.py tests/test_s5_gpu_recheck.py tests/test_backend_routing_contract.py tests/test_pose33_v3_golden.py -q`
+  - 依赖: T-006
+  - 风险: high
+  - 覆盖: REQ-002, REQ-004, AC-004.1, AC-004.2
+  - 可并行: 否
+  - 验收口径: GPU 只可显式启用，默认 CPU 不变；正式评分和 full tech_eval 不进入 GPU 默认链路；测试必须覆盖 GPU delegate 不可用时的结构化 fallback 或 CPU fallback
   - 预估工程量: 4-6 小时
 
-- [x] **T-008:** 接入 YOLO26L 离线高质量 body-only 分析路径
-
-  - 状态: done
-  - 验证证据: cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_body_core_layout.py tests/test_batch_backend_args.py tests/test_s3_calibration.py -q => exit 0, 40 passed; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q => exit 0, 31 passed; cmd: git diff --check => exit 0 (line-ending warnings only)
-  - 完成时间: 2026-06-11 15:48:36
-  - 备注: 接入 analysis.run YOLO26L high_quality body-only 内部分析 payload；batch/benchmark 默认 YOLO body_core 模型收敛到 yolo26l-pose.pt；保持 scoreAuthorized=false、calibration_status=unvalidated、displayScope=internal；更新 change.md。
-  - 涉及文件: `apps/ui_backend.py`, `batch/batch_dual_compare.py`, `analysis/bench_annotate_fps.py`, `tests/test_body_core_layout.py`, `tests/test_batch_backend_args.py`, `tests/test_s3_calibration.py`
-  - 验证命令: `.\.venv\Scripts\python.exe -m pytest tests/test_body_core_layout.py tests/test_batch_backend_args.py tests/test_s3_calibration.py -q`
-  - 依赖: T-002, T-003
+- [ ] **T-008:** 产出单次抽帧复用的二次审批包
+  - 状态: blocked
+  - 阻塞原因: 已产出 docs/specs/t008_single_pass_frame_gate.md，并通过 validate_spec.py docs/specs/ --workflow design-first --color never 与 --sync-check --color never；因尚未收到独立批准短语『批准 T-008 高风险评分变更，启动执行』，按高风险评分门禁停止，未修改单次抽帧相关业务代码。
+  - 涉及文件: `docs/specs/design.md`, `docs/specs/requirements.md`, `docs/specs/tasks.md`, `docs/specs/t008_single_pass_frame_gate.md`, `core/action_compare.py`, `core/rule_scoring.py`, `batch/batch_dual_compare.py`, `core/body_core_compare.py`
+  - 验证命令: `python C:\Users\ny\.codex\plugins\cache\Useful-marketplace\spce-workflow\0.2.0\scripts\validate_spec.py docs/specs/ --workflow design-first --color never`; `python C:\Users\ny\.codex\plugins\cache\Useful-marketplace\spce-workflow\0.2.0\scripts\validate_spec.py docs/specs/ --sync-check --color never`
+  - 验证证据: pending
+  - 依赖: T-007
   - 风险: high
-  - 覆盖: REQ-002, REQ-003, REQ-008, AC-002.3, AC-002.8, AC-008.1, NFR-003
+  - 覆盖: REQ-002, REQ-005, AC-002.2, AC-005.2
   - 可并行: 否
-  - 验证标准: 离线高质量 body-only 分析在 YOLO26L 可用时必须选择 YOLO26L；模型不可用、安装版不支持或模型下载未完成时必须返回结构化下载/安装错误，不静默回退 MediaPipe，并输出 `requestedBackend=yolo`、缺失模型档和用户可见提示；结果不进入 full tech_eval；`scoreAuthorized=false` 和 `calibration_status=unvalidated` 不被放宽，受限显示只用 `displayScope=internal` / `display_scope=internal`。
-  - 预估工程量: 4-6 小时
-
-- [x] **T-009:** 保持 MediaPipe 正式评分和 full tech_eval 默认边界
-
-  - 状态: done
-  - 验证证据: cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py tests/test_tech_eval_contract.py tests/test_rule_availability.py -q => exit 0, 49 passed
-  - 完成时间: 2026-06-11 15:52:42
-  - 备注: 回归确认 formal score/full tech_eval 仍走 MediaPipe；enableHands=false + fingers 为 pose-only partial/skippedCapabilities，不启用 hands；未发现 YOLO 越界进入正式评分或 full tech_eval，更新 change.md。
-  - 涉及文件: `analysis/tech_eval.py`, `core/rule_scoring.py`, `core/action_compare.py`, `tests/test_pose33_v3_golden.py`, `tests/test_valid_mask_migration.py`, `tests/test_tech_eval_contract.py`, `tests/test_rule_availability.py`
-  - 验证命令: `.\.venv\Scripts\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py tests/test_tech_eval_contract.py tests/test_rule_availability.py -q`
-  - 依赖: T-007, T-008
-  - 风险: high
-  - 覆盖: REQ-002, REQ-003, AC-002.1, AC-002.4, AC-002.5, AC-002.6, AC-003.2, NFR-002
-  - 可并行: 否
-  - 验证标准: 本任务以回归门为主，仅在发现 YOLO 可进入正式评分/full tech_eval 时增加阻断守卫；任何守卫改动都必须保持 MediaPipe `pose33_v3` golden 不漂移；正式评分和 full tech_eval 不选择 YOLO；`enableHands=false` + 手指指标必须是 MediaPipe pose-only partial 并记录 skipped capability，不能静默打开 hands。
+  - 验收口径: 本任务不得实现单次抽帧复用，只能读取相关业务代码并产出 `docs/specs/t008_single_pass_frame_gate.md`，其中必须包含真实 MediaPipe VIDEO-mode 验证矩阵、fixture replay 验证矩阵、回滚方案和二次审批建议；若用户未明确回复 `批准 T-008 高风险评分变更，启动执行`，必须用 `spec_progress.py block` 或 `spec_progress.py skip` 记录人工决策，不能修改单次抽帧相关业务代码
   - 预估工程量: 2-4 小时
 
 ---
 
-## 阶段 4：验收、打包和文档同步
+## 阶段 5：传输、前端绘制与最终验收
 
-- [x] **T-010:** 完成桌面栈、打包和迁移文档验收
-  - 状态: done
-  - 验证证据: cmd: npm run verify:desktop => exit 0, frontend build + frontend smoke + cargo check + py_compile + desktop regression 133 passed; cmd: npm run package:windows => exit 0, NSIS installer generated at frontend/src-tauri/target/release/bundle/nsis/Vision 动作识别与评分_0.1.0_x64-setup.exe; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_windows_packaging_smoke.py tests/test_yolo_landmark_mapping.py tests/test_yolo_backend_contract.py tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q => exit 0, 73 passed; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py tests/test_yolo_backend_contract.py tests/test_yolo_landmark_mapping.py tests/test_rule_availability.py tests/test_tech_eval_contract.py -q => exit 0, 82 passed; cmd: git diff --check => exit 0 (line-ending warnings only)
-  - 完成时间: 2026-06-11 16:10:57
-  - 备注: 修复 packaged release Manager import 和 sidecar router 对 YOLO runtime 的硬依赖；同步 yolo_default_switch_decision 与 yolo_migration_issues 最终口径；更新 change.md。
-  - 涉及文件: `scripts/verify-desktop-stack.ps1`, `scripts/build-tauri-sidecar.ps1`, `frontend/src-tauri/tauri.conf.json`, `docs/yolo_default_switch_decision.md`, `docs/yolo_migration_issues.md`, `change.md`
-  - 验证命令: 分步运行 `npm run verify:desktop`、`npm run package:windows`、`.\.venv\Scripts\python.exe -m pytest tests/test_windows_packaging_smoke.py tests/test_yolo_landmark_mapping.py tests/test_yolo_backend_contract.py tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q`，每步必须退出码 0
-  - 依赖: T-005, T-006, T-007, T-008, T-009
-  - 风险: high
-  - 覆盖: REQ-001, REQ-004, REQ-006, REQ-007, REQ-008, AC-008.2, AC-008.3, NFR-004, NFR-005
-  - 可并行: 否
-  - 验证标准: 桌面验证栈、Windows 打包、packaged sidecar、文档和 `change.md` 均反映最终行为；若安装版支持 YOLO，sidecar 必须包含并验证 YOLO 运行依赖；若不支持，UI 和文档必须明确安装版能力边界；三阶段演进边界和 YOLO 非默认评分边界保持一致。
+- [ ] **T-009:** 优化 raw frame 传输、canvas 绘制和 Rust latest-frame clone
+  - 状态: pending
+  - 涉及文件: `frontend/src/App.vue`, `frontend/src/bridge.ts`, `frontend/src/bridge-state.ts`, `frontend/scripts/frontend-smoke.mjs`, `frontend/src-tauri/src/lib.rs`, `tests/test_vue_tauri_acceptance_gaps.py`, `tests/test_ui_backend_sessions.py`
+  - 验证命令: `npm --prefix frontend run test`; `npm run verify:tauri`; `git diff --exit-code -- frontend/src-tauri/capabilities/default.json`; `.\.venv\Scripts\python.exe -m pytest tests/test_vue_tauri_acceptance_gaps.py tests/test_ui_backend_sessions.py -q`
+  - 验证证据: pending
+  - 依赖: T-003, T-005, T-008
+  - 风险: medium
+  - 覆盖: REQ-003, REQ-006, AC-006.2
+  - 可并行: 是
+  - 验收口径: session/job/frame 身份隔离不变，`frameId` 单调不回退，latest-wins 背压不改为队列；Rust 编译通过；`frontend/src-tauri/capabilities/default.json` 不发生权限漂移
   - 预估工程量: 3-5 小时
+
+- [ ] **T-010:** 完成任务收尾、文档同步和变更日志
+  - 状态: pending
+  - 涉及文件: `docs/performance_optimization_inventory.md`, `docs/specs/design.md`, `docs/specs/requirements.md`, `docs/specs/tasks.md`, `change.md`
+  - 验证命令: `python C:\Users\ny\.codex\plugins\cache\Useful-marketplace\spce-workflow\0.2.0\scripts\validate_spec.py docs/specs/ --workflow design-first --color never`; `python C:\Users\ny\.codex\plugins\cache\Useful-marketplace\spce-workflow\0.2.0\scripts\validate_spec.py docs/specs/ --resume --color never`; `git diff --check`; `npm run verify:desktop`
+  - 验证证据: pending
+  - 依赖: T-002, T-003, T-004, T-005, T-006, T-007, T-008, T-009
+  - 风险: high
+  - 覆盖: REQ-001, REQ-002, REQ-003, REQ-004, REQ-005, REQ-006, NFR-006
+  - 可并行: 否
+  - 验收口径: 所有任务有证据，`change.md` 已置顶同步，规范结构与 resume 检查通过；本任务不宣称 final acceptance，通过后才进入下方“任务完成后的验收入口”
+  - 预估工程量: 2-4 小时
 
 ---
 
 ## 执行 Waves
 
-| Wave | 任务    | 说明                                               |
-|:---- |:----- |:------------------------------------------------ |
-| 1    | T-001 | 先固化路由契约，避免后续实现分叉                                 |
-| 2    | T-002 | 高风险能力元数据先落地                                      |
-| 3    | T-004 | 二进制帧通道是前端渲染和 YOLO 预览的基础                          |
-| 4    | T-005 | Canvas 渲染在帧通道完成后执行                               |
-| 5    | T-006 | Rust/Python 状态机在帧通道完成后执行                         |
-| 6    | T-003 | 模型档清单在后端接入前补齐                                    |
-| 7    | T-007 | 接入 YOLO26n/s 实时 body-only 预览路径                   |
-| 8    | T-008 | 接入 YOLO26L 离线高质量 body-only 分析路径                  |
-| 9    | T-009 | 在 YOLO 路径接入后重跑 MediaPipe 正式评分和 full tech_eval 边界 |
-| 10   | T-010 | 最后做桌面栈、打包、关键契约回归和文档收口                            |
+| Wave | 任务 | 说明 |
+|:---|:---|:---|
+| 1 | T-001 | 先锁定基线、合同和 profile 证据 |
+| 2 | T-002, T-004, T-005 | 低数值风险轨道可并行，但每项仍需独立验证 |
+| 3 | T-003 | 与 T-002 共享 bridge 文件，必须串行 |
+| 4 | T-006 | 数值等价离线优化单独执行 |
+| 5 | T-007 | GPU opt-in 单独执行，默认 CPU 不变 |
+| 6 | T-008 | 只产出单次抽帧二次审批包，不实施评分语义变更 |
+| 7 | T-009 | 与 T-005 共享 Rust 文件，依赖 onedir 路径稳定后执行 |
+| 8 | T-010 | 任务收尾和文档同步；final acceptance 在任务完成后独立启动 |
 
 ---
 
 ## 风险标记
 
-| 任务 ID | 风险类别      | 风险描述                                  | 审查要求                    |
-|:----- |:--------- |:------------------------------------- |:----------------------- |
-| T-001 | 架构 / 评分授权 | 路由契约写错会导致 YOLO 误入评分路径                 | 人类深度审查                  |
-| T-004 | 性能 / IPC  | 二进制通道和 JSON bridge 双通道可能产生帧归属错误       | 人类深度审查和桌面 smoke         |
-| T-005 | 前端性能      | Vue reactive 大帧迁移不彻底会保留内存压力           | 浏览器/桌面截图和内存观察           |
-| T-007 | 视觉后端      | YOLO 实时预览可能被误读为正式评分                   | 必须检查 `scoreAuthorized`  |
-| T-008 | 标定 / 授权   | YOLO26L body-only 质量提升不能补齐 COCO17 缺失点 | 必须检查 full tech_eval 阻断  |
-| T-010 | 打包 / 发布   | 安装包环境可能与开发环境 sidecar 或模型路径不一致         | 必须跑 packaged sidecar 验证 |
+| 任务 ID | 风险类别 | 风险描述 | 审查要求 |
+|:---|:---|:---|:---|
+| T-001 | 性能证据 | 基线错误会污染后续收益判断 | 人类审查 profile 与合同范围 |
+| T-006 | 评分语义 | DTW、归一化、规则和误差聚合可能引入数值漂移 | 金标与合同测试必须通过 |
+| T-007 | 平台差异 | GPU delegate 可能不可用或输出存在差异 | 默认 CPU 不变，GPU 仅 opt-in |
+| T-008 | 时序态 / 审批 | 单次抽帧可能改变 VIDEO-mode 子段推理状态 | 首轮批准只允许产出二次审批包；实施需独立批准 |
+| T-010 | 收尾 | 多轨道改动可能产生组合回归 | 只做任务收尾；pre-acceptance 与 final acceptance 在任务全完成后独立启动 |
+
+---
+
+## 任务完成后的验收入口
+
+当且仅当 `tasks.md` 中所有任务均通过 `spec_progress.py complete` 或带人工证据的 `spec_progress.py skip` 关闭后，才能启动以下验收入口。该入口不是 `T-010` 的完成条件，也不得在仍有 unchecked task 时运行：
+
+```powershell
+python C:\Users\ny\.codex\plugins\cache\Useful-marketplace\spce-workflow\0.2.0\scripts\validate_spec.py docs/specs/ --pre-acceptance --color never
+python C:\Users\ny\.codex\plugins\cache\Useful-marketplace\spce-workflow\0.2.0\scripts\spec_progress.py acceptance-init docs/specs
+```
+
+`pre-acceptance` 只代表本地预检，不等于 final acceptance。严格结尾验收必须按 `spec-acceptance` 编排 first-wave 与 adversarial 子 agent；验收发现的问题只能进入 `docs/specs/acceptance-fixes.md`，不得追加到本任务清单。
 
 ---
 
 ## 完成日志
 
-| 任务 ID | 完成时间                | Commit Hash | 验证证据                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | 备注                                                                                                                                                                                                              |
-|:----- |:------------------- |:----------- |:------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |:--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| T-001 | 2026-06-11 13:58:19 | 60f3a66     | cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_backend_routing_contract.py tests/test_ui_backend_contract.py tests/test_batch_backend_args.py -q => exit 0, 35 passed; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q => exit 0, 31 passed; cmd: git diff --check => exit 0 (line-ending warnings only)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | 新增 core/backend_router.py 唯一路由决策点；UI bridge 和 batch helper 消费共享 router；更新 change.md。                                                                                                                            |
-| T-002 | 2026-06-11 14:12:26 | 4541e61     | cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_yolo_backend_contract.py tests/test_yolo_landmark_mapping.py tests/test_rule_availability.py tests/test_ui_backend_analysis.py -q => exit 0, 46 passed; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q => exit 0, 31 passed; cmd: git diff --check => exit 0 (line-ending warnings only)                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | YOLO adapter 边界层与序列 artifact 统一补齐 raw_layout/feature_layout/capability/score_authorized/display_scope；UI camelCase route 与 COCO17 missing capability 测试上锁；更新 change.md。                                         |
-| T-004 | 2026-06-11 14:35:56 | f3e50db     | cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_ui_backend_sessions.py tests/test_windows_packaging_smoke.py -q => exit 0, 16 passed; cmd: npm run verify:tauri => exit 0, cargo check passed; cmd: npm --prefix frontend run test => exit 0, Frontend behavior smoke checks passed; cmd: git diff --check => exit 0 (line-ending warnings only)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    | 实现 Python 127.0.0.1 TCP length-prefixed latest-frame 通道与 Tauri raw IPC latest_frame；session.frame JSON 不再携带 image/base64/bytes，仅传 frame handle、token 和指标；更新 change.md 基线记录。                                     |
-| T-005 | 2026-06-11 14:44:51 | 7bfe692     | cmd: npm --prefix frontend run test => exit 0, Frontend behavior smoke checks passed; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_vue_tauri_acceptance_gaps.py -q => exit 0, 7 passed; cmd: git diff --check => exit 0 (line-ending warnings only)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | Vue 预览迁移到 Canvas/ImageBitmap；requestAnimationFrame 合并 latest frame；移除 previewImage、object URL 和 img 帧展示路径；更新 change.md 基线记录。                                                                                    |
-| T-006 | 2026-06-11 14:54:00 | b795674     | cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_ui_backend_sessions.py tests/test_ui_backend_contract.py -q => exit 0, 24 passed; cmd: npm --prefix frontend run test => exit 0, Frontend behavior smoke checks passed; cmd: git diff --check => exit 0 (line-ending warnings only)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | 统一 session/model download/analysis 主动停止和晚到事件清理；job.stop 缺失/未知 jobId 结构化错误测试；更新 change.md。                                                                                                                       |
-| T-003 | 2026-06-11 15:13:21 | 7a1390e     | cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_ui_backend_models.py tests/test_windows_packaging_smoke.py -q => exit 0, 20 passed; cmd: npm --prefix frontend run test => exit 0, Frontend behavior smoke checks passed; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q => exit 0, 31 passed; cmd: git diff --check => exit 0 (line-ending warnings only)                                                                                                                                                                                                                                                                                                                                                                                                                                                       | 补齐 MediaPipe/YOLO26 模型档元数据、默认代理下载、YOLO 手动安装错误、安装版 sidecar YOLO runtime 排除边界和前端展示；更新 change.md。                                                                                                                  |
-| T-007 | 2026-06-11 15:28:06 | 38474bf     | cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_backend_routing_contract.py tests/test_yolo_backend_contract.py -q => exit 0, 33 passed; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q => exit 0, 31 passed; cmd: git diff --check => exit 0 (line-ending warnings only)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | 接入 YOLO26n/s realtime body-only preview pipeline；session.frame 透传 YOLO 授权/多人 meta；保持 MediaPipe 旧默认路径和正式评分边界；更新 change.md。                                                                                       |
-| T-008 | 2026-06-11 15:48:36 | 2e5051e     | cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_body_core_layout.py tests/test_batch_backend_args.py tests/test_s3_calibration.py -q => exit 0, 40 passed; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q => exit 0, 31 passed; cmd: git diff --check => exit 0 (line-ending warnings only)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | 接入 analysis.run YOLO26L high_quality body-only 内部分析 payload；batch/benchmark 默认 YOLO body_core 模型收敛到 yolo26l-pose.pt；保持 scoreAuthorized=false、calibration_status=unvalidated、displayScope=internal；更新 change.md。 |
-| T-009 | 2026-06-11 15:52:42 | 0ac08d6     | cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py tests/test_tech_eval_contract.py tests/test_rule_availability.py -q => exit 0, 49 passed                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | 回归确认 formal score/full tech_eval 仍走 MediaPipe；enableHands=false + fingers 为 pose-only partial/skippedCapabilities，不启用 hands；未发现 YOLO 越界进入正式评分或 full tech_eval，更新 change.md。                                     |
-| T-010 | 2026-06-11 16:10:57 | 3c41f33     | cmd: npm run verify:desktop => exit 0, frontend build + frontend smoke + cargo check + py_compile + desktop regression 133 passed; cmd: npm run package:windows => exit 0, NSIS installer generated at frontend/src-tauri/target/release/bundle/nsis/Vision 动作识别与评分_0.1.0_x64-setup.exe; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_windows_packaging_smoke.py tests/test_yolo_landmark_mapping.py tests/test_yolo_backend_contract.py tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q => exit 0, 73 passed; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py tests/test_yolo_backend_contract.py tests/test_yolo_landmark_mapping.py tests/test_rule_availability.py tests/test_tech_eval_contract.py -q => exit 0, 82 passed; cmd: git diff --check => exit 0 (line-ending warnings only) | 修复 packaged release Manager import 和 sidecar router 对 YOLO runtime 的硬依赖；同步 yolo_default_switch_decision 与 yolo_migration_issues 最终口径；更新 change.md。                                                              |
+| 任务 ID | 完成时间 | Commit Hash | 验证证据 | 备注 |
+|:---|:---|:---|:---|:---|
+| T-001 | 2026-06-14 20:09:37 | 8b1d0b9 | cmd: .\\.venv\\Scripts\\python.exe analysis\\offline_matching_profile.py --fixture-smoke --out outputs\\perf_baseline\\offline_fixture => exit 0, wrote offline_matching_profile.json/.csv; cmd: .\\.venv\\Scripts\\python.exe analysis\\bench_annotate_fps.py --env-only --out outputs\\perf_baseline\\gpu_env => exit 0, wrote gpu_recheck_env.json; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_backend_routing_contract.py::test_offline_high_quality_yolo26l_available_routes_internal_body_only tests/test_backend_routing_contract.py::test_high_quality_template_compare_stays_mediapipe_formal_compare -q => exit 0, 2 passed; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_s5_offline_profile.py tests/test_s5_gpu_recheck.py tests/test_pose33_v3_golden.py -q => exit 0, 31 passed | 解除 T-001 blocker：恢复 high_quality+YOLO26L available 既有 backend routing 合同；bench_annotate_fps.py 可从仓库根目录原命令运行；未实施 T-002 及后续性能优化。 |
+| T-002 | 2026-06-14 20:15:28 | 8b1d0b9 | cmd: npm --prefix frontend run test => exit 0, Frontend behavior smoke checks passed; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_ui_backend_sessions.py tests/test_s5_hands_toggle.py tests/test_s5_realtime_latest_frame.py -q => exit 0, 25 passed | 实时预览默认降载为 lite + hands off；预览 JPEG/尺寸/FPS/idle sleep 常量调低；保持正式评分/CLI/Tkinter 默认路径不变，并恢复 Tkinter UiState.out_path 兼容字段以通过既有测试。 |
+| T-004 | 2026-06-14 20:24:52 | 8b1d0b9 | cmd: .\\.venv\\Scripts\\python.exe -m py_compile batch\\batch_dual_compare.py batch\\batch_export_skeleton.py => exit 0; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_batch_backend_args.py tests/test_yolo_backend_contract.py -q => exit 0, 38 passed | 为 batch dual-compare 与 skeleton export 增加 --workers 跨视频并行；每个 worker 独立执行视频处理，主线程按输入 index 排序写 CSV/JSONL/manifest；YOLO body_core 授权元数据保持 score_authorized=False/internal/unvalidated；未实现单次抽帧复用。 |
+| T-005 | 2026-06-14 20:39:06 | 8b1d0b9 | cmd: npm run build:sidecar => exit 0, PyInstaller onedir copied to frontend\\src-tauri\\resources\\vision-ui-backend; cmd: npm run verify:tauri => exit 0, cargo check finished; cmd: npm run package:windows => exit 0, NSIS installer generated at frontend\\src-tauri\\target\\release\\bundle\\nsis\\Vision 动作识别与评分_0.1.0_x64-setup.exe; cmd: git diff --exit-code -- frontend/src-tauri/capabilities/default.json => exit 0; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_windows_packaging_smoke.py -q => exit 0, 10 passed | 将 Python bridge sidecar 从 PyInstaller onefile 切换为 onedir COLLECT；构建脚本清理旧 exe 并复制整个 onedir 到 Tauri resources；Rust 安装版路径解析为 resource_dir/vision-ui-backend/vision-ui-backend.exe；heavy excludes 未放宽，capabilities 无权限漂移。 |
+| T-003 | 2026-06-14 20:56:06 | 8b1d0b9 | cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_parallel_pose_engine.py tests/test_ui_backend_sessions.py tests/test_s5_realtime_latest_frame.py -q => exit 0, 25 passed; cmd: git diff --check -- apps/ui_backend.py tests/test_ui_backend_sessions.py core/parallel_pose_engine.py tests/test_parallel_pose_engine.py tests/test_s5_realtime_latest_frame.py => exit 0, only CRLF warnings | 实时 camera preview 在 MediaPipe 路由且 workers>1 时接入 ParallelPoseEngine，每个 worker 使用独立 IMAGE-mode pipeline factory；默认 workers=1、视频文件和 YOLO 路由继续走既有单管线路径；late stop 通过 ctx.stopped/capture_stop/engine.close 保持终态不复活。 |
+| T-006 | 2026-06-14 21:04:53 | 8b1d0b9 | cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py tests/test_rule_availability.py tests/test_tech_eval_contract.py -q => exit 0, 49 passed; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_body_core_layout.py tests/test_layout_shape_param.py tests/test_s5_offline_profile.py -q => exit 0, 39 passed; cmd: .\\.venv\\Scripts\\python.exe -m py_compile core\\pose_features.py core\\action_compare.py core\\rule_scoring.py => exit 0; cmd: git diff --check -- core/pose_features.py core/action_compare.py core/rule_scoring.py tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py tests/test_rule_availability.py tests/test_tech_eval_contract.py => exit 0, only CRLF warnings | 向量化 DTW 局部代价矩阵、pose normalizer 坐标变换、双模板关节误差统计；规则评分缓存模块级 _RULES 并批量计算 valid_mask 行有效性。金标、规则状态、valid_mask 语义和误差统计验证不漂移。 |
+| T-007 | 2026-06-14 21:20:10 | 8b1d0b9 | cmd: .\\.venv\\Scripts\\python.exe -m py_compile core\\vision_pipeline.py apps\\main.py apps\\ui_backend.py core\\backend_router.py => exit 0; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_mediapipe_delegate_config.py tests/test_s5_gpu_recheck.py tests/test_backend_routing_contract.py tests/test_pose33_v3_golden.py -q => exit 0, 48 passed; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_ui_backend_sessions.py tests/test_s5_realtime_latest_frame.py tests/test_s5_hands_toggle.py -q => exit 0, 31 passed; cmd: git diff --check -- core/vision_pipeline.py apps/main.py apps/ui_backend.py core/backend_router.py core/parallel_pose_engine.py tests/test_mediapipe_delegate_config.py tests/test_s5_gpu_recheck.py tests/test_backend_routing_contract.py tests/test_ui_backend_sessions.py tests/test_s5_realtime_latest_frame.py => exit 0, only CRLF warnings | MediaPipe delegate 仍默认 cpu；CLI/bridge/parallel preview 仅在显式 delegate=gpu 时请求 GPU；MediaPipePipeline 在 GPU 初始化失败时回退 CPU 并暴露 requested/active/fallbackReason 元数据；正式评分和 full tech_eval 默认路径不进入 GPU。 |

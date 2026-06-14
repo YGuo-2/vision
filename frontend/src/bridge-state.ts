@@ -101,21 +101,12 @@ export function shouldApplyModelDownloadStartResponse(state: CurrentBridgeState,
   return state.modelDownloadJobId === pendingJobId;
 }
 
-export function shouldRenderPreviewFrameAt(
-  nowMs: number,
-  lastRenderedAtMs: number,
-  minIntervalMs: number
-): boolean {
-  return nowMs - lastRenderedAtMs >= minIntervalMs;
-}
-
 export function isCurrentFrameIdentity(frame: FrameIdentity, current: FrameIdentity | null | undefined): boolean {
   return Boolean(
     current &&
       frame.sessionId === current.sessionId &&
       frame.jobId === current.jobId &&
-      frame.frameId === current.frameId &&
-      frame.frameHandle === current.frameHandle
+      frame.frameId >= current.frameId
   );
 }
 

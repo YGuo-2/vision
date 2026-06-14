@@ -49,14 +49,41 @@ def test_property1_enumerate_equals_intersection(available: set[int], scan_limit
 
 
 # Feature: camera-dropdown-selection, enumerate_cameras 注入设备名时 label 含友好名
+# Feature: camera-dropdown-selection, 有设备清单时直接据清单生成条目（不 probe）
 def test_enumerate_uses_device_names() -> None:
-    probe = lambda i: True  # noqa: E731
+    # 有设备清单时（MF/pygrabber 枚举成功），直接据清单生成条目，
+    # 不再逐个 cv2 probe（避免 MSMF 慢首帧误杀设备）。
+    probe_calls: list[int] = []
+
+    def probe(i: int) -> bool:
+        probe_calls.append(i)
+        return True
+
     names = lambda: ["前置摄像头", "USB 外接"]  # noqa: E731
     entries = enumerate_cameras(3, probe, names)
+    assert [e.index for e in entries] == [0, 1]
     assert entries[0].label == "摄像头 0: 前置摄像头"
     assert entries[1].label == "摄像头 1: USB 外接"
-    # 设备名列表越界的索引回退为无名格式。
-    assert entries[2].label == "摄像头 2"
+    assert probe_calls == []  # 清单可用时不触发 probe
+
+
+# Feature: camera-dropdown-selection, 设备清单条目数受 scan_limit 上限钳制
+def test_enumerate_names_clamped_by_scan_limit() -> None:
+    names = lambda: ["a", "b", "c", "d"]  # noqa: E731
+    # clamp_scan_limit(1) == 1 → 仅保留 index 0、1
+    entries = enumerate_cameras(1, lambda i: True, names)
+    assert [e.index for e in entries] == [0, 1]
+    assert [e.label for e in entries] == ["摄像头 0: a", "摄像头 1: b"]
+
+
+# Feature: camera-dropdown-selection, 无设备清单时回退逐编号 probe 扫描
+def test_enumerate_fallback_probe_when_no_names() -> None:
+    available = {0, 2}
+    probe = lambda i: i in available  # noqa: E731
+    no_names = lambda: []  # noqa: E731
+    entries = enumerate_cameras(5, probe, no_names)
+    assert [e.index for e in entries] == [0, 2]
+    assert [e.label for e in entries] == ["摄像头 0", "摄像头 2"]
 
 
 # Feature: camera-dropdown-selection, Property 2: 扫描上限被钳制到 [1, 32]

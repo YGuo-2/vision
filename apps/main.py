@@ -160,6 +160,7 @@ def _process_video_multithread(
     pose_variant: str,
     enable_hands: bool,
     workers: int,
+    delegate: str = "cpu",
 ) -> None:
     # This mode parallelizes per-frame processing using IMAGE mode pipelines.
     # Trade-off: no temporal tracking/smoothing, but better CPU utilization and throughput.
@@ -195,7 +196,12 @@ def _process_video_multithread(
     def worker(worker_id: int) -> None:
         pipe = MediaPipePipeline(
             models_dir=models_dir_path,
-            cfg=PipelineConfig(pose_variant=pose_variant, running_mode="image", enable_hands=enable_hands),
+            cfg=PipelineConfig(
+                pose_variant=pose_variant,
+                running_mode="image",
+                enable_hands=enable_hands,
+                delegate=delegate,
+            ),
         )
         while True:
             item = frame_q.get()
@@ -289,6 +295,7 @@ def run_realtime_latest_frame_smoke(
     show: bool = True,
     pose_variant: str = "full",
     enable_hands: bool = True,
+    delegate: str = "cpu",
     limit_frames: int | None = None,
 ) -> RealtimeLatestFrameMetrics:
     """Opt-in realtime smoke path: capture and inference share latest-frame semantics."""
@@ -346,6 +353,7 @@ def run_realtime_latest_frame_smoke(
                     pose_variant=pose_variant,
                     running_mode="video",
                     enable_hands=enable_hands,
+                    delegate=delegate,
                 ),
             )
             infer_started = time.monotonic()
@@ -439,6 +447,7 @@ def run(
     out_path: str | None = None,
     pose_variant: str = "full",
     enable_hands: bool = True,
+    delegate: str = "cpu",
 ) -> None:
     cap = _open_capture(source)
     if not cap.isOpened():
@@ -453,7 +462,12 @@ def run(
     models_dir_path = models_dir()
     pipe = MediaPipePipeline(
         models_dir=models_dir_path,
-        cfg=PipelineConfig(pose_variant=pose_variant, running_mode="video", enable_hands=enable_hands),
+        cfg=PipelineConfig(
+            pose_variant=pose_variant,
+            running_mode="video",
+            enable_hands=enable_hands,
+            delegate=delegate,
+        ),
     )
 
     writer: cv2.VideoWriter | None = None
@@ -513,6 +527,7 @@ def run_realtime_parallel(
     pose_variant: str = "full",
     enable_hands: bool = True,
     workers: int = 4,
+    delegate: str = "cpu",
 ) -> None:
     """Realtime camera path that fans inference out across multiple IMAGE-mode pipelines.
 
@@ -534,7 +549,10 @@ def run_realtime_parallel(
 
     engine = ParallelPoseEngine(
         pipeline_factory=default_pipeline_factory(
-            models_dir=models_dir(), pose_variant=pose_variant, enable_hands=enable_hands
+            models_dir=models_dir(),
+            pose_variant=pose_variant,
+            enable_hands=enable_hands,
+            delegate=delegate,
         ),
         workers=max(1, int(workers)),
         drop_when_full=True,
@@ -610,6 +628,12 @@ def main() -> None:
     )
     p.add_argument("--limit-frames", type=int, default=None, help="Optional frame cap for smoke modes")
     p.add_argument(
+        "--delegate",
+        default="cpu",
+        choices=["cpu", "gpu"],
+        help="Explicit MediaPipe delegate opt-in. Defaults to cpu; gpu falls back to cpu if unavailable.",
+    )
+    p.add_argument(
         "--workers",
         type=int,
         default=1,
@@ -625,6 +649,7 @@ def main() -> None:
             show=not args.no_show,
             pose_variant=args.pose,
             enable_hands=not args.no_hands,
+            delegate=args.delegate,
             limit_frames=args.limit_frames,
         )
         print(_metrics_to_dict(metrics))
@@ -642,6 +667,7 @@ def main() -> None:
             pose_variant=args.pose,
             enable_hands=not args.no_hands,
             workers=max(1, int(args.workers)),
+            delegate=args.delegate,
         )
     elif args.source.isdigit() and args.workers and args.workers > 1:
         # Realtime camera with multi-core parallel inference (IMAGE mode, drops frames
@@ -653,6 +679,7 @@ def main() -> None:
             pose_variant=args.pose,
             enable_hands=not args.no_hands,
             workers=max(1, int(args.workers)),
+            delegate=args.delegate,
         )
     else:
         run(
@@ -661,6 +688,7 @@ def main() -> None:
             out_path=args.out,
             pose_variant=args.pose,
             enable_hands=not args.no_hands,
+            delegate=args.delegate,
         )
 
 

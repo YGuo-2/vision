@@ -46,6 +46,11 @@ export type RecordState = {
   lastError: string | null;
 };
 
+export type LatestFrameBytes = {
+  frameId: number;
+  bytes: ArrayBuffer;
+};
+
 const mockListeners = new Set<(event: BridgeEnvelope) => void>();
 
 export function isTauriRuntime(): boolean {
@@ -90,7 +95,7 @@ export async function selectDirectory(): Promise<string | null> {
   return invoke<string | null>("select_directory");
 }
 
-export async function fetchLatestFrameBytes(payload: JsonRecord): Promise<ArrayBuffer | null> {
+export async function fetchLatestFrameBytes(payload: JsonRecord): Promise<LatestFrameBytes | null> {
   const sessionId = typeof payload.sessionId === "string" ? payload.sessionId : "";
   const frameToken = typeof payload.frameToken === "string" ? payload.frameToken : "";
   const frameHandle = typeof payload.frameHandle === "string" ? payload.frameHandle : "";
@@ -99,9 +104,9 @@ export async function fetchLatestFrameBytes(payload: JsonRecord): Promise<ArrayB
     return null;
   }
   if (!isTauriRuntime()) {
-    return new ArrayBuffer(0);
+    return { frameId, bytes: new ArrayBuffer(0) };
   }
-  return invoke<ArrayBuffer>("latest_frame", {
+  const response = await invoke<ArrayBuffer>("latest_frame", {
     request: {
       sessionId,
       frameToken,
@@ -109,6 +114,15 @@ export async function fetchLatestFrameBytes(payload: JsonRecord): Promise<ArrayB
       frameHandle
     }
   });
+  if (response.byteLength < 8) {
+    return null;
+  }
+  const view = new DataView(response, 0, 8);
+  const actualFrameId = view.getUint32(0, false) * 2 ** 32 + view.getUint32(4, false);
+  return {
+    frameId: actualFrameId,
+    bytes: response.slice(8)
+  };
 }
 
 function nextRequestId(): string {

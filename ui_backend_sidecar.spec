@@ -4,10 +4,10 @@ r"""PyInstaller sidecar for the Vue/Tauri desktop UI bridge.
 Build command from the repository root:
     .\.venv\Scripts\python.exe -m PyInstaller ui_backend_sidecar.spec --noconfirm --clean
 
-The output is ``dist/vision-ui-backend.exe``. The Tauri packaging helper copies
-that file into ``frontend/src-tauri/resources/`` so it is bundled next to the
-Windows Tauri executable resources. The executable keeps stdin/stdout open for
-the JSON bridge protocol.
+The output is the onedir folder ``dist/vision-ui-backend/``. The Tauri packaging
+helper copies that folder into ``frontend/src-tauri/resources/`` so it is bundled
+next to the Windows Tauri executable resources. The executable keeps
+stdin/stdout open for the JSON bridge protocol.
 """
 
 from PyInstaller.utils.hooks import collect_all
@@ -77,9 +77,8 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
+    exclude_binaries=True,
     name="vision-ui-backend",
     debug=False,
     bootloader_ignore_signals=False,
@@ -92,4 +91,13 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    name="vision-ui-backend",
 )

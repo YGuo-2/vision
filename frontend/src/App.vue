@@ -23,7 +23,6 @@ import {
   sanitizedRawEnvelope,
   shouldApplyModelDownloadStartResponse,
   shouldApplySessionStartResponse,
-  shouldRenderPreviewFrameAt,
   sessionStartFailureState,
   sessionStatusFromJobEvent
 } from "./bridge-state";
@@ -91,11 +90,11 @@ type TechIndicatorRow = {
 
 const cameras = ref<CameraEntry[]>([]);
 const cameraIndex = ref<number>(0);
-const sourceKind = ref<SourceKind>("none");
+const sourceKind = ref<SourceKind>("camera");
 const videoPath = ref("");
-const poseVariant = ref<"lite" | "full" | "heavy">("full");
+const poseVariant = ref<"lite" | "full" | "heavy">("lite");
 const workers = ref(1);
-const enableHands = ref(true);
+const enableHands = ref(false);
 const recordDir = ref("");
 const defaultRecordDir = "Python outputs_dir()";
 
@@ -170,15 +169,8 @@ const canStart = computed(() => {
   return videoPath.value.trim().length > 0;
 });
 
-const modelSummary = computed(() => {
-  if (models.value.length === 0) return "模型状态未刷新";
-  const active = models.value.filter((model) => model.active);
-  const missing = active.filter((model) => !model.installed);
-  if (missing.length === 0) {
-    return active.map((model) => `${model.label} 已就绪`).join(" / ");
-  }
-  return `缺失：${missing.map((model) => model.label).join(" / ")}`;
-});
+const activeModels = computed(() => models.value.filter((model) => model.active));
+const missingActiveModels = computed(() => activeModels.value.filter((model) => !model.installed));
 
 const compareResult = computed(() => {
   const result = analysisResult.value?.compare;
@@ -219,13 +211,11 @@ const techIndicatorRows = computed<TechIndicatorRow[]>(() => {
 });
 
 let unlisten: (() => void) | undefined;
-let lastPreviewFrameAt = 0;
 let pendingFrame: PendingFrame | null = null;
 let latestFrameIdentity: FrameIdentity | null = null;
 let frameRenderRaf: number | null = null;
-// 上限保护:仅在后端异常突发时限速,正常 30fps(帧间隔 ~33ms)不受影响。
-// 取 16ms(~60fps 上限)而非 33ms,避免与 30fps 帧到达相位抖动导致周期性丢帧。
-const PREVIEW_FRAME_MIN_INTERVAL_MS = 16;
+let isRenderingFrame = false;
+let lastDrawnFrameId = 0;
 
 // 后台预热 MediaPipe pipeline，使点击「开始」时模型已就绪、首帧更快出现。
 // 失败静默：预热只是优化，失败时正常流程会退回懒加载路径。
@@ -388,7 +378,6 @@ async function startSession(): Promise<void> {
   clearPreviewCanvas();
   cancelPendingFrameRender();
   frameIndex.value = 0;
-  lastPreviewFrameAt = Number.NEGATIVE_INFINITY;
   const pendingSessionId = nextBridgeId("session");
   const pendingJobId = nextBridgeId("session-job");
   sessionId.value = pendingSessionId;
@@ -594,9 +583,6 @@ function handleBridgeEvent(event: BridgeEnvelope): void {
     if (!acceptLatestFrameIdentity(payload, event.sessionId ?? null, event.jobId ?? null)) {
       return;
     }
-    if (!shouldRenderPreviewFrame()) {
-      return;
-    }
     queueLatestFrame(payload, event.sessionId ?? null, event.jobId ?? null);
   }
   if (event.event === "record.status") {
@@ -675,53 +661,90 @@ function queueLatestFrame(payload: SessionFramePayload, eventSessionId: string |
     return;
   }
   pendingFrame = { payload, sessionId: eventSessionId, jobId: eventJobId, frameId, frameHandle };
+  if (isRenderingFrame) {
+    return;
+  }
   if (frameRenderRaf == null) {
     frameRenderRaf = window.requestAnimationFrame(() => {
       frameRenderRaf = null;
+      void drainLatestFrameRender();
+    });
+  }
+}
+
+async function drainLatestFrameRender(): Promise<void> {
+  if (isRenderingFrame) {
+    return;
+  }
+  isRenderingFrame = true;
+  try {
+    while (pendingFrame) {
       const next = pendingFrame;
       pendingFrame = null;
-      if (next) {
-        void renderLatestFrame(next);
-      }
+      await renderLatestFrame(next);
+    }
+  } finally {
+    isRenderingFrame = false;
+  }
+  if (pendingFrame && frameRenderRaf == null) {
+    frameRenderRaf = window.requestAnimationFrame(() => {
+      frameRenderRaf = null;
+      void drainLatestFrameRender();
     });
   }
 }
 
 async function renderLatestFrame(frame: PendingFrame): Promise<void> {
   try {
-    const bytes = await fetchLatestFrameBytes(frame.payload);
-    if (!bytes) return;
-    if (!isPendingFrameCurrent(frame)) {
+    const response = await fetchLatestFrameBytes(frame.payload);
+    if (!response) return;
+    const actualFrame: FrameIdentity = {
+      sessionId: frame.sessionId,
+      jobId: frame.jobId,
+      frameId: response.frameId,
+      frameHandle: frame.frameHandle
+    };
+    if (!isDrawableFrame(actualFrame)) {
       return;
     }
-    const blob = new Blob([bytes], { type: "image/jpeg" });
+    const blob = new Blob([response.bytes], { type: "image/jpeg" });
     const bitmap = await createImageBitmap(blob);
     try {
       const canvas = previewCanvas.value;
-      if (!canvas || !isPendingFrameCurrent(frame)) {
+      if (!canvas || !isDrawableFrame(actualFrame)) {
         return;
       }
-      canvas.width = bitmap.width;
-      canvas.height = bitmap.height;
+      if (canvas.width !== bitmap.width) {
+        canvas.width = bitmap.width;
+      }
+      if (canvas.height !== bitmap.height) {
+        canvas.height = bitmap.height;
+      }
       const ctx = canvas.getContext("2d");
       if (!ctx) return;
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       ctx.drawImage(bitmap, 0, 0);
+      lastDrawnFrameId = response.frameId;
       applyFrameMetadata(frame.payload);
     } finally {
       bitmap.close();
     }
   } catch (error) {
-    errorText.value = errorMessage(error, "读取最新预览帧失败");
+    const message = errorMessage(error, "读取最新预览帧失败");
+    if (!message.includes("stale")) {
+      errorText.value = message;
+    }
   }
 }
 
-function isPendingFrameCurrent(frame: PendingFrame): boolean {
-  return (
-    frame.sessionId === sessionId.value &&
-    frame.jobId === jobId.value &&
-    isCurrentFrameIdentity(frame, latestFrameIdentity)
-  );
+function isDrawableFrame(frame: FrameIdentity): boolean {
+  if (frame.sessionId !== sessionId.value || frame.jobId !== jobId.value) {
+    return false;
+  }
+  if (frame.frameId < lastDrawnFrameId) {
+    return false;
+  }
+  return isCurrentFrameIdentity(frame, { sessionId: frame.sessionId, jobId: frame.jobId, frameId: lastDrawnFrameId, frameHandle: "" });
 }
 
 function applyFrameMetadata(payload: SessionFramePayload): void {
@@ -786,18 +809,10 @@ function shouldApplyBridgeEvent(event: BridgeEnvelope): boolean {
   });
 }
 
-function shouldRenderPreviewFrame(): boolean {
-  const now = Date.now();
-  if (!shouldRenderPreviewFrameAt(now, lastPreviewFrameAt, PREVIEW_FRAME_MIN_INTERVAL_MS)) {
-    return false;
-  }
-  lastPreviewFrameAt = now;
-  return true;
-}
-
 function cancelPendingFrameRender(): void {
   pendingFrame = null;
   latestFrameIdentity = null;
+  lastDrawnFrameId = 0;
   if (frameRenderRaf != null) {
     window.cancelAnimationFrame(frameRenderRaf);
     frameRenderRaf = null;
@@ -938,48 +953,22 @@ function applyRecordPayload(payload: RecordState): void {
 <template>
   <main class="app-shell">
     <aside class="control-rail">
-      <section class="brand-block">
-        <div class="brand-mark">V</div>
-        <div>
-          <h1>Vision 动作识别与评分</h1>
-          <p>Vue + Tauri 桌面前端</p>
-        </div>
-      </section>
-
       <section class="panel">
-        <div class="panel-title">输入源</div>
-        <div class="segmented">
-          <button :class="{ active: sourceKind === 'none' }" :disabled="isRunning" @click="sourceKind = 'none'">
-            未选择
-          </button>
-          <button :class="{ active: sourceKind === 'camera' }" :disabled="isRunning" @click="sourceKind = 'camera'">
-            摄像头
-          </button>
-          <button :class="{ active: sourceKind === 'video' }" :disabled="isRunning" @click="sourceKind = 'video'">
-            视频文件
-          </button>
+        <div class="panel-toolbar">
+          <div class="panel-title">主要操作</div>
+          <button class="settings-toggle" @click="showSettingsPanel = !showSettingsPanel">⚙ 设置</button>
         </div>
-        <template v-if="sourceKind === 'camera'">
-          <div class="button-row">
-            <button class="secondary-button" :disabled="isRunning" @click="refreshCameras">刷新摄像头</button>
-            <button class="secondary-button" :disabled="isRunning || cameras.length === 0" @click="refreshModels">
-              刷新模型
-            </button>
-          </div>
-          <label class="field-label" for="camera">选择摄像头</label>
+        <label class="field-label" for="camera">选择摄像头：</label>
+        <div class="path-row">
           <select id="camera" v-model.number="cameraIndex" :disabled="isRunning || cameras.length === 0">
             <option v-for="camera in cameras" :key="camera.index" :value="camera.index">
               {{ camera.label }}
             </option>
           </select>
-        </template>
-        <template v-else-if="sourceKind === 'video'">
-          <label class="field-label" for="video-path">视频路径</label>
-          <input id="video-path" v-model="videoPath" :disabled="isRunning" placeholder="C:\\videos\\student.mp4" />
-        </template>
-        <p v-else class="hint-text">请选择摄像头或视频文件后开始识别。</p>
+          <button class="secondary-button" :disabled="isRunning" @click="refreshCameras">刷新</button>
+        </div>
 
-        <label class="field-label" for="model">人体姿态模型</label>
+        <label class="field-label" for="model">人体姿态模型：</label>
         <select id="model" v-model="poseVariant" :disabled="isRunning" @change="refreshModels">
           <option value="lite">lite</option>
           <option value="full">full</option>
@@ -989,36 +978,50 @@ function applyRecordPayload(payload: RecordState): void {
           <button class="primary-button" :disabled="!canStart" @click="startSession">开始</button>
           <button class="secondary-button" :disabled="!isRunning" @click="stopSession">停止</button>
         </div>
-      </section>
 
-      <section class="panel">
-        <div class="panel-title">录制</div>
-        <button class="secondary-button" :disabled="!isRunning" @click="toggleRecord">
-          {{ recordState.buttonText }}
-        </button>
-        <button class="secondary-button" :disabled="!recordState.stopEnabled" @click="stopRecord">结束录制</button>
-        <label class="field-label" for="record-dir">保存目录</label>
-        <div class="path-row">
-          <input id="record-dir" v-model="recordDir" :disabled="isRunning" :placeholder="defaultRecordDir" />
-          <button class="secondary-button" :disabled="isRunning" @click="selectRecordDir">选择目录</button>
+        <div class="subgroup">
+          <div class="subgroup-title">录制</div>
+          <button class="secondary-button" :disabled="!isRunning" @click="toggleRecord">
+            {{ recordState.buttonText }}
+          </button>
+          <button class="secondary-button" :disabled="!recordState.stopEnabled" @click="stopRecord">结束录制</button>
+          <label class="field-label" for="record-dir">保存目录：</label>
+          <div class="path-row">
+            <input id="record-dir" v-model="recordDir" :disabled="isRunning" :placeholder="defaultRecordDir" />
+            <button class="secondary-button" :disabled="isRunning" @click="selectRecordDir">选择…</button>
+          </div>
+          <p class="hint-text">留空时使用默认输出目录：{{ defaultRecordDir }}</p>
+          <p v-if="recordState.resultPath" class="hint-text">保存：{{ recordState.resultPath }}</p>
         </div>
-        <p class="hint-text">留空时使用默认输出目录：{{ defaultRecordDir }}</p>
-        <p v-if="recordState.resultPath" class="hint-text">保存：{{ recordState.resultPath }}</p>
+
+        <button class="analysis-button" @click="showAnalysisPanel = !showAnalysisPanel">动作分析…</button>
       </section>
 
       <section class="panel">
         <div class="panel-title">次要选项</div>
-        <label class="field-label" for="workers">线程数</label>
+        <p class="hint-text">{{ sourceHint }}</p>
+        <label class="field-label" for="workers">线程数（&gt;1：多核并行，关闭时序平滑）：</label>
         <input id="workers" v-model.number="workers" :disabled="isRunning" min="1" type="number" />
         <label class="check-row">
           <input v-model="enableHands" :disabled="isRunning" type="checkbox" @change="refreshModels" />
-          启用手部检测
+          启用手部检测（V 手势 / 手部骨架）
         </label>
-        <button class="analysis-button" @click="showAnalysisPanel = !showAnalysisPanel">动作分析…</button>
       </section>
 
       <section v-if="showAnalysisPanel" class="panel analysis-panel">
         <div class="panel-title">动作分析</div>
+        <div class="subgroup">
+          <div class="subgroup-title">实时输入源</div>
+          <label class="field-label" for="source-kind">输入源类型</label>
+          <select id="source-kind" v-model="sourceKind" :disabled="isRunning">
+            <option value="camera">摄像头</option>
+            <option value="video">视频文件</option>
+          </select>
+          <template v-if="sourceKind === 'video'">
+            <label class="field-label" for="video-path">视频路径</label>
+            <input id="video-path" v-model="videoPath" :disabled="isRunning" placeholder="C:\\videos\\student.mp4" />
+          </template>
+        </div>
         <label class="field-label" for="base-video">基准视频</label>
         <input id="base-video" v-model="baseVideo" placeholder="C:\\videos\\teacher.mp4" />
         <label class="field-label" for="template-path">已有模板路径</label>
@@ -1106,44 +1109,6 @@ function applyRecordPayload(payload: RecordState): void {
           </div>
         </div>
       </section>
-
-      <section class="panel">
-        <div class="panel-title">模型状态</div>
-        <p class="hint-text">{{ modelSummary }}</p>
-        <p v-if="missingModelKeys.length" class="error-text">缺失模型：{{ missingModelKeys.join(", ") }}</p>
-        <button class="secondary-button" @click="showSettingsPanel = !showSettingsPanel">设置</button>
-        <div v-if="showSettingsPanel" class="settings-panel">
-          <p class="hint-text">模型目录：{{ modelsDir || "-" }}</p>
-          <p v-if="yoloRuntimeMessage" class="hint-text">{{ yoloRuntimeMessage }}</p>
-          <div class="button-row">
-            <button class="secondary-button" @click="refreshModels">刷新状态</button>
-            <button class="primary-button" :disabled="missingModelKeys.length === 0 || Boolean(modelDownloadJobId)" @click="downloadAllMissing">
-              下载全部缺失
-            </button>
-          </div>
-          <button class="secondary-button" :disabled="!modelDownloadJobId" @click="cancelModelDownload">
-            取消下载
-          </button>
-          <p class="hint-text">下载状态：{{ modelDownloadStatus }} · {{ formatProgress(modelDownloadProgress) }}</p>
-          <div v-for="model in models" :key="model.key" class="model-row">
-            <div>
-              <strong>{{ model.label }}</strong>
-              <span>{{ model.key }} · {{ model.category ?? "mediapipe" }} · {{ model.profile ?? model.key }} · {{ model.defaultRouteEligible === false ? "不进默认路由" : "可进默认路由" }} · {{ model.installed ? "已安装" : "缺失" }} · {{ model.active ? "当前启用" : "未启用" }}</span>
-              <span>大小：{{ model.sizeMb ?? "-" }} MB</span>
-              <span>用途：{{ model.purpose ?? "-" }}</span>
-              <span>许可：{{ model.license ?? "-" }}</span>
-              <span>代理：{{ model.proxy ?? "-" }}</span>
-              <span>离线安装：{{ model.offlineInstall ?? "-" }}</span>
-              <span>下载提示：{{ model.downloadHint ?? "-" }}</span>
-              <span>path：{{ model.path ?? "-" }}</span>
-              <span v-if="model.note">{{ model.note }}</span>
-            </div>
-            <button class="secondary-button" :disabled="Boolean(modelDownloadJobId) || model.downloadable === false" @click="downloadModel(model.key)">
-              {{ model.downloadable === false ? "手动安装" : (model.installed ? "重新下载" : "下载") }}
-            </button>
-          </div>
-        </div>
-      </section>
     </aside>
 
     <section class="preview-stage">
@@ -1171,19 +1136,70 @@ function applyRecordPayload(payload: RecordState): void {
           <strong>{{ actionsText }}</strong>
         </div>
         <div>
-          <span class="metric-label">FPS</span>
-          <strong>{{ fpsText }}</strong>
-        </div>
-        <div>
           <span class="metric-label">进度</span>
           <strong>{{ progressText }}</strong>
         </div>
       </div>
       <div v-if="errorText" class="error-strip">{{ errorText }}</div>
-      <details class="raw-panel">
-        <summary>Raw JSON</summary>
-        <pre>{{ rawJson }}</pre>
-      </details>
     </section>
+
+    <div v-if="showSettingsPanel" class="modal-overlay" @click.self="showSettingsPanel = false">
+      <div class="modal-dialog" role="dialog" aria-label="设置">
+        <div class="modal-header">
+          <div class="modal-title">设置</div>
+          <button class="modal-close" aria-label="关闭" @click="showSettingsPanel = false">×</button>
+        </div>
+        <div class="modal-body">
+          <div class="subgroup">
+            <div class="subgroup-title">当前模型</div>
+            <p class="settings-text">姿态模型：{{ poseVariant }}　手部检测：{{ enableHands ? "开启" : "关闭" }}</p>
+            <p v-if="activeModels.length === 0" class="settings-text">模型状态未刷新</p>
+            <p v-for="model in activeModels" :key="model.key" class="settings-text">
+              {{ model.label }}（{{ model.installed ? "已就绪" : "缺失" }}）
+            </p>
+            <p v-if="missingActiveModels.length" class="error-text">⚠ 缺失模型会导致无法开始识别，请在下方下载后再使用。</p>
+          </div>
+
+          <div class="subgroup">
+            <div class="subgroup-title">模型管理</div>
+            <p class="settings-text">模型目录：{{ modelsDir || "-" }}</p>
+            <p v-if="yoloRuntimeMessage" class="settings-text">{{ yoloRuntimeMessage }}</p>
+            <div v-for="model in models" :key="model.key" class="model-row">
+              <div class="model-main">
+                <span class="model-name">{{ model.label }}</span>
+                <span class="model-state">{{ model.active ? "● 使用中 " : "" }}{{ model.installed ? (model.sizeMb ? `已安装 (${model.sizeMb} MB)` : "已安装") : (model.sizeMb ? `未安装 约 ${model.sizeMb} MB` : "未安装") }}</span>
+                <button class="secondary-button model-btn" :disabled="Boolean(modelDownloadJobId) || model.downloadable === false" @click="downloadModel(model.key)">
+                  {{ model.downloadable === false ? "手动安装" : (model.installed ? "重新下载" : "下载") }}
+                </button>
+              </div>
+              <div class="model-meta">
+                <span>{{ model.key }} · {{ model.category ?? "mediapipe" }} · {{ model.defaultRouteEligible === false ? "不进默认路由" : "可进默认路由" }}</span>
+                <span v-if="model.license">许可：{{ model.license }}</span>
+                <span v-if="model.offlineInstall">离线安装：{{ model.offlineInstall }}</span>
+                <span v-if="model.downloadHint">下载提示：{{ model.downloadHint }}</span>
+                <span v-if="model.note">{{ model.note }}</span>
+              </div>
+            </div>
+            <div class="button-row">
+              <button class="primary-button" :disabled="missingModelKeys.length === 0 || Boolean(modelDownloadJobId)" @click="downloadAllMissing">
+                下载全部缺失模型
+              </button>
+              <button class="secondary-button" @click="refreshModels">刷新状态</button>
+            </div>
+            <button class="secondary-button" :disabled="!modelDownloadJobId" @click="cancelModelDownload">
+              取消下载
+            </button>
+          </div>
+
+          <div class="subgroup">
+            <div class="subgroup-title">状态</div>
+            <p class="settings-text">{{ modelDownloadStatus }}</p>
+            <progress class="settings-progress" :value="modelDownloadProgress?.percent ?? 0" max="100"></progress>
+            <p class="settings-text">{{ formatProgress(modelDownloadProgress) }}</p>
+            <p class="settings-note">说明：模型从 Google 官方源下载。若长时间无进度或失败，通常是网络无法访问 storage.googleapis.com，请自行配置代理后重试。</p>
+          </div>
+        </div>
+      </div>
+    </div>
   </main>
 </template>

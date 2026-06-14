@@ -28,6 +28,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from apps.camera_enum import DEFAULT_SCAN_LIMIT, CameraEntry, InputSourceState, enumerate_cameras
 from core.backend_router import (
+    BACKEND_MEDIAPIPE,
     BACKEND_YOLO,
     CAPABILITY_FINGERS,
     ModelAvailability,
@@ -66,10 +67,10 @@ CAP_PROP_FRAME_COUNT = 7
 
 
 # 预览帧瘦身参数（仅影响送往前端的副本，不影响录制原画质）。
-PREVIEW_JPEG_QUALITY = 70
-PREVIEW_MAX_EDGE = 960
-PREVIEW_FRAME_EVENT_MIN_INTERVAL_S = 1.0 / 30.0
-PREVIEW_CAPTURE_IDLE_SLEEP_S = 0.001
+PREVIEW_JPEG_QUALITY = 58
+PREVIEW_MAX_EDGE = 720
+PREVIEW_FRAME_EVENT_MIN_INTERVAL_S = 1.0 / 20.0
+PREVIEW_CAPTURE_IDLE_SLEEP_S = 0.003
 FRAME_CHANNEL_HOST = "127.0.0.1"
 FRAME_CHANNEL_WRITE_TIMEOUT_S = 0.5
 
@@ -371,9 +372,10 @@ class BridgeMessageWriter:
 class PreviewSessionOptions:
     source: str
     source_kind: str
-    pose_variant: str = "full"
+    pose_variant: str = "lite"
     workers: int = 1
-    enable_hands: bool = True
+    enable_hands: bool = False
+    delegate: str = "cpu"
     requires_capabilities: tuple[str, ...] = ()
     record_dir: str | None = None
     frame_limit: int | None = None
@@ -387,6 +389,7 @@ class PreviewSessionOptions:
             "poseVariant": self.pose_variant,
             "workers": self.workers,
             "enableHands": self.enable_hands,
+            "delegate": self.delegate,
             "requiresCapabilities": list(self.requires_capabilities),
             "recordDir": self.record_dir,
             "frameLimit": self.frame_limit,
@@ -410,6 +413,19 @@ class _CapturedPreviewFrame:
     index: int
     frame: Any
     captured_at: float
+
+
+@dataclass(frozen=True)
+class _PreviewPublishFrame:
+    annotated: Any
+    actions: list[str]
+    frame_count: int
+    total: int
+    width: int
+    height: int
+    started_at: float
+    frame_meta: JsonDict | None = None
+    extra_payload: JsonDict | None = None
 
 
 class _LatestPreviewFrameBuffer:
@@ -457,6 +473,57 @@ class _LatestPreviewFrameBuffer:
             }
 
 
+class _LatestPreviewPublishBuffer:
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self._latest: _PreviewPublishFrame | None = None
+        self._closed = False
+        self._submitted = 0
+        self._dropped = 0
+        self._published = 0
+
+    def put(self, item: _PreviewPublishFrame) -> None:
+        with self._condition:
+            if self._latest is not None:
+                self._dropped += 1
+            self._latest = item
+            self._submitted += 1
+            self._condition.notify()
+
+    def get_latest(self, *, timeout: float) -> _PreviewPublishFrame | None:
+        with self._condition:
+            if self._latest is None and not self._closed:
+                self._condition.wait(timeout)
+            if self._latest is None:
+                return None
+            item = self._latest
+            self._latest = None
+            return item
+
+    def mark_published(self) -> None:
+        with self._condition:
+            self._published += 1
+
+    def close(self) -> None:
+        with self._condition:
+            self._closed = True
+            self._condition.notify_all()
+
+    @property
+    def closed(self) -> bool:
+        with self._condition:
+            return self._closed
+
+    def snapshot(self) -> JsonDict:
+        with self._condition:
+            return {
+                "submittedFrames": self._submitted,
+                "publishedPreviewFrames": self._published,
+                "droppedPreviewFrames": self._dropped,
+                "hasPendingPreviewFrame": self._latest is not None,
+            }
+
+
 class LatestFrameChannel:
     """Write preview bytes to the Rust-owned localhost latest-frame channel."""
 
@@ -473,6 +540,7 @@ class LatestFrameChannel:
         self._served = 0
         self._last_error: str | None = None
         self._last_published_at: float | None = None
+        self._conn: socket.socket | None = None
 
     @classmethod
     def from_payload(cls, *, session_id: str, payload: JsonDict) -> "LatestFrameChannel | None":
@@ -491,15 +559,15 @@ class LatestFrameChannel:
             self._payload_bytes = len(data)
             self._published += 1
             self._last_published_at = time.monotonic()
-        frame_handle = f"{self.session_id}:{frame_id}"
-        ack = self._write_frame(frame_id=frame_id, frame_handle=frame_handle, data=data)
-        with self._lock:
+            frame_handle = f"{self.session_id}:{frame_id}"
+            ack = self._write_frame(frame_id=frame_id, frame_handle=frame_handle, data=data)
             if ack:
                 self._dropped = int(ack.get("droppedFrames", self._dropped) or 0)
                 self._served = int(ack.get("servedFrames", self._served) or 0)
                 self._last_error = None
             else:
                 self._last_error = self._last_error or "Rust latest-frame channel did not acknowledge frame"
+            snapshot = self._snapshot_locked()
         return {
             "sessionId": self.session_id,
             "frameHandle": frame_handle,
@@ -509,64 +577,110 @@ class LatestFrameChannel:
             "frameId": frame_id,
             "frameBytes": len(data),
             "frameTransport": "tcp-length-prefixed",
-            "frameStore": self.snapshot(),
+            "frameStore": snapshot,
         }
 
     def snapshot(self) -> JsonDict:
         with self._lock:
-            age_ms = (
-                int(max(0.0, (time.monotonic() - self._last_published_at) * 1000.0))
-                if self._last_published_at is not None
-                else None
-            )
-            return {
-                "frameHost": self.host,
-                "framePort": self.port,
-                "frameToken": self.token,
-                "frameId": self._frame_id,
-                "frameBytes": self._payload_bytes,
-                "publishedFrames": self._published,
-                "droppedFrames": self._dropped,
-                "servedFrames": self._served,
-                "lastFrameAgeMs": age_ms,
-                "lastError": self._last_error,
-                "frameTransport": "tcp-length-prefixed",
-            }
+            return self._snapshot_locked()
 
     def close(self) -> None:
         # Rust owns latest-frame channel lifetime and performs delayed terminal
         # cleanup so the final published frame remains fetchable by pending RAF.
-        return None
+        with self._lock:
+            self._drop_connection_locked()
 
     def _write_frame(self, *, frame_id: int, frame_handle: str, data: bytes) -> JsonDict:
-        try:
-            with socket.create_connection((self.host, self.port), timeout=FRAME_CHANNEL_WRITE_TIMEOUT_S) as conn:
-                conn.settimeout(FRAME_CHANNEL_WRITE_TIMEOUT_S)
-                header = f"PUT {self.session_id} {self.token} {frame_id} {frame_handle}\n"
-                conn.sendall(header.encode("utf-8"))
-                conn.sendall(struct.pack(">I", len(data)))
-                if data:
-                    conn.sendall(data)
-                ack = conn.recv(512).decode("utf-8", errors="replace").strip()
-        except OSError as exc:
-            with self._lock:
-                self._last_error = str(exc)
-            return {}
-        if not ack.startswith("OK"):
-            with self._lock:
-                self._last_error = ack or "empty latest-frame ack"
-            return {}
-        parts = ack.split()
-        metrics: JsonDict = {}
-        for part in parts[1:]:
-            if "=" not in part:
-                continue
-            key, value = part.split("=", 1)
+        message = (
+            f"PUT {self.session_id} {self.token} {frame_id} {frame_handle}\n".encode("utf-8")
+            + struct.pack(">I", len(data))
+            + data
+        )
+        last_error = ""
+        for _attempt in range(2):
             try:
-                metrics[key] = int(value)
-            except ValueError:
-                metrics[key] = value
-        return metrics
+                conn = self._connect_locked()
+                conn.sendall(message)
+                ack = self._recv_ack(conn)
+            except OSError as exc:
+                last_error = str(exc)
+                self._drop_connection_locked()
+                continue
+            if not ack.startswith("OK"):
+                self._last_error = ack or "empty latest-frame ack"
+                if not ack:
+                    self._drop_connection_locked()
+                return {}
+            parts = ack.split()
+            metrics: JsonDict = {}
+            for part in parts[1:]:
+                if "=" not in part:
+                    continue
+                key, value = part.split("=", 1)
+                try:
+                    metrics[key] = int(value)
+                except ValueError:
+                    metrics[key] = value
+            return metrics
+        self._last_error = last_error or "latest-frame publish failed"
+        return {}
+
+    def _connect_locked(self) -> socket.socket:
+        if self._conn is not None:
+            return self._conn
+        conn = socket.create_connection((self.host, self.port), timeout=FRAME_CHANNEL_WRITE_TIMEOUT_S)
+        conn.settimeout(FRAME_CHANNEL_WRITE_TIMEOUT_S)
+        conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        self._conn = conn
+        return conn
+
+    def _drop_connection_locked(self) -> None:
+        conn = self._conn
+        self._conn = None
+        if conn is None:
+            return
+        try:
+            conn.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            conn.close()
+        except OSError:
+            pass
+
+    @staticmethod
+    def _recv_ack(conn: socket.socket) -> str:
+        chunks: list[bytes] = []
+        while True:
+            chunk = conn.recv(1)
+            if not chunk:
+                break
+            if chunk == b"\n":
+                break
+            chunks.append(chunk)
+            if len(chunks) > 512:
+                break
+        return b"".join(chunks).decode("utf-8", errors="replace").strip()
+
+    def _snapshot_locked(self) -> JsonDict:
+        age_ms = (
+            int(max(0.0, (time.monotonic() - self._last_published_at) * 1000.0))
+            if self._last_published_at is not None
+            else None
+        )
+        return {
+            "frameHost": self.host,
+            "framePort": self.port,
+            "frameToken": self.token,
+            "frameId": self._frame_id,
+            "frameBytes": self._payload_bytes,
+            "publishedFrames": self._published,
+            "droppedFrames": self._dropped,
+            "servedFrames": self._served,
+            "lastFrameAgeMs": age_ms,
+            "lastError": self._last_error,
+            "frameTransport": "tcp-length-prefixed",
+        }
 
 
 @dataclass(frozen=True)
@@ -1064,6 +1178,7 @@ class PreviewSessionService:
         job_manager: BridgeJobManager | None = None,
         capture_factory: Callable[[str], Any] | None = None,
         pipeline_factory: Callable[[PreviewSessionOptions], Any] | None = None,
+        parallel_pipeline_factory: Callable[[PreviewSessionOptions], Callable[[], Any]] | None = None,
         frame_encoder: Callable[[Any], bytes] | None = None,
         recording_factory: Callable[[PreviewSessionOptions], Any] | None = None,
         monotonic: Callable[[], float] | None = None,
@@ -1071,6 +1186,7 @@ class PreviewSessionService:
         self._job_manager = job_manager
         self._capture_factory = capture_factory or _default_capture_factory
         self._pipeline_factory = pipeline_factory or _default_pipeline_factory
+        self._parallel_pipeline_factory = parallel_pipeline_factory or _default_parallel_pipeline_factory
         self._frame_encoder = frame_encoder or _default_frame_encoder
         self._recording_factory = recording_factory or _default_recording_factory
         self._monotonic = monotonic or time.monotonic
@@ -1080,18 +1196,18 @@ class PreviewSessionService:
         # 仅摄像头会话复用（其时间戳基于单调时钟，跨会话单调递增）；视频文件不缓存复用，
         # 因其时间戳按 frame_index 计算，跨文件会回退，违反 VIDEO 模式时间戳单调约束。
         self._pipeline_cache_lock = threading.Lock()
-        self._pipeline_cache: dict[tuple[str, bool], Any] = {}
+        self._pipeline_cache: dict[tuple[str, str, bool], Any] = {}
 
     @property
     def manager(self) -> BridgeJobManager:
         return self._job_manager or DEFAULT_JOB_MANAGER
 
     @staticmethod
-    def _pipeline_cache_key(options: PreviewSessionOptions) -> tuple[str, str, bool]:
+    def _pipeline_cache_key(options: PreviewSessionOptions) -> tuple[str, str, bool, str]:
         route = options.backend_route or {}
         backend = str(route.get("backend") or "mediapipe")
         model_profile = str(route.get("modelProfile") or options.pose_variant)
-        return (backend, model_profile, bool(options.enable_hands))
+        return (backend, model_profile, bool(options.enable_hands), str(options.delegate or "cpu"))
 
     def _acquire_pipeline(self, options: PreviewSessionOptions) -> tuple[Any, bool]:
         """返回 (pipeline, cached)。摄像头命中缓存则复用；否则新建。
@@ -1120,13 +1236,14 @@ class PreviewSessionService:
         """后台预建并缓存 MediaPipe pipeline，使后续「开始」命中缓存、首帧更快。"""
         try:
             pose_variant = str(
-                request.payload.get("poseVariant") or request.payload.get("pose_variant") or "full"
+                request.payload.get("poseVariant") or request.payload.get("pose_variant") or "lite"
             ).strip().lower()
             if pose_variant not in {"lite", "full", "heavy"}:
                 raise ValueError("poseVariant must be one of: lite, full, heavy")
             enable_hands = _payload_bool(
-                request.payload.get("enableHands", request.payload.get("enable_hands")), default=True
+                request.payload.get("enableHands", request.payload.get("enable_hands")), default=False
             )
+            delegate = _delegate_from_payload(request.payload)
         except ValueError as exc:
             return make_response(
                 request.request_id,
@@ -1139,15 +1256,21 @@ class PreviewSessionService:
             source_kind="camera",
             pose_variant=pose_variant,
             enable_hands=enable_hands,
+            delegate=delegate,
         )
 
         def _run(ctx: JobContext) -> JsonDict:
             self._acquire_pipeline(warmup_options)
-            return {"state": "ready", "poseVariant": pose_variant, "enableHands": enable_hands}
+            return {
+                "state": "ready",
+                "poseVariant": pose_variant,
+                "enableHands": enable_hands,
+                "delegate": delegate,
+            }
 
         record = self.manager.submit(
             "session.warmup",
-            {"poseVariant": pose_variant, "enableHands": enable_hands},
+            {"poseVariant": pose_variant, "enableHands": enable_hands, "delegate": delegate},
             _run,
             request_id=request.request_id,
             job_id=request.job_id,
@@ -1160,6 +1283,7 @@ class PreviewSessionService:
                 "jobId": record.job_id,
                 "poseVariant": pose_variant,
                 "enableHands": enable_hands,
+                "delegate": delegate,
             },
             job_id=record.job_id,
         )
@@ -1302,6 +1426,9 @@ class PreviewSessionService:
         pipe_cached = False
         recorder = self._recording_factory(options)
         frame_channel: LatestFrameChannel | None = None
+        preview_publish_buffer: _LatestPreviewPublishBuffer | None = None
+        preview_publisher_thread: threading.Thread | None = None
+        preview_publisher_errors: list[BaseException] = []
         frame_count = 0
         total = 0
         fps_for_ts = 30.0
@@ -1313,8 +1440,9 @@ class PreviewSessionService:
                 "state": "opening",
                 "source": options.source,
                 "sourceKind": options.source_kind,
-                "backendRoute": options.backend_route,
-            },
+                    "backendRoute": options.backend_route,
+                    "delegate": options.delegate,
+                },
         )
 
         try:
@@ -1341,8 +1469,16 @@ class PreviewSessionService:
                 emit=lambda event, payload: ctx.progress(event, payload),
             )
             self._register_active_session(active)
+            preview_publish_buffer = _LatestPreviewPublishBuffer()
+            preview_publisher_thread = self._start_preview_publisher(
+                ctx=ctx,
+                buffer=preview_publish_buffer,
+                errors=preview_publisher_errors,
+            )
 
-            pipe, pipe_cached = self._acquire_pipeline(options)
+            use_parallel_preview = _use_parallel_camera_preview(options)
+            if not use_parallel_preview:
+                pipe, pipe_cached = self._acquire_pipeline(options)
             started_at = self._monotonic()
             ctx.progress(
                 "session.status",
@@ -1355,11 +1491,19 @@ class PreviewSessionService:
                     "size": {"width": width, "height": height},
                     "frameChannel": None if frame_channel is None else frame_channel.snapshot(),
                     "backendRoute": options.backend_route,
+                    "workers": options.workers,
+                    "parallelPreview": use_parallel_preview,
+                    "delegate": _pipeline_delegate_payload(pipe) or {
+                        "requested": options.delegate,
+                        "active": options.delegate,
+                    },
                 },
             )
 
             realtime_stats: JsonDict = {}
             if is_file:
+                if pipe is None:
+                    raise RuntimeError("video preview requires a sequential pipeline")
                 frame_count = self._run_sequential_preview_loop(
                     ctx=ctx,
                     options=options,
@@ -1367,6 +1511,23 @@ class PreviewSessionService:
                     pipe=pipe,
                     recorder=recorder,
                     active=active,
+                    publish_buffer=preview_publish_buffer,
+                    publisher_errors=preview_publisher_errors,
+                    width=width,
+                    height=height,
+                    fps_for_ts=fps_for_ts,
+                    total=total,
+                    started_at=started_at,
+                )
+            elif use_parallel_preview:
+                frame_count, realtime_stats = self._run_parallel_realtime_camera_loop(
+                    ctx=ctx,
+                    options=options,
+                    cap=cap,
+                    recorder=recorder,
+                    active=active,
+                    publish_buffer=preview_publish_buffer,
+                    publisher_errors=preview_publisher_errors,
                     width=width,
                     height=height,
                     fps_for_ts=fps_for_ts,
@@ -1374,6 +1535,8 @@ class PreviewSessionService:
                     started_at=started_at,
                 )
             else:
+                if pipe is None:
+                    raise RuntimeError("camera preview requires a sequential pipeline")
                 frame_count, realtime_stats = self._run_realtime_camera_loop(
                     ctx=ctx,
                     options=options,
@@ -1381,6 +1544,8 @@ class PreviewSessionService:
                     pipe=pipe,
                     recorder=recorder,
                     active=active,
+                    publish_buffer=preview_publish_buffer,
+                    publisher_errors=preview_publisher_errors,
                     width=width,
                     height=height,
                     fps_for_ts=fps_for_ts,
@@ -1388,15 +1553,25 @@ class PreviewSessionService:
                     started_at=started_at,
                 )
 
+            self._stop_preview_publisher(preview_publish_buffer, preview_publisher_thread)
+            preview_publisher_thread = None
+            preview_publish_buffer = None
+            self._raise_preview_publisher_error(preview_publisher_errors, ctx)
+
             state = "stopped" if ctx.stopped() else "completed"
             status_payload: JsonDict = {
                 "state": state,
                 "frames": frame_count,
                 "totalFrames": total,
                 "backendRoute": options.backend_route,
+                "workers": options.workers,
             }
             if frame_channel is not None:
                 status_payload["frameChannel"] = frame_channel.snapshot()
+            if pipe is not None:
+                delegate_payload = _pipeline_delegate_payload(pipe)
+                if delegate_payload:
+                    status_payload["delegate"] = delegate_payload
             status_payload.update(realtime_stats)
             ctx.progress(
                 "session.status",
@@ -1409,12 +1584,19 @@ class PreviewSessionService:
                 "source": options.source,
                 "sourceKind": options.source_kind,
                 "backendRoute": options.backend_route,
+                "workers": options.workers,
             }
             if frame_channel is not None:
                 result["frameChannel"] = frame_channel.snapshot()
+            if pipe is not None:
+                delegate_payload = _pipeline_delegate_payload(pipe)
+                if delegate_payload:
+                    result["delegate"] = delegate_payload
             result.update(realtime_stats)
             return result
         finally:
+            if preview_publish_buffer is not None and preview_publisher_thread is not None:
+                self._stop_preview_publisher(preview_publish_buffer, preview_publisher_thread)
             result_path = None
             try:
                 result_path = recorder.close_session()
@@ -1444,6 +1626,8 @@ class PreviewSessionService:
         pipe: Any,
         recorder: Any,
         active: ActivePreviewSession,
+        publish_buffer: _LatestPreviewPublishBuffer,
+        publisher_errors: list[BaseException],
         width: int,
         height: int,
         fps_for_ts: float,
@@ -1467,8 +1651,8 @@ class PreviewSessionService:
             annotated_result = pipe.annotate(frame, timestamp_ms=timestamp_ms)
             annotated, actions, frame_meta = _normalize_annotate_result(annotated_result)
             frame_count += 1
-            self._emit_preview_frame(
-                ctx=ctx,
+            self._submit_preview_frame(
+                publish_buffer,
                 annotated=annotated,
                 actions=actions,
                 frame_count=frame_count,
@@ -1480,6 +1664,7 @@ class PreviewSessionService:
             )
             recorder.write_frame(annotated)
             self._emit_recording_error_if_needed(active)
+            self._raise_preview_publisher_error(publisher_errors, ctx)
 
             if total > 0 and (frame_count % 5 == 0 or frame_count == total):
                 ctx.progress("session.progress", _progress_payload(frame_count, total))
@@ -1497,6 +1682,8 @@ class PreviewSessionService:
         pipe: Any,
         recorder: Any,
         active: ActivePreviewSession,
+        publish_buffer: _LatestPreviewPublishBuffer,
+        publisher_errors: list[BaseException],
         width: int,
         height: int,
         fps_for_ts: float,
@@ -1555,8 +1742,8 @@ class PreviewSessionService:
 
                 now = self._monotonic()
                 if last_frame_event_at is None or now - last_frame_event_at >= PREVIEW_FRAME_EVENT_MIN_INTERVAL_S:
-                    self._emit_preview_frame(
-                        ctx=ctx,
+                    self._submit_preview_frame(
+                        publish_buffer,
                         annotated=annotated,
                         actions=actions,
                         frame_count=frame_count,
@@ -1574,6 +1761,7 @@ class PreviewSessionService:
 
                 recorder.write_frame(annotated)
                 self._emit_recording_error_if_needed(active)
+                self._raise_preview_publisher_error(publisher_errors, ctx)
 
                 if options.frame_limit is not None and frame_count >= options.frame_limit:
                     break
@@ -1588,6 +1776,218 @@ class PreviewSessionService:
             buffer.close()
             capture_thread.join(timeout=1.0)
 
+    def _run_parallel_realtime_camera_loop(
+        self,
+        *,
+        ctx: JobContext,
+        options: PreviewSessionOptions,
+        cap: Any,
+        recorder: Any,
+        active: ActivePreviewSession,
+        publish_buffer: _LatestPreviewPublishBuffer,
+        publisher_errors: list[BaseException],
+        width: int,
+        height: int,
+        fps_for_ts: float,
+        total: int,
+        started_at: float,
+    ) -> tuple[int, JsonDict]:
+        from core.parallel_pose_engine import ParallelPoseEngine
+
+        engine = ParallelPoseEngine(
+            pipeline_factory=self._parallel_pipeline_factory(options),
+            workers=options.workers,
+            drop_when_full=True,
+            queue_factor=1,
+            max_reorder_lag=max(1, options.workers * 2),
+        )
+        engine.start()
+
+        capture_stop = threading.Event()
+        capture_errors: list[BaseException] = []
+        meta_lock = threading.Lock()
+        meta_by_idx: dict[int, _CapturedPreviewFrame] = {}
+        capture_stats = {"captured": 0}
+
+        def _capture_and_submit() -> None:
+            source_index = 0
+            try:
+                while not capture_stop.is_set() and not ctx.stopped():
+                    ok, frame = cap.read()
+                    if not ok:
+                        break
+                    source_index += 1
+                    captured_at = self._monotonic()
+                    with meta_lock:
+                        capture_stats["captured"] = source_index
+                    infer_idx = engine.submit(frame)
+                    if infer_idx is not None:
+                        with meta_lock:
+                            meta_by_idx[infer_idx] = _CapturedPreviewFrame(
+                                index=source_index,
+                                frame=frame,
+                                captured_at=captured_at,
+                            )
+                    time.sleep(PREVIEW_CAPTURE_IDLE_SLEEP_S)
+            except BaseException as exc:  # noqa: BLE001 - surface capture failures through the job envelope.
+                capture_errors.append(exc)
+            finally:
+                engine.signal_input_done()
+
+        capture_thread = threading.Thread(
+            target=_capture_and_submit,
+            name=f"preview-parallel-capture-{ctx.job_id}",
+            daemon=True,
+        )
+        capture_thread.start()
+
+        frame_count = 0
+        last_frame_event_at: float | None = None
+        try:
+            while not ctx.stopped():
+                result = engine.get(timeout=0.05)
+                error = engine.take_error()
+                if error is not None:
+                    raise RuntimeError(f"并行预览推理失败：{error}") from error
+                if result is None:
+                    if engine.is_drained():
+                        break
+                    continue
+
+                with meta_lock:
+                    item = meta_by_idx.pop(result.index, None)
+                frame_count += 1
+                now = self._monotonic()
+                if last_frame_event_at is None or now - last_frame_event_at >= PREVIEW_FRAME_EVENT_MIN_INTERVAL_S:
+                    extra_payload: JsonDict = {
+                        "parallelPreview": True,
+                        "workersUsed": options.workers,
+                        "inferenceFrameIndex": result.index,
+                    }
+                    if item is not None:
+                        extra_payload.update(
+                            {
+                                "sourceFrameIndex": item.index,
+                                "sourceFrameAgeMs": int(max(0.0, (now - item.captured_at) * 1000.0)),
+                            }
+                        )
+                    self._submit_preview_frame(
+                        publish_buffer,
+                        annotated=result.annotated,
+                        actions=result.actions,
+                        frame_count=frame_count,
+                        total=total,
+                        width=width,
+                        height=height,
+                        started_at=started_at,
+                        extra_payload=extra_payload,
+                    )
+                    last_frame_event_at = now
+
+                recorder.write_frame(result.annotated)
+                self._emit_recording_error_if_needed(active)
+                self._raise_preview_publisher_error(publisher_errors, ctx)
+
+                if options.frame_limit is not None and frame_count >= options.frame_limit:
+                    break
+
+            if capture_errors and not ctx.stopped():
+                raise RuntimeError(f"摄像头采集失败：{capture_errors[0]}")
+            stats = engine.stats
+            with meta_lock:
+                captured = capture_stats["captured"]
+                pending_meta = len(meta_by_idx)
+            return frame_count, {
+                "parallelPreview": True,
+                "workersUsed": options.workers,
+                "capturedFrames": captured,
+                "submittedFrames": stats["submitted"],
+                "droppedFrames": stats["dropped"],
+                "renderedFrames": frame_count,
+                "emittedInferenceFrames": stats["emitted"],
+                "pendingInferenceFrames": pending_meta,
+            }
+        finally:
+            capture_stop.set()
+            engine.signal_input_done()
+            engine.close()
+            capture_thread.join(timeout=1.0)
+
+    def _start_preview_publisher(
+        self,
+        *,
+        ctx: JobContext,
+        buffer: _LatestPreviewPublishBuffer,
+        errors: list[BaseException],
+    ) -> threading.Thread:
+        def _publish_latest() -> None:
+            try:
+                while True:
+                    item = buffer.get_latest(timeout=0.05)
+                    if item is None:
+                        if buffer.closed:
+                            break
+                        continue
+                    buffer.mark_published()
+                    self._emit_preview_frame(
+                        ctx=ctx,
+                        annotated=item.annotated,
+                        actions=item.actions,
+                        frame_count=item.frame_count,
+                        total=item.total,
+                        width=item.width,
+                        height=item.height,
+                        started_at=item.started_at,
+                        frame_meta=item.frame_meta,
+                        extra_payload=item.extra_payload,
+                        publisher_snapshot=buffer.snapshot(),
+                    )
+            except BaseException as exc:  # noqa: BLE001 - surface publisher failures through the job envelope.
+                errors.append(exc)
+                buffer.close()
+
+        thread = threading.Thread(target=_publish_latest, name=f"preview-publisher-{ctx.job_id}", daemon=True)
+        thread.start()
+        return thread
+
+    @staticmethod
+    def _stop_preview_publisher(buffer: _LatestPreviewPublishBuffer, thread: threading.Thread) -> None:
+        buffer.close()
+        thread.join(timeout=2.0)
+
+    @staticmethod
+    def _raise_preview_publisher_error(errors: list[BaseException], ctx: JobContext) -> None:
+        if errors and not ctx.stopped():
+            raise RuntimeError(f"预览帧发布失败：{errors[0]}")
+
+    @staticmethod
+    def _submit_preview_frame(
+        publish_buffer: _LatestPreviewPublishBuffer,
+        *,
+        annotated: Any,
+        actions: list[str],
+        frame_count: int,
+        total: int,
+        width: int,
+        height: int,
+        started_at: float,
+        frame_meta: JsonDict | None = None,
+        extra_payload: JsonDict | None = None,
+    ) -> None:
+        publish_buffer.put(
+            _PreviewPublishFrame(
+                annotated=_copy_preview_frame(annotated),
+                actions=list(actions),
+                frame_count=frame_count,
+                total=total,
+                width=width,
+                height=height,
+                started_at=started_at,
+                frame_meta=None if frame_meta is None else dict(frame_meta),
+                extra_payload=None if extra_payload is None else dict(extra_payload),
+            )
+        )
+
     def _emit_preview_frame(
         self,
         *,
@@ -1601,6 +2001,7 @@ class PreviewSessionService:
         started_at: float,
         frame_meta: JsonDict | None = None,
         extra_payload: JsonDict | None = None,
+        publisher_snapshot: JsonDict | None = None,
     ) -> None:
         elapsed = self._monotonic() - started_at
         fps = frame_count / max(1e-6, elapsed)
@@ -1613,6 +2014,10 @@ class PreviewSessionService:
         active = None if ctx.session_id is None else self._active_session(ctx.session_id)
         if active is not None and active.frame_channel is not None:
             channel_payload = active.frame_channel.publish(bytes(encoded))
+        if publisher_snapshot:
+            frame_store = dict(channel_payload.get("frameStore") or {})
+            frame_store.update(publisher_snapshot)
+            channel_payload["frameStore"] = frame_store
         frame_payload: JsonDict = {
             "actions": list(actions),
             "actionsZh": actions_zh,
@@ -1721,12 +2126,13 @@ def normalize_session_options(payload: JsonDict, *, trust_existing_route: bool =
     else:
         raise ValueError("source, cameraIndex, or videoPath is required")
 
-    pose_variant = str(payload.get("poseVariant") or payload.get("pose_variant") or "full").strip().lower()
+    pose_variant = str(payload.get("poseVariant") or payload.get("pose_variant") or "lite").strip().lower()
     if pose_variant not in {"lite", "full", "heavy"}:
         raise ValueError("poseVariant must be one of: lite, full, heavy")
 
     frame_limit = _optional_positive_int(payload.get("frameLimit", payload.get("frame_limit")))
-    enable_hands = _payload_bool(payload.get("enableHands", payload.get("enable_hands")), default=True)
+    enable_hands = _payload_bool(payload.get("enableHands", payload.get("enable_hands")), default=False)
+    delegate = _delegate_from_payload(payload)
     requires_capabilities = _requires_capabilities_from_payload(payload)
     route_payload = payload.get("backendRoute") if trust_existing_route else None
     if isinstance(route_payload, dict):
@@ -1744,6 +2150,7 @@ def normalize_session_options(payload: JsonDict, *, trust_existing_route: bool =
         pose_variant=pose_variant,
         workers=clamp_workers(payload.get("workers", 1)),
         enable_hands=enable_hands,
+        delegate=delegate,
         requires_capabilities=requires_capabilities,
         record_dir=_optional_str(payload.get("recordDir", payload.get("record_dir"))),
         frame_limit=frame_limit,
@@ -1932,6 +2339,13 @@ def _payload_bool(value: Any, *, default: bool) -> bool:
     return bool(value)
 
 
+def _delegate_from_payload(payload: JsonDict) -> str:
+    value = str(payload.get("delegate", payload.get("mediapipeDelegate", "cpu")) or "cpu").strip().lower()
+    if value not in {"cpu", "gpu"}:
+        raise ValueError("delegate must be one of: cpu, gpu")
+    return value
+
+
 def _optional_positive_int(value: Any) -> int | None:
     if value in (None, ""):
         return None
@@ -1970,7 +2384,44 @@ def _default_pipeline_factory(options: PreviewSessionOptions) -> Any:
             pose_variant=options.pose_variant,
             running_mode="video",
             enable_hands=options.enable_hands,
+            delegate=options.delegate,
         ),
+    )
+
+
+def _pipeline_delegate_payload(pipe: Any) -> JsonDict:
+    if pipe is None:
+        return {}
+    requested = getattr(pipe, "requested_delegate", None)
+    active = getattr(pipe, "active_delegate", None)
+    reason = getattr(pipe, "delegate_fallback_reason", None)
+    if requested is None and active is None and reason is None:
+        return {}
+    payload: JsonDict = {
+        "requested": str(requested or active or "cpu"),
+        "active": str(active or requested or "cpu"),
+        "fallback": bool(reason),
+    }
+    if reason:
+        payload["fallbackReason"] = str(reason)
+    return payload
+
+
+def _use_parallel_camera_preview(options: PreviewSessionOptions) -> bool:
+    route = options.backend_route or {}
+    backend = str(route.get("backend") or BACKEND_MEDIAPIPE).lower()
+    return options.source_kind == "camera" and options.workers > 1 and backend == BACKEND_MEDIAPIPE
+
+
+def _default_parallel_pipeline_factory(options: PreviewSessionOptions) -> Callable[[], Any]:
+    from core.parallel_pose_engine import default_pipeline_factory as _parallel_default_pipeline_factory
+    from core.paths import models_dir
+
+    return _parallel_default_pipeline_factory(
+        models_dir=models_dir(),
+        pose_variant=options.pose_variant,
+        enable_hands=options.enable_hands,
+        delegate=options.delegate,
     )
 
 
@@ -2325,6 +2776,16 @@ def _default_frame_encoder(frame: Any) -> bytes:
     if not ok:
         raise RuntimeError("无法编码预览帧")
     return encoded.tobytes()
+
+
+def _copy_preview_frame(frame: Any) -> Any:
+    copier = getattr(frame, "copy", None)
+    if copier is not None:
+        try:
+            return copier()
+        except Exception:
+            return frame
+    return frame
 
 
 def _capture_is_opened(cap: Any) -> bool:

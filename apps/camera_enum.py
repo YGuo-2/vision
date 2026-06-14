@@ -5,10 +5,11 @@
 - `enumerate_cameras` 的探测函数 `probe` 可注入，给定 probe 后输出完全确定。
 - `InputSourceState` 是纯状态结构，维护摄像头/视频/无 三态互斥不变式。
 
-真实的 OpenCV DSHOW I/O 集中在 `probe_camera`，单测时可被替换。
+真实的 OpenCV MSMF I/O 集中在 `probe_camera`，单测时可被替换。
 """
 from __future__ import annotations
 
+import sys
 import threading
 from dataclasses import dataclass
 from typing import Callable
@@ -41,12 +42,127 @@ def make_label(index: int, name: str | None = None) -> str:
     return f"摄像头 {index}"
 
 
-def list_device_names() -> list[str]:
-    """读取 Windows DirectShow 摄像头友好名列表，顺序与 DSHOW 索引一致。
+def _enumerate_media_foundation_names() -> list[str] | None:
+    """用 Windows Media Foundation 枚举视频采集设备的友好名列表。
 
-    依赖 pygrabber（仅 Windows）。任何失败都返回空列表，由调用方回退到
-    "摄像头 N" 命名，保证枚举功能在缺少该依赖时仍可用。
+    返回顺序与 OpenCV ``CAP_MSMF`` 的设备 index 一致——二者同走 Media
+    Foundation 的 ``MFEnumDeviceSources`` 枚举，因此与 :func:`open_camera`
+    实际打开的设备一一对应。仅 Windows 可用。
+
+    成功时返回名字列表（可能为空列表，表示确无设备）；任何失败返回
+    ``None``，由 :func:`list_device_names` 回退到 pygrabber/DSHOW。
     """
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes as C
+        from ctypes import wintypes as W
+
+        class GUID(C.Structure):
+            _fields_ = [
+                ("Data1", W.DWORD),
+                ("Data2", W.WORD),
+                ("Data3", W.WORD),
+                ("Data4", C.c_ubyte * 8),
+            ]
+
+        ole32 = C.windll.ole32
+        mfplat = C.windll.mfplat
+        mf = C.windll.mf
+        ole32.CLSIDFromString.argtypes = [C.c_wchar_p, C.POINTER(GUID)]
+        ole32.CoTaskMemFree.argtypes = [C.c_void_p]
+        mfplat.MFStartup.argtypes = [C.c_ulong, C.c_ulong]
+        mfplat.MFCreateAttributes.argtypes = [C.POINTER(C.c_void_p), C.c_uint32]
+        mf.MFEnumDeviceSources.argtypes = [
+            C.c_void_p,
+            C.POINTER(C.POINTER(C.c_void_p)),
+            C.POINTER(W.UINT),
+        ]
+
+        def _guid(text: str) -> GUID:
+            g = GUID()
+            if ole32.CLSIDFromString(text, C.byref(g)) != 0:
+                raise OSError("CLSIDFromString failed: " + text)
+            return g
+
+        def _vcall(ptr, idx, argtypes, *args):
+            # 通过 COM vtable 序号调用接口方法（ptr 为接口指针）。
+            vtbl = C.cast(ptr, C.POINTER(C.c_void_p))[0]
+            fn = C.cast(vtbl, C.POINTER(C.c_void_p))[idx]
+            proto = C.WINFUNCTYPE(C.c_long, C.c_void_p, *argtypes)
+            return proto(fn)(ptr, *args)
+
+        MF_VERSION = 0x00020070
+        KEY_SRCTYPE = _guid("{C60AC5FE-252A-478F-A0EF-BC8FA5F7CAD3}")
+        VAL_VIDCAP = _guid("{8AC3587A-4AE7-42D8-99E0-0A6013EEF90F}")
+        KEY_FRIENDLY = _guid("{60D0E559-52F8-4FA2-BBCE-ACDB34A8EC01}")
+
+        # CoInitializeEx：S_OK(0)/S_FALSE(1) 均为本次成功初始化，需配对 Uninit；
+        # RPC_E_CHANGED_MODE 等表示线程已被别处初始化，沿用且不由我们 Uninit。
+        co_inited = ole32.CoInitializeEx(None, 0) in (0, 1)
+        mf_started = False
+        try:
+            if mfplat.MFStartup(MF_VERSION, 0) != 0:
+                return None
+            mf_started = True
+
+            attrs = C.c_void_p()
+            if mfplat.MFCreateAttributes(C.byref(attrs), 1) != 0 or not attrs:
+                return None
+            try:
+                # IMFAttributes::SetGUID = vtable index 24
+                if _vcall(attrs, 24, [C.c_void_p, C.c_void_p],
+                          C.byref(KEY_SRCTYPE), C.byref(VAL_VIDCAP)) != 0:
+                    return None
+
+                devices = C.POINTER(C.c_void_p)()
+                count = W.UINT(0)
+                if mf.MFEnumDeviceSources(attrs, C.byref(devices),
+                                          C.byref(count)) != 0:
+                    return None
+                try:
+                    names: list[str] = []
+                    for i in range(count.value):
+                        activate = C.c_void_p(devices[i])
+                        buf = C.c_wchar_p()
+                        length = W.UINT(0)
+                        # IMFActivate::GetAllocatedString = vtable index 13
+                        hr = _vcall(
+                            activate, 13,
+                            [C.c_void_p, C.POINTER(C.c_wchar_p), C.POINTER(W.UINT)],
+                            C.byref(KEY_FRIENDLY), C.byref(buf), C.byref(length),
+                        )
+                        names.append(buf.value if hr == 0 and buf.value else "")
+                        if buf:
+                            ole32.CoTaskMemFree(C.cast(buf, C.c_void_p))
+                        # IUnknown::Release = vtable index 2
+                        _vcall(activate, 2, [])
+                    return names
+                finally:
+                    ole32.CoTaskMemFree(C.cast(devices, C.c_void_p))
+            finally:
+                _vcall(attrs, 2, [])  # IUnknown::Release
+        finally:
+            if mf_started:
+                mfplat.MFShutdown()
+            if co_inited:
+                ole32.CoUninitialize()
+    except Exception:
+        return None
+
+
+def list_device_names() -> list[str]:
+    """读取摄像头友好名列表，顺序与 :func:`open_camera` 的设备 index 一致。
+
+    优先用 Media Foundation 枚举（与 open_camera 的 ``CAP_MSMF`` 后端同源，
+    索引顺序一致，保证下拉名字与实际打开设备对应）。仅当 MF 不可用时回退
+    pygrabber（DirectShow 顺序）——该降级路径下 DSHOW 与 MSMF 顺序可能不同、
+    名字与设备可能重新错位，但 Win10/11 标准版 MF 始终可用，极少触发。
+    任何失败都返回空列表，由调用方回退到 "摄像头 N" 命名。
+    """
+    names = _enumerate_media_foundation_names()
+    if names is not None:
+        return names
     try:
         from pygrabber.dshow_graph import FilterGraph
 
@@ -61,10 +177,12 @@ def clamp_scan_limit(scan_limit: int) -> int:
 
 
 def probe_camera(index: int, timeout_s: float = PROBE_TIMEOUT_S) -> bool:
-    """探测单个编号是否可用。
+    """探测单个编号是否可用（回退路径专用）。
 
     判定可用 = `isOpened()` 为真且能 `read()` 到非空帧；带超时与资源释放。
     需求 1.2、1.3、1.5、1.6。该函数封装真实 cv2 I/O，单测时可被替换。
+    正常枚举不再调用本函数（见 :func:`enumerate_cameras`）：仅当 Media
+    Foundation / pygrabber 设备清单均不可用时，作逐编号扫描兜底。
     """
     import cv2  # 延迟导入，避免无 cv2 环境下导入本模块失败
 
@@ -73,6 +191,10 @@ def probe_camera(index: int, timeout_s: float = PROBE_TIMEOUT_S) -> bool:
     def _work() -> None:
         cap = None
         try:
+            # 仅回退路径使用：正常枚举走 list_device_names 的 Media Foundation
+            # 清单，不调用本函数。此处用 DSHOW（首帧快、与回退命名 pygrabber 的
+            # DSHOW 顺序一致），仅当 MF/pygrabber 均不可用时由 enumerate_cameras
+            # 逐编号扫描兜底。
             cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)
             if not cap.isOpened():
                 result["ok"] = False
@@ -126,7 +248,9 @@ def open_camera(index: int, *, width: int = 1280, height: int = 720):
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(height))
         return cap
 
-    # 1) MSMF 默认（最优：本机实测 720p 30fps）。
+    # 1) MSMF 默认（最优：本机实测 720p 30fps）。与 probe_camera 探测、
+    #    list_device_names 的 Media Foundation 命名同后端，保证下拉所选 index
+    #    与实际打开设备一致（DSHOW 与 MSMF 的设备枚举顺序可能不同）。
     cap = _try(cv2.CAP_MSMF, mjpg=False)
     if cap is not None:
         return cap
@@ -143,25 +267,41 @@ def enumerate_cameras(
     probe: Callable[[int], bool] = probe_camera,
     names: Callable[[], list[str]] = list_device_names,
 ) -> list[CameraEntry]:
-    """从 0 起按编号递增探测至 scan_limit（含），返回升序可用条目列表。
+    """枚举可用摄像头，返回按 index 升序的条目列表。
 
-    需求 1.1、1.4、1.7、1.8。
+    需求 1.1、1.4、1.7、1.8。两条路径：
+
+    1. **优先**：当 ``names()`` 返回非空设备清单（Windows 正常情形下走
+       Media Foundation，顺序与 :func:`open_camera` 的 ``CAP_MSMF`` index
+       一致），直接据清单生成条目——快、稳，且名字与实际打开设备一一对应。
+       不再逐编号调用 ``probe``（MSMF 逐个 open+read 既慢又波动，会误杀
+       1080P 等慢首帧设备）。条目数受 ``scan_limit`` 上限钳制。
+    2. **回退**：仅当设备清单为空（MF/pygrabber 均不可用）时，从 0 逐编号
+       ``probe`` 扫描至钳制后上限，用无名 "摄像头 N" 命名兜底。
+
     - scan_limit 被钳制到 [SCAN_LIMIT_MIN, SCAN_LIMIT_MAX]。
-    - probe 可注入，便于在不接触真实硬件的情况下做属性测试。
-    - names 可注入，返回与 DSHOW 索引顺序一致的设备友好名列表；
-      索引越界或拿不到名字时回退为 "摄像头 N"。
-    - 返回列表按 index 升序，每个可用 index 至多出现一次。
+    - probe / names 可注入，便于在不接触真实硬件的情况下做属性测试。
+    - 返回列表按 index 升序，每个 index 至多出现一次。
     """
     upper = clamp_scan_limit(scan_limit)
     try:
         device_names = names()
     except Exception:
         device_names = []
+
     entries: list[CameraEntry] = []
+    if device_names:
+        # 优先路径：信任设备清单（与打开后端同顺序），不做慢速逐个 probe。
+        for index, name in enumerate(device_names):
+            if index > upper:
+                break
+            entries.append(CameraEntry(make_label(index, name), index))
+        return entries
+
+    # 回退路径：无设备清单时逐编号探测兜底。
     for index in range(0, upper + 1):
         if probe(index):
-            name = device_names[index] if index < len(device_names) else None
-            entries.append(CameraEntry(make_label(index, name), index))
+            entries.append(CameraEntry(make_label(index, None), index))
     return entries
 
 

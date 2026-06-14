@@ -58,7 +58,7 @@ PipelineFactory = Callable[[], _AnnotatePipeline]
 
 
 def default_pipeline_factory(
-    *, models_dir: Path, pose_variant: str, enable_hands: bool
+    *, models_dir: Path, pose_variant: str, enable_hands: bool, delegate: str = "cpu"
 ) -> PipelineFactory:
     """返回一个创建 IMAGE 模式 ``MediaPipePipeline`` 的工厂。
 
@@ -73,6 +73,7 @@ def default_pipeline_factory(
                 pose_variant=pose_variant,
                 running_mode="image",
                 enable_hands=enable_hands,
+                delegate=delegate,
             ),
         )
 

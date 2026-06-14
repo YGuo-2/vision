@@ -51,7 +51,9 @@ const bridgeLifecycle = await importTypeScriptModule("src/bridge-lifecycle.ts");
 const bridgeState = await importTypeScriptModule("src/bridge-state.ts");
 
 for (const marker of [
-  "sourceKind === 'none'",
+  'const poseVariant = ref<"lite" | "full" | "heavy">("lite")',
+  "const enableHands = ref(false)",
+  "v-model=\"sourceKind\"",
   "shouldApplyBridgeEvent",
   "setRawJson(event)",
   "template.create",
@@ -63,7 +65,7 @@ for (const marker of [
   "highQualityBodyOnly",
   "yoloRuntimeMessage",
   "selectRecordDir",
-  "选择目录",
+  "选择…",
   "downloadAllMissing",
   "cancelModelDownload",
   "stopActiveJobsBeforeUnmount",
@@ -130,7 +132,10 @@ for (const marker of [
   "ctx.drawImage(bitmap, 0, 0)",
   "bitmap.close()",
   "cancelPendingFrameRender",
-  "isPendingFrameCurrent(frame)",
+  "drainLatestFrameRender",
+  "isRenderingFrame",
+  "isDrawableFrame(actualFrame)",
+  "lastDrawnFrameId",
   "applyFrameMetadata(frame.payload)",
   "acceptLatestFrameIdentity(payload, event.sessionId ?? null, event.jobId ?? null)",
   "sanitizedRawEnvelope(envelope)",
@@ -156,9 +161,8 @@ assert(
   "startSession must immediately apply backendRoute fallback notices"
 );
 assert(
-  app.indexOf("acceptLatestFrameIdentity(payload, event.sessionId ?? null, event.jobId ?? null)") <
-    app.indexOf("if (!shouldRenderPreviewFrame())"),
-  "throttled newer frames must update latest identity before preview render throttling"
+  !app.includes("shouldRenderPreviewFrame()"),
+  "preview frames must use RAF/in-flight coalescing instead of Date.now throttling"
 );
 
 for (const marker of ["select_directory", "OleInitialize", "OleUninitialize", "SHBrowseForFolderW", "SHGetPathFromIDListW"]) {
@@ -172,7 +176,8 @@ for (const marker of [
   "\"frameChannel\"",
   "frame_handle",
   "frame_id",
-  "Response::new(slot.bytes)"
+  "response.extend_from_slice(&slot.frame_id.to_be_bytes())",
+  "Response::new(response)"
 ]) {
   assertIncludes(tauri, marker, "src-tauri lib.rs");
 }
@@ -184,7 +189,6 @@ for (const marker of [
   "sessionStatusFromJobEvent",
   "shouldApplyModelDownloadStartResponse",
   "shouldApplySessionStartResponse",
-  "shouldRenderPreviewFrameAt",
   "bridgeCommandFailureResponse",
   "sessionStartFailureState",
   "JOB_SCOPED_STATUS_EVENTS"
@@ -439,11 +443,6 @@ assert(failedStartState.sessionJobId === undefined, "failed session.start must c
 assert(failedStartState.errorText.includes("bridge response timeout"), "failed session.start must show bridge timeout");
 
 assert(
-  bridgeState.shouldRenderPreviewFrameAt(1, Number.NEGATIVE_INFINITY, 100) === true,
-  "first session.frame after a new session must render immediately"
-);
-
-assert(
   bridgeState.isCurrentFrameIdentity(
     { sessionId: "session-current", jobId: "job-session", frameId: 2, frameHandle: "session-current:2" },
     { sessionId: "session-current", jobId: "job-session", frameId: 2, frameHandle: "session-current:2" }
@@ -452,10 +451,17 @@ assert(
 );
 assert(
   bridgeState.isCurrentFrameIdentity(
+    { sessionId: "session-current", jobId: "job-session", frameId: 3, frameHandle: "session-current:3" },
+    { sessionId: "session-current", jobId: "job-session", frameId: 2, frameHandle: "session-current:2" }
+  ) === true,
+  "same-session newer latest-frame identity must be accepted"
+);
+assert(
+  bridgeState.isCurrentFrameIdentity(
     { sessionId: "session-current", jobId: "job-session", frameId: 1, frameHandle: "session-current:1" },
     { sessionId: "session-current", jobId: "job-session", frameId: 2, frameHandle: "session-current:2" }
   ) === false,
-  "same-session stale frame identity must be rejected"
+  "same-session older drawn frame identity must not roll back"
 );
 
 const rawFrameEnvelope = {
@@ -478,15 +484,10 @@ assert(!sanitizedRawFrameJson.includes("secret-token"), "raw JSON must scrub fra
 assert(!sanitizedRawFrameJson.includes("session-current:9"), "raw JSON must scrub frameHandle");
 assert(sanitizedRawFrameJson.includes("\"frameId\": 9"), "raw JSON must keep frameId for debugging");
 
-let lastPreviewFrameAt = 1000;
-if (bridgeState.shouldRenderPreviewFrameAt(1050, lastPreviewFrameAt, 100)) {
-  lastPreviewFrameAt = 1050;
-}
-assert(lastPreviewFrameAt === 1000, "rapid session.frame events must be throttled");
-if (bridgeState.shouldRenderPreviewFrameAt(1100, lastPreviewFrameAt, 100)) {
-  lastPreviewFrameAt = 1100;
-}
-assert(lastPreviewFrameAt === 1100, "later session.frame events must be accepted");
+assertIncludes(app, "if (isRenderingFrame)", "App.vue");
+assertIncludes(app, "while (pendingFrame)", "App.vue");
+assertIncludes(app, "if (canvas.width !== bitmap.width)", "App.vue");
+assertIncludes(app, "if (canvas.height !== bitmap.height)", "App.vue");
 
 const stopCalls = [];
 const stoppedEnvelope = await bridgeLifecycle.stopJobById(async (command, payload, options) => {

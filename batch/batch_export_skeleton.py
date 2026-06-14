@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable
@@ -253,6 +254,7 @@ def main() -> None:
     ap.add_argument("--no_video", action="store_true", help="Only export .npz (skip skeleton video)")
     ap.add_argument("--draw_face", action="store_true", help="Draw face landmarks on skeleton video")
     ap.add_argument("--overwrite", action="store_true", help="Overwrite existing outputs")
+    ap.add_argument("--workers", type=int, default=1, help="Number of videos to process concurrently (default: 1)")
     add_backend_layout_args(ap)
     args = ap.parse_args()
     backend, feature_layout = normalize_backend_layout(args.backend, args.feature_layout)
@@ -271,8 +273,7 @@ def main() -> None:
         raise FileNotFoundError(f"No videos found in: {source_dir}")
 
     used_names_by_dir: dict[Path, set[str]] = {}
-    manifest_rows: list[dict] = []
-
+    work_items: list[tuple[int, Path, Path, Path, Path, Path | None]] = []
     for idx, video_path in enumerate(videos, start=1):
         rel_parent = video_path.parent.relative_to(source_dir)
         out_subdir = out_dir / rel_parent
@@ -289,10 +290,15 @@ def main() -> None:
             # body_core_v1 features are normalized coordinates, not overlay-ready pixel landmarks.
             skel_video_path = None
 
+        work_items.append((idx, video_path, rel_parent, out_subdir, npz_path, skel_video_path))
+
+    def _process_video(item: tuple[int, Path, Path, Path, Path, Path | None]) -> tuple[int, dict]:
+        idx, video_path, rel_parent, out_subdir, npz_path, skel_video_path = item
         if not args.overwrite:
             if npz_path.exists() and (skel_video_path is None or skel_video_path.exists()):
                 print(f"[{idx}/{len(videos)}] Skip (exists): {video_path}")
-                manifest_rows.append(
+                return (
+                    idx,
                     _manifest_row(
                         rel_parent=rel_parent,
                         video_path=video_path,
@@ -300,9 +306,8 @@ def main() -> None:
                         skel_video_path=skel_video_path,
                         pose_variant=str(args.pose),
                         meta=_read_npz_meta(npz_path),
-                    )
+                    ),
                 )
-                continue
 
         out_subdir.mkdir(parents=True, exist_ok=True)
         print(f"[{idx}/{len(videos)}] Processing: {video_path}")
@@ -326,7 +331,8 @@ def main() -> None:
         else:
             np.savez_compressed(npz_path, features=features, meta=np.array(meta, dtype=object))
 
-        manifest_rows.append(
+        return (
+            idx,
             _manifest_row(
                 rel_parent=rel_parent,
                 video_path=video_path,
@@ -334,8 +340,22 @@ def main() -> None:
                 skel_video_path=skel_video_path,
                 pose_variant=str(args.pose),
                 meta=meta,
-            )
+            ),
         )
+
+    video_workers = max(1, int(args.workers))
+    results: list[tuple[int, dict]] = []
+    if video_workers <= 1:
+        for item in work_items:
+            results.append(_process_video(item))
+    else:
+        with ThreadPoolExecutor(max_workers=video_workers) as ex:
+            futures = [ex.submit(_process_video, item) for item in work_items]
+            for fut in as_completed(futures):
+                results.append(fut.result())
+
+    results.sort(key=lambda item: item[0])
+    manifest_rows = [row for _idx, row in results]
 
     manifest_path = out_dir / "manifest.csv"
     _write_manifest(manifest_rows, manifest_path)

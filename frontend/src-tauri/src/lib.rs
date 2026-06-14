@@ -18,7 +18,9 @@ use std::os::windows::process::CommandExt;
 use tauri::Manager;
 
 #[cfg(not(debug_assertions))]
-const BRIDGE_SIDECAR_NAME: &str = "vision-ui-backend.exe";
+const BRIDGE_SIDECAR_DIR: &str = "vision-ui-backend";
+#[cfg(not(debug_assertions))]
+const BRIDGE_SIDECAR_EXE: &str = "vision-ui-backend.exe";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -338,11 +340,20 @@ fn latest_frame(
             .cloned()
             .ok_or_else(|| "latest-frame store is empty".to_string())?
     };
-    if slot.frame_id != request.frame_id || slot.frame_handle != request.frame_handle {
+    if request.frame_id > slot.frame_id {
         return Err(format!(
-            "latest-frame request is stale: requested={} stored={} bytes={} ageMs={}",
+            "latest-frame request is ahead of store: requested={} stored={} bytes={} ageMs={}",
             request.frame_id,
             slot.frame_id,
+            slot.payload_bytes,
+            slot.updated_at.elapsed().as_millis()
+        ));
+    }
+    if request.frame_id == slot.frame_id && slot.frame_handle != request.frame_handle {
+        return Err(format!(
+            "latest-frame handle mismatch: requested={} stored={} bytes={} ageMs={}",
+            request.frame_handle,
+            slot.frame_handle,
             slot.payload_bytes,
             slot.updated_at.elapsed().as_millis()
         ));
@@ -350,7 +361,10 @@ fn latest_frame(
     if let Ok(mut served) = channel.served_frames.lock() {
         *served += 1;
     }
-    Ok(Response::new(slot.bytes))
+    let mut response = Vec::with_capacity(8 + slot.bytes.len());
+    response.extend_from_slice(&slot.frame_id.to_be_bytes());
+    response.extend_from_slice(&slot.bytes);
+    Ok(Response::new(response))
 }
 
 fn ensure_latest_frame_channel(
@@ -402,9 +416,6 @@ fn start_latest_frame_channel(session_id: String) -> Result<LatestFrameChannel, 
         .local_addr()
         .map_err(|err| format!("failed to read latest-frame port: {err}"))?
         .port();
-    listener
-        .set_nonblocking(true)
-        .map_err(|err| format!("failed to configure latest-frame listener: {err}"))?;
     let channel = LatestFrameChannel {
         token: random_token(),
         port,
@@ -418,9 +429,10 @@ fn start_latest_frame_channel(session_id: String) -> Result<LatestFrameChannel, 
     let served_frames = Arc::clone(&channel.served_frames);
     std::thread::spawn(move || loop {
         match listener.accept() {
-            Ok((mut stream, _addr)) => {
+            Ok((stream, _addr)) => {
+                let _ = stream.set_nodelay(true);
                 let should_close = handle_latest_frame_connection(
-                    &mut stream,
+                    stream,
                     &session_id,
                     &token,
                     &store,
@@ -431,9 +443,6 @@ fn start_latest_frame_channel(session_id: String) -> Result<LatestFrameChannel, 
                     break;
                 }
             }
-            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(Duration::from_millis(20));
-            }
             Err(_) => break,
         }
     });
@@ -441,7 +450,7 @@ fn start_latest_frame_channel(session_id: String) -> Result<LatestFrameChannel, 
 }
 
 fn handle_latest_frame_connection(
-    stream: &mut TcpStream,
+    stream: TcpStream,
     expected_session_id: &str,
     expected_token: &str,
     store: &Arc<Mutex<HashMap<String, LatestFrameSlot>>>,
@@ -450,80 +459,87 @@ fn handle_latest_frame_connection(
 ) -> bool {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
-    let mut header = Vec::new();
-    let mut byte = [0u8; 1];
-    while header.len() < 4096 {
-        if stream.read_exact(&mut byte).is_err() {
-            let _ = stream.write_all(b"ERR header\n");
-            return false;
-        }
-        if byte[0] == b'\n' {
-            break;
-        }
-        header.push(byte[0]);
-    }
-    let line = String::from_utf8_lossy(&header);
-    let parts: Vec<&str> = line.split_whitespace().collect();
-    if parts.len() >= 3 && parts[0] == "CLOSE" {
-        if parts[1] == expected_session_id && parts[2] == expected_token {
-            if let Ok(mut guard) = store.lock() {
-                guard.remove(expected_session_id);
-            }
-        }
-        return parts[1] == expected_session_id && parts[2] == expected_token;
-    }
-    if parts.len() < 5 || parts[0] != "PUT" {
-        let _ = stream.write_all(b"ERR bad_request\n");
-        return false;
-    }
-    let session_id = parts[1];
-    let token = parts[2];
-    let frame_id = match parts[3].parse::<u64>() {
+    let writer = match stream.try_clone() {
         Ok(value) => value,
-        Err(_) => {
-            let _ = stream.write_all(b"ERR bad_frame_id\n");
-            return false;
-        }
+        Err(_) => return false,
     };
-    let frame_handle = parts[4].to_string();
-    if session_id != expected_session_id || token != expected_token {
-        let _ = stream.write_all(b"ERR unauthorized\n");
-        return false;
-    }
-    let mut len_buf = [0u8; 4];
-    if stream.read_exact(&mut len_buf).is_err() {
-        let _ = stream.write_all(b"ERR length\n");
-        return false;
-    }
-    let len = u32::from_be_bytes(len_buf) as usize;
-    let mut bytes = vec![0u8; len];
-    if len > 0 && stream.read_exact(&mut bytes).is_err() {
-        let _ = stream.write_all(b"ERR payload\n");
-        return false;
-    }
-    let mut dropped = 0;
-    if let Ok(mut guard) = store.lock() {
-        if guard.contains_key(session_id) {
-            if let Ok(mut count) = dropped_frames.lock() {
-                *count += 1;
-                dropped = *count;
+    let mut reader = BufReader::new(stream);
+    let mut writer = writer;
+    loop {
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) => return false,
+            Ok(_) => {}
+            Err(_) => {
+                let _ = writer.write_all(b"ERR header\n");
+                return false;
             }
         }
-        guard.insert(
-            session_id.to_string(),
-            LatestFrameSlot {
-                frame_id,
-                frame_handle,
-                payload_bytes: len,
-                bytes,
-                updated_at: Instant::now(),
-            },
-        );
+        if line.len() > 4096 {
+            let _ = writer.write_all(b"ERR header_too_large\n");
+            return false;
+        }
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 3 && parts[0] == "CLOSE" {
+            if parts[1] == expected_session_id && parts[2] == expected_token {
+                if let Ok(mut guard) = store.lock() {
+                    guard.remove(expected_session_id);
+                }
+            }
+            return parts[1] == expected_session_id && parts[2] == expected_token;
+        }
+        if parts.len() < 5 || parts[0] != "PUT" {
+            let _ = writer.write_all(b"ERR bad_request\n");
+            return false;
+        }
+        let session_id = parts[1];
+        let token = parts[2];
+        let frame_id = match parts[3].parse::<u64>() {
+            Ok(value) => value,
+            Err(_) => {
+                let _ = writer.write_all(b"ERR bad_frame_id\n");
+                return false;
+            }
+        };
+        let frame_handle = parts[4].to_string();
+        if session_id != expected_session_id || token != expected_token {
+            let _ = writer.write_all(b"ERR unauthorized\n");
+            return false;
+        }
+        let mut len_buf = [0u8; 4];
+        if reader.read_exact(&mut len_buf).is_err() {
+            let _ = writer.write_all(b"ERR length\n");
+            return false;
+        }
+        let len = u32::from_be_bytes(len_buf) as usize;
+        let mut bytes = vec![0u8; len];
+        if len > 0 && reader.read_exact(&mut bytes).is_err() {
+            let _ = writer.write_all(b"ERR payload\n");
+            return false;
+        }
+        let mut dropped = 0;
+        if let Ok(mut guard) = store.lock() {
+            if guard.contains_key(session_id) {
+                if let Ok(mut count) = dropped_frames.lock() {
+                    *count += 1;
+                    dropped = *count;
+                }
+            }
+            guard.insert(
+                session_id.to_string(),
+                LatestFrameSlot {
+                    frame_id,
+                    frame_handle,
+                    payload_bytes: len,
+                    bytes,
+                    updated_at: Instant::now(),
+                },
+            );
+        }
+        let served = served_frames.lock().map(|value| *value).unwrap_or(0);
+        let ack = format!("OK droppedFrames={dropped} servedFrames={served}\n");
+        let _ = writer.write_all(ack.as_bytes());
     }
-    let served = served_frames.lock().map(|value| *value).unwrap_or(0);
-    let ack = format!("OK droppedFrames={dropped} servedFrames={served}\n");
-    let _ = stream.write_all(ack.as_bytes());
-    false
 }
 
 fn random_token() -> String {
@@ -746,13 +762,18 @@ fn packaged_bridge_executable(app: &AppHandle) -> Option<PathBuf> {
     #[cfg(not(debug_assertions))]
     {
         let resource_dir = app.path().resource_dir().ok()?;
-        let candidate = resource_dir.join(BRIDGE_SIDECAR_NAME);
+        let candidate = packaged_bridge_candidate(&resource_dir);
         if candidate.exists() {
             Some(candidate)
         } else {
             None
         }
     }
+}
+
+#[cfg(not(debug_assertions))]
+fn packaged_bridge_candidate(resource_dir: &Path) -> PathBuf {
+    resource_dir.join(BRIDGE_SIDECAR_DIR).join(BRIDGE_SIDECAR_EXE)
 }
 
 fn repo_root() -> PathBuf {

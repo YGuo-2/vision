@@ -28,6 +28,10 @@ import numpy as np
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 os.environ.setdefault("GLOG_minloglevel", "3")
 
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 from core.paths import models_dir as repo_models_dir  # noqa: E402
 from core.body_core_compare import DEFAULT_YOLO26L_MODEL_NAME  # noqa: E402
 from core.vision_pipeline import MediaPipePipeline, PipelineConfig  # noqa: E402

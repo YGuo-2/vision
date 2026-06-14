@@ -792,6 +792,7 @@ class UiState:
     pose_variant: str
     workers: int
     enable_hands: bool
+    out_path: str | None = None
 
 
 class SettingsWindow:
@@ -1588,6 +1589,7 @@ class App:
             pose_variant=self.pose_var.get().strip() or "full",
             workers=workers,
             enable_hands=bool(self.enable_hands_var.get()),
+            out_path=(self.out_var.get().strip() or None) if bool(self.save_var.get()) else None,
         )
 
     def _start(self) -> None:
