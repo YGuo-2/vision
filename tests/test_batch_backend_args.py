@@ -361,6 +361,7 @@ def test_dual_compare_body_core_parallel_keeps_order_and_yolo_metadata(tmp_path,
         video_path = Path(video_path)
         if video_path.name.startswith("a_"):
             time.sleep(0.05)
+        assert "precomputed_features" in kwargs
         return SimpleNamespace(
             template_path=Path(template_path),
             video_path=video_path,
@@ -380,7 +381,20 @@ def test_dual_compare_body_core_parallel_keeps_order_and_yolo_metadata(tmp_path,
             multi_person_gate_source="",
         )
 
+    def fake_extract_body_core_features(video_path, **kwargs):
+        video_path = Path(video_path)
+        return (
+            np.zeros((3, 12, 2), dtype=np.float32),
+            30.0,
+            {
+                "backend": str(kwargs["backend"]),
+                "display_scope": "internal",
+                "body_core_valid_frame_ratio": 1.0,
+            },
+        )
+
     monkeypatch.setattr(body_core_compare, "create_body_core_template", fake_create_body_core_template)
+    monkeypatch.setattr(body_core_compare, "extract_body_core_features", fake_extract_body_core_features)
     monkeypatch.setattr(body_core_compare, "match_body_core_template", fake_match_body_core_template)
 
     batch_dual_compare._run_body_core_batch(

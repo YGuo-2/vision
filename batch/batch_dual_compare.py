@@ -349,7 +349,7 @@ def _run_body_core_batch(*, args, backend: str, front_video: Path, side_video: P
     Scores are written only as ``*_debug_score`` with ``score_authorized=False``.
     They never populate the pose33 outward-facing score columns.
     """
-    from core.body_core_compare import create_body_core_template, match_body_core_template
+    from core.body_core_compare import create_body_core_template, extract_body_core_features, match_body_core_template
 
     if backend == BACKEND_YOLO and args.rules:
         print("YOLO body_core_v1 不支持规则评分；本批次仅输出调试/标定分数。")
@@ -392,6 +392,12 @@ def _run_body_core_batch(*, args, backend: str, front_video: Path, side_video: P
     video_workers = max(1, int(getattr(args, "workers", 1)))
 
     def _process_body_core_video(idx: int, v: Path) -> tuple[int, dict[str, Any], dict[str, Any]]:
+        precomputed = extract_body_core_features(
+            v,
+            backend=backend,
+            pose_variant=args.pose,
+            yolo_model=yolo_model,
+        )
         front_res = match_body_core_template(
             front_tpl,
             v,
@@ -399,6 +405,7 @@ def _run_body_core_batch(*, args, backend: str, front_video: Path, side_video: P
             pose_variant=args.pose,
             reject_multi_person=False,
             yolo_model=yolo_model,
+            precomputed_features=precomputed,
         )
         side_res = match_body_core_template(
             side_tpl,
@@ -407,6 +414,7 @@ def _run_body_core_batch(*, args, backend: str, front_video: Path, side_video: P
             pose_variant=args.pose,
             reject_multi_person=False,
             yolo_model=yolo_model,
+            precomputed_features=precomputed,
         )
         row = _body_core_row(v, front_res, side_res, meta=batch_meta)
         payload = {

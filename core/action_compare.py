@@ -26,7 +26,13 @@ from .pose_features import (
 )
 from .feature_layout import POSE33_V3, FeatureLayoutSpec, is_valid_feature_shape
 from .paths import models_dir, templates_dir
-from .rule_scoring import RuleViolation, extract_pose_raw, score_rules
+from .rule_scoring import (
+    RuleViolation,
+    extract_pose_raw,
+    extract_pose_raw_series,
+    score_rules,
+    slice_pose_raw_series,
+)
 from .vision_pipeline import MediaPipePipeline, PipelineConfig
 from .video_writer import open_video_writer
 
@@ -874,6 +880,13 @@ def compare_video_to_dual_templates(
 
     # 双模板比对核心流程：
     # A) 正/侧视角切分；B) DTW 多次匹配与聚合；C) 可选规则扣分与明细输出。
+    raw_series = None
+
+    def _raw_slice(start_frame: int | None, end_frame: int | None) -> tuple[np.ndarray, dict]:
+        nonlocal raw_series
+        if raw_series is None:
+            raw_series = extract_pose_raw_series(video_path, pose_variant=pv)
+        return slice_pose_raw_series(raw_series, start_frame=start_frame, end_frame=end_frame)
 
     # 1) 按“正面程度”把长视频拆成正/侧两段（无需手动标注转身点）。
     #    正面程度来自肩宽/躯干长度 + 左右可见度平衡，先平滑再二分。
@@ -915,12 +928,7 @@ def compare_video_to_dual_templates(
                 s = e = None
             else:
                 s, e = int(seg[0]), int(seg[1])
-            raw, raw_meta = extract_pose_raw(
-                video_path,
-                pose_variant=pv,
-                start_frame=s,
-                end_frame=e,
-            )
+            raw, raw_meta = _raw_slice(s, e)
             return score_rules(
                 raw,
                 view=view,
@@ -1021,11 +1029,9 @@ def compare_video_to_dual_templates(
                 mirrored = False
 
             if start_i <= end_i and path:
-                raw, raw_meta = extract_pose_raw(
-                    video_path,
-                    pose_variant=pv,
-                    start_frame=int(seg_offset),
-                    end_frame=int(seg_offset + int(seg_seq.shape[0]) - 1),
+                raw, raw_meta = _raw_slice(
+                    int(seg_offset),
+                    int(seg_offset + int(seg_seq.shape[0]) - 1),
                 )
                 raw_mask = _valid_mask_from_raw(raw, raw_meta)
                 path_arr = np.asarray(path, dtype=np.int64)

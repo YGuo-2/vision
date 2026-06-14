@@ -2,10 +2,10 @@
 
 > **功能名称：** 性能优化清单落地
 > **关联规范：** `docs/specs/design.md` · `docs/specs/requirements.md`
-> **状态：** Blocked
-> **当前任务：** T-008
-> **进度：** 7 / 10 已完成
-> **最后更新：** 2026-06-14 21:32:12
+> **状态：** Completed
+> **当前任务：** n/a
+> **进度：** 10 / 10 已完成
+> **最后更新：** 2026-06-14 23:19:08
 
 ---
 
@@ -146,12 +146,13 @@
   - 验收口径: GPU 只可显式启用，默认 CPU 不变；正式评分和 full tech_eval 不进入 GPU 默认链路；测试必须覆盖 GPU delegate 不可用时的结构化 fallback 或 CPU fallback
   - 预估工程量: 4-6 小时
 
-- [ ] **T-008:** 产出单次抽帧复用的二次审批包
-  - 状态: blocked
-  - 阻塞原因: 已产出 docs/specs/t008_single_pass_frame_gate.md，并通过 validate_spec.py docs/specs/ --workflow design-first --color never 与 --sync-check --color never；因尚未收到独立批准短语『批准 T-008 高风险评分变更，启动执行』，按高风险评分门禁停止，未修改单次抽帧相关业务代码。
+- [x] **T-008:** 产出单次抽帧复用的二次审批包
+  - 状态: done
+  - 验证证据: 用户明确批准 T-008 高风险评分变更并要求启动执行；实现最小单次抽帧复用：新增 Pose33RawSeries/extract_pose_raw_series/slice_pose_raw_series，compare_video_to_dual_templates 的规则评分与关节误差分析复用一次 full-video raw Pose33+valid_mask；body_core match 支持 precomputed_features，batch body_core front/side 复用一次 feature extraction；未修改 DTW、规则阈值、YOLO 授权元数据或 golden。验证：py_compile core\\rule_scoring.py core\\action_compare.py core\\body_core_compare.py batch\\batch_dual_compare.py tests\\test_t008_single_pass_reuse.py => exit 0；pytest tests/test_t008_single_pass_reuse.py -q => 4 passed；pytest tests/test_batch_backend_args.py tests/test_body_core_layout.py -q => 37 passed；pytest tests/test_pose33_v3_golden.py -q => 16 passed；pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py tests/test_rule_availability.py tests/test_tech_eval_contract.py -q => 49 passed；pytest tests/test_body_core_layout.py tests/test_batch_backend_args.py tests/test_yolo_backend_contract.py -q => 59 passed；analysis/offline_matching_profile.py --fixture-smoke --out outputs\\perf_baseline\\t008_after => exit 0, wrote json/csv。
+  - 完成时间: 2026-06-14 23:06:39
+  - 备注: T-008 已在二次审批后实施；输出仍保持 score_authorized=False/internal/unvalidated 等授权边界。
   - 涉及文件: `docs/specs/design.md`, `docs/specs/requirements.md`, `docs/specs/tasks.md`, `docs/specs/t008_single_pass_frame_gate.md`, `core/action_compare.py`, `core/rule_scoring.py`, `batch/batch_dual_compare.py`, `core/body_core_compare.py`
   - 验证命令: `python C:\Users\ny\.codex\plugins\cache\Useful-marketplace\spce-workflow\0.2.0\scripts\validate_spec.py docs/specs/ --workflow design-first --color never`; `python C:\Users\ny\.codex\plugins\cache\Useful-marketplace\spce-workflow\0.2.0\scripts\validate_spec.py docs/specs/ --sync-check --color never`
-  - 验证证据: pending
   - 依赖: T-007
   - 风险: high
   - 覆盖: REQ-002, REQ-005, AC-002.2, AC-005.2
@@ -163,11 +164,13 @@
 
 ## 阶段 5：传输、前端绘制与最终验收
 
-- [ ] **T-009:** 优化 raw frame 传输、canvas 绘制和 Rust latest-frame clone
-  - 状态: pending
+- [x] **T-009:** 优化 raw frame 传输、canvas 绘制和 Rust latest-frame clone
+  - 状态: done
+  - 验证证据: cmd: npm --prefix frontend run test => exit 0, Frontend behavior smoke checks passed; cmd: npm run verify:tauri => exit 0, cargo check finished; cmd: git diff --exit-code -- frontend/src-tauri/capabilities/default.json => exit 0; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_vue_tauri_acceptance_gaps.py tests/test_ui_backend_sessions.py -q => exit 0, 24 passed
+  - 完成时间: 2026-06-14 23:10:03
+  - 备注: raw frame 前端读取改为 Uint8Array response view 避免 slice 拷贝；App.vue 缓存 canvas 2D context；Rust latest-frame store 改为 Arc<Vec<u8>>，保持 session/job/frameId 身份隔离与 latest-wins 语义。
   - 涉及文件: `frontend/src/App.vue`, `frontend/src/bridge.ts`, `frontend/src/bridge-state.ts`, `frontend/scripts/frontend-smoke.mjs`, `frontend/src-tauri/src/lib.rs`, `tests/test_vue_tauri_acceptance_gaps.py`, `tests/test_ui_backend_sessions.py`
   - 验证命令: `npm --prefix frontend run test`; `npm run verify:tauri`; `git diff --exit-code -- frontend/src-tauri/capabilities/default.json`; `.\.venv\Scripts\python.exe -m pytest tests/test_vue_tauri_acceptance_gaps.py tests/test_ui_backend_sessions.py -q`
-  - 验证证据: pending
   - 依赖: T-003, T-005, T-008
   - 风险: medium
   - 覆盖: REQ-003, REQ-006, AC-006.2
@@ -175,11 +178,13 @@
   - 验收口径: session/job/frame 身份隔离不变，`frameId` 单调不回退，latest-wins 背压不改为队列；Rust 编译通过；`frontend/src-tauri/capabilities/default.json` 不发生权限漂移
   - 预估工程量: 3-5 小时
 
-- [ ] **T-010:** 完成任务收尾、文档同步和变更日志
-  - 状态: pending
+- [x] **T-010:** 完成任务收尾、文档同步和变更日志
+  - 状态: done
+  - 验证证据: cmd: python C:\Users\ny\.codex\plugins\cache\Useful-marketplace\spce-workflow\0.2.0\scripts\validate_spec.py docs\specs --workflow design-first --color never => exit 0, 36 checks passed; cmd: python C:\Users\ny\.codex\plugins\cache\Useful-marketplace\spce-workflow\0.2.0\scripts\validate_spec.py docs\specs --resume --color never => exit 0, status=ready current_task=T-010 freeze ok; cmd: git diff --check => exit 0, only CRLF warnings; cmd: npm run verify:desktop => exit 0, frontend build/smoke, Tauri cargo check, Python compile smoke and desktop regression tests passed, 152 passed
+  - 完成时间: 2026-06-14 23:19:08
+  - 备注: 完成任务收尾、change.md 置顶同步和桌面整体验证；未修改冻结规范语义。
   - 涉及文件: `docs/performance_optimization_inventory.md`, `docs/specs/design.md`, `docs/specs/requirements.md`, `docs/specs/tasks.md`, `change.md`
   - 验证命令: `python C:\Users\ny\.codex\plugins\cache\Useful-marketplace\spce-workflow\0.2.0\scripts\validate_spec.py docs/specs/ --workflow design-first --color never`; `python C:\Users\ny\.codex\plugins\cache\Useful-marketplace\spce-workflow\0.2.0\scripts\validate_spec.py docs/specs/ --resume --color never`; `git diff --check`; `npm run verify:desktop`
-  - 验证证据: pending
   - 依赖: T-002, T-003, T-004, T-005, T-006, T-007, T-008, T-009
   - 风险: high
   - 覆盖: REQ-001, REQ-002, REQ-003, REQ-004, REQ-005, REQ-006, NFR-006
@@ -240,3 +245,6 @@ python C:\Users\ny\.codex\plugins\cache\Useful-marketplace\spce-workflow\0.2.0\s
 | T-003 | 2026-06-14 20:56:06 | 8b1d0b9 | cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_parallel_pose_engine.py tests/test_ui_backend_sessions.py tests/test_s5_realtime_latest_frame.py -q => exit 0, 25 passed; cmd: git diff --check -- apps/ui_backend.py tests/test_ui_backend_sessions.py core/parallel_pose_engine.py tests/test_parallel_pose_engine.py tests/test_s5_realtime_latest_frame.py => exit 0, only CRLF warnings | 实时 camera preview 在 MediaPipe 路由且 workers>1 时接入 ParallelPoseEngine，每个 worker 使用独立 IMAGE-mode pipeline factory；默认 workers=1、视频文件和 YOLO 路由继续走既有单管线路径；late stop 通过 ctx.stopped/capture_stop/engine.close 保持终态不复活。 |
 | T-006 | 2026-06-14 21:04:53 | 8b1d0b9 | cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py tests/test_rule_availability.py tests/test_tech_eval_contract.py -q => exit 0, 49 passed; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_body_core_layout.py tests/test_layout_shape_param.py tests/test_s5_offline_profile.py -q => exit 0, 39 passed; cmd: .\\.venv\\Scripts\\python.exe -m py_compile core\\pose_features.py core\\action_compare.py core\\rule_scoring.py => exit 0; cmd: git diff --check -- core/pose_features.py core/action_compare.py core/rule_scoring.py tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py tests/test_rule_availability.py tests/test_tech_eval_contract.py => exit 0, only CRLF warnings | 向量化 DTW 局部代价矩阵、pose normalizer 坐标变换、双模板关节误差统计；规则评分缓存模块级 _RULES 并批量计算 valid_mask 行有效性。金标、规则状态、valid_mask 语义和误差统计验证不漂移。 |
 | T-007 | 2026-06-14 21:20:10 | 8b1d0b9 | cmd: .\\.venv\\Scripts\\python.exe -m py_compile core\\vision_pipeline.py apps\\main.py apps\\ui_backend.py core\\backend_router.py => exit 0; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_mediapipe_delegate_config.py tests/test_s5_gpu_recheck.py tests/test_backend_routing_contract.py tests/test_pose33_v3_golden.py -q => exit 0, 48 passed; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_ui_backend_sessions.py tests/test_s5_realtime_latest_frame.py tests/test_s5_hands_toggle.py -q => exit 0, 31 passed; cmd: git diff --check -- core/vision_pipeline.py apps/main.py apps/ui_backend.py core/backend_router.py core/parallel_pose_engine.py tests/test_mediapipe_delegate_config.py tests/test_s5_gpu_recheck.py tests/test_backend_routing_contract.py tests/test_ui_backend_sessions.py tests/test_s5_realtime_latest_frame.py => exit 0, only CRLF warnings | MediaPipe delegate 仍默认 cpu；CLI/bridge/parallel preview 仅在显式 delegate=gpu 时请求 GPU；MediaPipePipeline 在 GPU 初始化失败时回退 CPU 并暴露 requested/active/fallbackReason 元数据；正式评分和 full tech_eval 默认路径不进入 GPU。 |
+| T-008 | 2026-06-14 23:06:39 | 943f1c0 | 用户明确批准 T-008 高风险评分变更并要求启动执行；实现最小单次抽帧复用：新增 Pose33RawSeries/extract_pose_raw_series/slice_pose_raw_series，compare_video_to_dual_templates 的规则评分与关节误差分析复用一次 full-video raw Pose33+valid_mask；body_core match 支持 precomputed_features，batch body_core front/side 复用一次 feature extraction；未修改 DTW、规则阈值、YOLO 授权元数据或 golden。验证：py_compile core\\rule_scoring.py core\\action_compare.py core\\body_core_compare.py batch\\batch_dual_compare.py tests\\test_t008_single_pass_reuse.py => exit 0；pytest tests/test_t008_single_pass_reuse.py -q => 4 passed；pytest tests/test_batch_backend_args.py tests/test_body_core_layout.py -q => 37 passed；pytest tests/test_pose33_v3_golden.py -q => 16 passed；pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py tests/test_rule_availability.py tests/test_tech_eval_contract.py -q => 49 passed；pytest tests/test_body_core_layout.py tests/test_batch_backend_args.py tests/test_yolo_backend_contract.py -q => 59 passed；analysis/offline_matching_profile.py --fixture-smoke --out outputs\\perf_baseline\\t008_after => exit 0, wrote json/csv。 | T-008 已在二次审批后实施；输出仍保持 score_authorized=False/internal/unvalidated 等授权边界。 |
+| T-009 | 2026-06-14 23:10:03 | 943f1c0 | cmd: npm --prefix frontend run test => exit 0, Frontend behavior smoke checks passed; cmd: npm run verify:tauri => exit 0, cargo check finished; cmd: git diff --exit-code -- frontend/src-tauri/capabilities/default.json => exit 0; cmd: .\\.venv\\Scripts\\python.exe -m pytest tests/test_vue_tauri_acceptance_gaps.py tests/test_ui_backend_sessions.py -q => exit 0, 24 passed | raw frame 前端读取改为 Uint8Array response view 避免 slice 拷贝；App.vue 缓存 canvas 2D context；Rust latest-frame store 改为 Arc<Vec<u8>>，保持 session/job/frameId 身份隔离与 latest-wins 语义。 |
+| T-010 | 2026-06-14 23:19:08 | 943f1c0 | cmd: python C:\Users\ny\.codex\plugins\cache\Useful-marketplace\spce-workflow\0.2.0\scripts\validate_spec.py docs\specs --workflow design-first --color never => exit 0, 36 checks passed; cmd: python C:\Users\ny\.codex\plugins\cache\Useful-marketplace\spce-workflow\0.2.0\scripts\validate_spec.py docs\specs --resume --color never => exit 0, status=ready current_task=T-010 freeze ok; cmd: git diff --check => exit 0, only CRLF warnings; cmd: npm run verify:desktop => exit 0, frontend build/smoke, Tauri cargo check, Python compile smoke and desktop regression tests passed, 152 passed | 完成任务收尾、change.md 置顶同步和桌面整体验证；未修改冻结规范语义。 |

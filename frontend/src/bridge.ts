@@ -48,7 +48,7 @@ export type RecordState = {
 
 export type LatestFrameBytes = {
   frameId: number;
-  bytes: ArrayBuffer;
+  bytes: Uint8Array<ArrayBuffer>;
 };
 
 const mockListeners = new Set<(event: BridgeEnvelope) => void>();
@@ -104,7 +104,7 @@ export async function fetchLatestFrameBytes(payload: JsonRecord): Promise<Latest
     return null;
   }
   if (!isTauriRuntime()) {
-    return { frameId, bytes: new ArrayBuffer(0) };
+    return { frameId, bytes: new Uint8Array(0) };
   }
   const response = await invoke<ArrayBuffer>("latest_frame", {
     request: {
@@ -121,7 +121,7 @@ export async function fetchLatestFrameBytes(payload: JsonRecord): Promise<Latest
   const actualFrameId = view.getUint32(0, false) * 2 ** 32 + view.getUint32(4, false);
   return {
     frameId: actualFrameId,
-    bytes: response.slice(8)
+    bytes: new Uint8Array(response, 8)
   };
 }
 

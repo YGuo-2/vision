@@ -129,6 +129,7 @@ for (const marker of [
   "fetchLatestFrameBytes(frame.payload)",
   "window.requestAnimationFrame",
   "createImageBitmap(blob)",
+  "previewCanvasContext ?? canvas.getContext(\"2d\")",
   "ctx.drawImage(bitmap, 0, 0)",
   "bitmap.close()",
   "cancelPendingFrameRender",
@@ -176,6 +177,7 @@ for (const marker of [
   "\"frameChannel\"",
   "frame_handle",
   "frame_id",
+  "Arc<Vec<u8>>",
   "response.extend_from_slice(&slot.frame_id.to_be_bytes())",
   "Response::new(response)"
 ]) {
@@ -488,6 +490,7 @@ assertIncludes(app, "if (isRenderingFrame)", "App.vue");
 assertIncludes(app, "while (pendingFrame)", "App.vue");
 assertIncludes(app, "if (canvas.width !== bitmap.width)", "App.vue");
 assertIncludes(app, "if (canvas.height !== bitmap.height)", "App.vue");
+assertIncludes(bridge, "new Uint8Array(response, 8)", "bridge.ts latest-frame bytes view");
 
 const stopCalls = [];
 const stoppedEnvelope = await bridgeLifecycle.stopJobById(async (command, payload, options) => {

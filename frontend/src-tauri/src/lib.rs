@@ -71,7 +71,7 @@ struct BridgeLaunch {
 struct LatestFrameSlot {
     frame_id: u64,
     frame_handle: String,
-    bytes: Vec<u8>,
+    bytes: Arc<Vec<u8>>,
     payload_bytes: usize,
     updated_at: Instant,
 }
@@ -363,7 +363,7 @@ fn latest_frame(
     }
     let mut response = Vec::with_capacity(8 + slot.bytes.len());
     response.extend_from_slice(&slot.frame_id.to_be_bytes());
-    response.extend_from_slice(&slot.bytes);
+    response.extend_from_slice(slot.bytes.as_slice());
     Ok(Response::new(response))
 }
 
@@ -531,7 +531,7 @@ fn handle_latest_frame_connection(
                     frame_id,
                     frame_handle,
                     payload_bytes: len,
-                    bytes,
+                    bytes: Arc::new(bytes),
                     updated_at: Instant::now(),
                 },
             );

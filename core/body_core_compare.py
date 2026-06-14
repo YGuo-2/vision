@@ -392,6 +392,7 @@ def match_body_core_template(
     pose_variant: str | None = None,
     yolo_model=None,
     valid_conf_thr: float | None = None,
+    precomputed_features: tuple[np.ndarray, float, dict] | None = None,
     reject_multi_person: bool = True,
 ) -> BodyCoreMatchResult:
     """用 ``body_core_v1`` 模板匹配视频，产出仅供预览 / 内部标定参考的分数。
@@ -449,13 +450,23 @@ def match_body_core_template(
             gate_source="template",
         )
 
-    seq, fps, backend_meta = extract_body_core_features(
-        video_path,
-        backend=eff_backend,
-        pose_variant=pv,
-        yolo_model=yolo_model,
-        valid_conf_thr=valid_conf_thr,
-    )
+    if precomputed_features is None:
+        seq, fps, backend_meta = extract_body_core_features(
+            video_path,
+            backend=eff_backend,
+            pose_variant=pv,
+            yolo_model=yolo_model,
+            valid_conf_thr=valid_conf_thr,
+        )
+    else:
+        seq, fps, backend_meta = precomputed_features
+        seq = np.asarray(seq, dtype=np.float32)
+        backend_meta = dict(backend_meta or {})
+        pre_backend = str(backend_meta.get("backend") or eff_backend).lower()
+        if pre_backend != eff_backend:
+            raise ValueError(
+                f"precomputed_features backend={pre_backend!r} 与请求 backend={eff_backend!r} 不一致"
+            )
 
     # 多人闸门（Issue #9）：YOLO 模板 meta 与目标视频 meta 都参与判定。
     # MediaPipe 路径无该字段，默认单人，不受影响。

@@ -216,6 +216,7 @@ let latestFrameIdentity: FrameIdentity | null = null;
 let frameRenderRaf: number | null = null;
 let isRenderingFrame = false;
 let lastDrawnFrameId = 0;
+let previewCanvasContext: CanvasRenderingContext2D | null = null;
 
 // 后台预热 MediaPipe pipeline，使点击「开始」时模型已就绪、首帧更快出现。
 // 失败静默：预热只是优化，失败时正常流程会退回懒加载路径。
@@ -720,8 +721,9 @@ async function renderLatestFrame(frame: PendingFrame): Promise<void> {
       if (canvas.height !== bitmap.height) {
         canvas.height = bitmap.height;
       }
-      const ctx = canvas.getContext("2d");
+      const ctx = previewCanvasContext ?? canvas.getContext("2d");
       if (!ctx) return;
+      previewCanvasContext = ctx;
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       ctx.drawImage(bitmap, 0, 0);
       lastDrawnFrameId = response.frameId;
@@ -813,6 +815,7 @@ function cancelPendingFrameRender(): void {
   pendingFrame = null;
   latestFrameIdentity = null;
   lastDrawnFrameId = 0;
+  previewCanvasContext = null;
   if (frameRenderRaf != null) {
     window.cancelAnimationFrame(frameRenderRaf);
     frameRenderRaf = null;
@@ -837,8 +840,9 @@ function markSessionStopped(nextStatus: string, options: { clearSession?: boolea
 function clearPreviewCanvas(): void {
   const canvas = previewCanvas.value;
   if (!canvas) return;
-  const ctx = canvas.getContext("2d");
+  const ctx = previewCanvasContext ?? canvas.getContext("2d");
   if (ctx) {
+    previewCanvasContext = ctx;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
   }
 }

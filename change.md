@@ -1,3 +1,69 @@
+## 2026-06-14: T-010 完成性能优化任务收尾与桌面整体验证
+
+### 问题描述
+
+T-010 要求在 T-002 至 T-009 全部关闭后完成收尾验证、进度同步和变更日志记录，并确认任务证据、Spce resume 状态、桌面整体验证和文本卫生门均可通过。收尾期间发现 Spce validator 在最后一个任务已 `active` 且无 `pending` 任务时无法计算 execution waves；同时 `LatestFrameBytes.bytes` 的 `Uint8Array` 类型需要收窄为 DOM `BlobPart` 可接受的 `ArrayBuffer` view，才能通过 Vue 类型检查。
+
+### 修改内容
+
+- 补齐 `frontend/src/bridge.ts` 中 `LatestFrameBytes.bytes` 的类型为 `Uint8Array<ArrayBuffer>`，保持 `new Uint8Array(response, 8)` 免拷贝视图语义不变。
+- 按 T-010 验证门完成规范结构校验、resume 校验、`git diff --check` 和 `npm run verify:desktop`。
+- 通过 `spec_progress.py start docs\specs T-010` 恢复当前任务 active 状态，并准备使用 `spec_progress.py complete docs\specs T-010` 记录最终证据。
+- 更新本 `change.md` 置顶记录，作为本轮任务链的收尾审计入口。
+
+### 验证方法
+
+- `python C:\Users\ny\.codex\plugins\cache\Useful-marketplace\spce-workflow\0.2.0\scripts\validate_spec.py docs\specs --workflow design-first --color never`：通过，`36` 项检查全部通过。
+- `python C:\Users\ny\.codex\plugins\cache\Useful-marketplace\spce-workflow\0.2.0\scripts\validate_spec.py docs\specs --resume --color never`：通过，`status=ready`，`current_task=T-010`，freeze ok。
+- `git diff --check`：通过，仅有 Windows CRLF 提示，无空白错误。
+- `npm run verify:desktop`：通过，frontend build、frontend smoke、Tauri cargo check、Python compile smoke 和 Python desktop regression tests；桌面回归 `152 passed`。
+
+## 2026-06-14: T-009 优化 raw frame 传输、canvas 绘制与 latest-frame clone
+
+### 问题描述
+
+T-009 要求在保持 session/job/frameId 身份隔离、`frameId` 单调不回退和 latest-wins 背压语义不变的前提下，减少 raw frame 传输与绘制热路径上的额外拷贝和重复查找。
+
+### 修改内容
+
+- 在 `frontend/src/bridge.ts` 中将 latest-frame payload 从 `response.slice(8)` 改为 `new Uint8Array(response, 8)`，避免每帧额外复制 JPEG bytes。
+- 在 `frontend/src/App.vue` 中缓存 preview canvas 的 2D context，停止/取消预览时重置缓存；保持 `createImageBitmap(blob)`、`drawImage()`、`lastDrawnFrameId` 与 `isDrawableFrame()` 守卫不变。
+- 在 `frontend/src-tauri/src/lib.rs` 中将 latest-frame store 的 bytes 改为 `Arc<Vec<u8>>`，服务端取帧时 clone slot 只增加引用计数，减少锁内深拷贝。
+- 更新 `frontend/scripts/frontend-smoke.mjs`，锁定 Uint8Array view、canvas context cache 和 `Arc<Vec<u8>>` 优化点。
+- 通过 `spec_progress.py complete docs\specs T-009` 记录任务证据。
+
+### 验证方法
+
+- `npm --prefix frontend run test`：通过，`Frontend behavior smoke checks passed`。
+- `npm run verify:tauri`：通过，`cargo check` finished。
+- `git diff --exit-code -- frontend/src-tauri/capabilities/default.json`：通过，capabilities 无权限漂移。
+- `.\.venv\Scripts\python.exe -m pytest tests/test_vue_tauri_acceptance_gaps.py tests/test_ui_backend_sessions.py -q`：通过，`24 passed`。
+
+## 2026-06-14: T-008 实施单次 raw / body_core 特征复用
+
+### 问题描述
+
+用户独立批准 `T-008` 高风险评分变更后，可以实施单次抽帧复用。原路径在双模板规则评分、关节误差分析和 body_core front/side 模板匹配中会对同一视频重复打开 `VideoCapture` 并重复推理。该优化必须保持 MediaPipe VIDEO-mode 全程状态、`valid_mask`、规则评分、body_core 授权元数据和 golden 输出不漂移。
+
+### 修改内容
+
+- 在 `core/rule_scoring.py` 新增 `Pose33RawSeries`、`extract_pose_raw_series()` 和 `slice_pose_raw_series()`，保留 `extract_pose_raw()` 外部兼容行为。
+- 在 `core/action_compare.py` 中让 `compare_video_to_dual_templates()` 的规则评分和关节误差分析复用一次 full-video raw Pose33 + `valid_mask`，再按 front/side 或 active segment 只读切片。
+- 在 `core/body_core_compare.py` 中为 `match_body_core_template()` 增加 `precomputed_features` 参数，并校验预抽 backend 与请求 backend 一致。
+- 在 `batch/batch_dual_compare.py` 的 body_core 调试批处理中，每个学生视频只调用一次 `extract_body_core_features()`，front/side 两个模板匹配共享该结果。
+- 新增 `tests/test_t008_single_pass_reuse.py`，覆盖 raw series 切片等价、双模板只抽一次 raw、body_core 预抽特征复用和 backend mismatch 拒绝。
+- 通过 `spec_progress.py complete docs\specs T-008` 记录二次审批、实现范围和验证证据。
+
+### 验证方法
+
+- `.\.venv\Scripts\python.exe -m py_compile core\rule_scoring.py core\action_compare.py core\body_core_compare.py batch\batch_dual_compare.py tests\test_t008_single_pass_reuse.py`：通过。
+- `.\.venv\Scripts\python.exe -m pytest tests/test_t008_single_pass_reuse.py -q`：通过，`4 passed`。
+- `.\.venv\Scripts\python.exe -m pytest tests/test_batch_backend_args.py tests/test_body_core_layout.py -q`：通过，`37 passed`。
+- `.\.venv\Scripts\python.exe -m pytest tests/test_pose33_v3_golden.py -q`：通过，`16 passed`。
+- `.\.venv\Scripts\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py tests/test_rule_availability.py tests/test_tech_eval_contract.py -q`：通过，`49 passed`。
+- `.\.venv\Scripts\python.exe -m pytest tests/test_body_core_layout.py tests/test_batch_backend_args.py tests/test_yolo_backend_contract.py -q`：通过，`59 passed`。
+- `.\.venv\Scripts\python.exe analysis\offline_matching_profile.py --fixture-smoke --out outputs\perf_baseline\t008_after`：通过，写入 `offline_matching_profile.json` / `.csv`。
+
 ## 2026-06-14: 发布前排除 Tauri sidecar onedir 生成目录
 
 ### 问题描述
