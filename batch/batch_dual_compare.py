@@ -65,7 +65,7 @@ def _student_id_from_view_name(name: str) -> str:
 
 
 def _pair_students(videos) -> list[tuple[str, Path, Path]]:
-    buckets: dict[str, dict[str, list[Path]]] = {}
+    buckets: dict[tuple[Path, str], dict[str, list[Path]]] = {}
     skipped_unknown: list[str] = []
     for video in sorted((Path(v) for v in videos), key=lambda p: p.name.lower()):
         view = _classify_view(video.name)
@@ -73,21 +73,21 @@ def _pair_students(videos) -> list[tuple[str, Path, Path]]:
             skipped_unknown.append(video.name)
             continue
         student_id = _student_id_from_view_name(video.name)
-        buckets.setdefault(student_id, {"front": [], "side": []})[view].append(video)
+        buckets.setdefault((video.parent, student_id), {"front": [], "side": []})[view].append(video)
 
     if skipped_unknown:
         print(f"Skipping unclassified student videos: {skipped_unknown}")
 
     pairs: list[tuple[str, Path, Path]] = []
     skipped_pairs: list[str] = []
-    for student_id in sorted(buckets):
-        front = buckets[student_id]["front"]
-        side = buckets[student_id]["side"]
+    for parent, student_id in sorted(buckets):
+        front = buckets[(parent, student_id)]["front"]
+        side = buckets[(parent, student_id)]["side"]
         if len(front) == 1 and len(side) == 1:
             pairs.append((student_id, front[0], side[0]))
             continue
         skipped_pairs.append(
-            f"{student_id}: front={[p.name for p in front]}, side={[p.name for p in side]}"
+            f"{parent / student_id}: front={[p.name for p in front]}, side={[p.name for p in side]}"
         )
 
     if skipped_pairs:

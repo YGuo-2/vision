@@ -360,6 +360,25 @@ def test_dual_compare_pairs_students_by_front_side_keywords(tmp_path, capsys):
     assert "bob" in out
 
 
+def test_dual_compare_pair_students_keeps_directories_isolated(tmp_path, capsys):
+    dir_a = tmp_path / "class_a"
+    dir_b = tmp_path / "class_b"
+    dir_a.mkdir()
+    dir_b.mkdir()
+    front = dir_a / "alice_front.mp4"
+    side = dir_b / "alice_side.mp4"
+    front.write_bytes(b"fake")
+    side.write_bytes(b"fake")
+
+    pairs = batch_dual_compare._pair_students([front, side])
+
+    assert pairs == []
+    out = capsys.readouterr().out
+    assert "Skipping unpaired student videos" in out
+    assert "class_a" in out
+    assert "class_b" in out
+
+
 def test_dual_compare_body_core_parallel_keeps_order_and_yolo_metadata(tmp_path, monkeypatch):
     from core import body_core_compare
 
