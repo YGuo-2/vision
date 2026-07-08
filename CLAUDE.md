@@ -171,7 +171,7 @@ Landmarks 11-32（排除脸部）→ 以髋部中心平移 → 按躯干长度�
 5. 正/侧分加权平均 → 整数百分制（0-100）
 6. 可选规则扣分（`rule_scoring.py`）
 
-批处理的默认模式仍按上述单学员单视频自动拆分。显式 `batch_dual_compare.py --paired` 时，`student_dir` 内同一目录下同一学员的正面/侧面文件按 `_FRONT_KEYS` / `_SIDE_KEYS` 关键词配对，分别送入 `compare_dual_streams(front_video, side_video)`；CSV `video` 列写学员 id，`--export_raw` 在 paired 模式跳过并提示，`body_core_v1` 调试路径不接 paired。
+批处理的默认模式仍按上述单学员单视频自动拆分。显式 `batch_dual_compare.py --paired` 时，`student_dir` 内同一目录下同一学员的正面/侧面文件按 `_FRONT_KEYS` / `_SIDE_KEYS` 关键词配对，并与标准正/侧模板一起送入 `compare_dual_streams(front_tpl, side_tpl, front_video, side_video)`；CSV `video` 列写学员 id，`--export_raw` 在 paired 模式跳过并提示，`body_core_v1` 调试路径不接 paired。
 
 ### Desktop Bridge Contracts（要点，权威版见 `AGENTS.md`）
 
