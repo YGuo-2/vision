@@ -1149,6 +1149,206 @@ def compare_video_to_dual_templates(
     )
 
 
+def compare_dual_streams(
+    front_template_path: str | Path,
+    side_template_path: str | Path,
+    front_video_path: str | Path,
+    side_video_path: str | Path,
+    *,
+    pose_variant: str | None = None,
+    workers: int = 1,
+    w_front: float = 0.4,
+    w_side: float = 0.6,
+    baseline: float = 2.0,
+    enable_rules: bool = False,
+    action_scope: str = "both",
+    enable_error_analysis: bool = False,
+    progress_cb: ProgressCb | None = None,
+    stop_evt: Event | None = None,
+) -> DualCompareResult:
+    """
+    Compare two independently-synced streams (front camera + side camera) against
+    front/side standard templates. Unlike compare_video_to_dual_templates (single
+    video, frontness-based auto split), each stream is already known-view and is
+    scored on its full length — no split needed.
+    """
+    stop_evt = stop_evt or Event()
+    front_template_path = Path(front_template_path)
+    side_template_path = Path(side_template_path)
+    front_video_path = Path(front_video_path)
+    side_video_path = Path(side_video_path)
+    action_scope = str(action_scope or "both").lower()
+
+    tpl_f = np.load(front_template_path, allow_pickle=True)
+    tpl_s = np.load(side_template_path, allow_pickle=True)
+
+    feat_f = tpl_f["features"]
+    feat_s = tpl_s["features"]
+    raw_meta_f = dict(tpl_f["meta"].item() or {})
+    raw_meta_s = dict(tpl_s["meta"].item() or {})
+    meta_f = normalize_template_meta(dict(raw_meta_f))
+    meta_s = normalize_template_meta(dict(raw_meta_s))
+
+    layout_f = _runtime_feature_layout(raw_meta_f, meta_f)
+    layout_s = _runtime_feature_layout(raw_meta_s, meta_s)
+    _assert_feature_layout_match(
+        feat_f,
+        feat_s,
+        left_label=f"front template {front_template_path}",
+        right_label=f"side template {side_template_path}",
+        left_layout=layout_f,
+        right_layout=layout_s,
+    )
+
+    layout_ver_f = _normalizer_version_from_layout(layout_f)
+    layout_ver_s = _normalizer_version_from_layout(layout_s)
+    if layout_ver_f != layout_ver_s:
+        raise ValueError("Front/side templates use different feature layouts; regenerate templates with the same version.")
+
+    if layout_ver_f == "v3":
+        normalizer = normalize_pose_xy_v3
+    elif layout_ver_f == "v2":
+        normalizer = normalize_pose_xy
+    else:
+        normalizer = normalize_pose_xy_v1
+    pv = pose_variant or meta_f.get("pose_variant") or meta_s.get("pose_variant") or "full"
+
+    tpl_mode_f = str(meta_f.get("running_mode") or (meta_f.get("cfg") or {}).get("running_mode") or "video").lower()
+    tpl_mode_s = str(meta_s.get("running_mode") or (meta_s.get("cfg") or {}).get("running_mode") or "video").lower()
+    tpl_video_mode = (tpl_mode_f == "video") or (tpl_mode_s == "video")
+    workers_eff = 1 if (tpl_video_mode and int(workers) > 1) else int(workers)
+    workers_eff = max(1, workers_eff)
+
+    seq_f, fps_f, _view_f = _extract_pose_features(
+        front_video_path,
+        pose_variant=pv,
+        workers=workers_eff,
+        normalizer=normalizer,
+        compute_view=False,
+        progress_cb=progress_cb,
+        stop_evt=stop_evt,
+    )
+    _assert_feature_layout_match(
+        feat_f,
+        seq_f,
+        left_label=f"front template {front_template_path}",
+        right_label=f"front video {front_video_path}",
+        left_layout=layout_f,
+        right_layout=layout_f,
+    )
+
+    seq_s, fps_s, _view_s = _extract_pose_features(
+        side_video_path,
+        pose_variant=pv,
+        workers=workers_eff,
+        normalizer=normalizer,
+        compute_view=False,
+        progress_cb=progress_cb,
+        stop_evt=stop_evt,
+    )
+    _assert_feature_layout_match(
+        feat_s,
+        seq_s,
+        left_label=f"side template {side_template_path}",
+        right_label=f"side video {side_video_path}",
+        left_layout=layout_s,
+        right_layout=layout_s,
+    )
+
+    raw_series_f = None
+    raw_series_s = None
+
+    def _raw_slice_f(start_frame: int | None, end_frame: int | None) -> tuple[np.ndarray, dict]:
+        nonlocal raw_series_f
+        if raw_series_f is None:
+            raw_series_f = extract_pose_raw_series(front_video_path, pose_variant=pv)
+        return slice_pose_raw_series(raw_series_f, start_frame=start_frame, end_frame=end_frame)
+
+    def _raw_slice_s(start_frame: int | None, end_frame: int | None) -> tuple[np.ndarray, dict]:
+        nonlocal raw_series_s
+        if raw_series_s is None:
+            raw_series_s = extract_pose_raw_series(side_video_path, pose_variant=pv)
+        return slice_pose_raw_series(raw_series_s, start_frame=start_frame, end_frame=end_frame)
+
+    rule_front = None
+    rule_side = None
+    if enable_rules:
+        raw_f, raw_meta_f_slice = _raw_slice_f(None, None)
+        rule_front = score_rules(
+            raw_f,
+            view="front",
+            action_scope=action_scope,
+            valid_mask=_valid_mask_from_raw(raw_f, raw_meta_f_slice),
+        )
+        raw_s, raw_meta_s_slice = _raw_slice_s(None, None)
+        rule_side = score_rules(
+            raw_s,
+            view="side",
+            action_scope=action_scope,
+            valid_mask=_valid_mask_from_raw(raw_s, raw_meta_s_slice),
+        )
+
+    error_layout = POSE33_V3
+    joint_names = list(error_layout.joint_names)
+    src_idx = list(error_layout.source_indices)
+    num_joints = error_layout.num_joints
+
+    front_score, front_matches, front_joint_errors = _score_view_seq(
+        seq_f,
+        _raw_slice_f,
+        feat_f,
+        meta_f,
+        None,
+        fps=fps_f,
+        baseline=baseline,
+        enable_error_analysis=enable_error_analysis,
+        joint_names=joint_names,
+        src_idx=src_idx,
+        num_joints=num_joints,
+    )
+    side_score, side_matches, side_joint_errors = _score_view_seq(
+        seq_s,
+        _raw_slice_s,
+        feat_s,
+        meta_s,
+        None,
+        fps=fps_s,
+        baseline=baseline,
+        enable_error_analysis=enable_error_analysis,
+        joint_names=joint_names,
+        src_idx=src_idx,
+        num_joints=num_joints,
+    )
+
+    combined = float((w_front * float(front_score)) + (w_side * float(side_score)))
+    combined = float(np.clip(combined, 0.0, 1.0))
+    pct = int(np.clip(int(round(combined * 100.0)), 0, 100))
+
+    return DualCompareResult(
+        front_template_path=front_template_path,
+        side_template_path=side_template_path,
+        video_path=front_video_path,
+        pose_variant=pv,
+        fps=float(fps_f),
+        front_score=float(front_score),
+        side_score=float(side_score),
+        combined_score=float(combined),
+        combined_percent=int(pct),
+        front_matches=tuple(front_matches),
+        side_matches=tuple(side_matches),
+        front_segment=(0, int(seq_f.shape[0] - 1)),
+        side_segment=(0, int(seq_s.shape[0] - 1)),
+        front_rule_score=None if rule_front is None else int(rule_front.score),
+        side_rule_score=None if rule_side is None else int(rule_side.score),
+        front_rule_deduction=None if rule_front is None else int(rule_front.total_deduction),
+        side_rule_deduction=None if rule_side is None else int(rule_side.total_deduction),
+        front_rule_violations=None if rule_front is None else tuple(rule_front.violations),
+        side_rule_violations=None if rule_side is None else tuple(rule_side.violations),
+        front_joint_errors=None if front_joint_errors is None else tuple(front_joint_errors),
+        side_joint_errors=None if side_joint_errors is None else tuple(side_joint_errors),
+    )
+
+
 def export_match_preview(
     video_path: Path,
     *,
