@@ -1,3 +1,25 @@
+## 2026-07-08: [apps] 修复 PR #67 代码评审发现的两处问题（issue #58 后续）
+
+### 问题描述
+
+PR #67（issue #58 双摄双路预览）代码评审提出两处问题：
+
+- **P1（真回归，已实测复现）**：`_build_ui` 给列 1 常驻 `columnconfigure(weight=1)`，仅靠 `preview2.grid_remove()` 隐藏第二 Label。Tk grid 按列权重分配额外宽度与 widget 是否隐藏无关——1000px 宽度下实测隐藏列仍占约 494px，主预览只剩约 506px，违反「单摄模式预览行为逐字不变」。
+- **P2（潜在竞态）**：显示 `preview2`（`_start`，按 `state.source2`）与是否真正进入双摄 worker（`_worker_loop`，按 `state.source2 and not is_file`）用了两个不同条件判断，理论上可能显示第二预览但无生产者写入。
+
+### 修改内容
+
+- `apps/app_ui.py`：
+  - **P1**：新增 `_set_dual_preview_visible(visible)`，把「显示/隐藏 `preview2`」与「列 1 grid 权重」绑在一起切换（隐藏时权重同步置 0）。`_build_ui` 初始调用一次（`False`），`_start` 里原地判断改为调用该方法。用真实 Tk 实例验证：1000px 宽度下单摄模式主预览恢复到 996px（此前约 506px），双摄模式两路各占约 498px。
+  - **P2**：把「主输入源是否为摄像头」这一判断收敛进 `_collect_state`——`source2` 只在 `source.isdigit()`（摄像头模式）且第二下拉选中真实条目时才非空；视频文件模式下第二下拉即便有值也强制 `source2=None`。这样 `_start`/`_worker_loop` 只需检查 `state.source2` 是否非空这一个信号，显示、隐藏、分流三处不再各自重复判断、不会出现「显示但无生产者」的分裂状态。
+
+### 验证方法
+
+- `py_compile apps/app_ui.py` → OK
+- `pytest tests/test_pose33_v3_golden.py -q` → 16 passed，零漂移
+- `pytest tests -q` → 22 failed / 377 passed / 1 skipped，失败集合与改动前完全相同（既存 bug，与本次改动无关）
+- 用真实 `tkinter.Tk()` 实例复现并验证修复：单摄模式主预览宽度从约 506px 恢复到 996px（1000px 总宽度下）；切换双摄模式两路各占约 498px
+
 ## 2026-07-08: [apps] _worker_loop_dual_camera 双路 VIDEO 循环 + 双 Label 独立渲染（issue #58）
 
 ### 问题描述
