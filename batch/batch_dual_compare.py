@@ -146,6 +146,7 @@ def main() -> None:
     ap.add_argument("--action", default="both", choices=["stance", "punch", "both"], help="Rule action scope")
     ap.add_argument("--error-analysis", action="store_true", help="Export error analysis CSVs (rules + joints)")
     ap.add_argument("--workers", type=int, default=1, help="Number of videos to process concurrently (default: 1)")
+    ap.add_argument("--paired", action="store_true", help="Pair student front/side files by filename and compare two streams")
     add_backend_layout_args(ap)
     args = ap.parse_args()
     backend, feature_layout = normalize_backend_layout(args.backend, args.feature_layout)
@@ -176,6 +177,9 @@ def main() -> None:
     (out_dir / "templates").mkdir(parents=True, exist_ok=True)
     (out_dir / "skeleton").mkdir(parents=True, exist_ok=True)
 
+    if bool(getattr(args, "paired", False)) and not is_default_pose33_path(backend, feature_layout):
+        raise ValueError("--paired 仅支持默认 MediaPipe pose33_v3 路径；body_core_v1 双文件批处理不在本期范围内。")
+
     if not is_default_pose33_path(backend, feature_layout):
         _run_body_core_batch(
             args=args,
@@ -198,22 +202,60 @@ def main() -> None:
     if not student_videos:
         raise FileNotFoundError(f"No student videos found in: {student_dir}")
 
+    paired_mode = bool(getattr(args, "paired", False))
+    if paired_mode:
+        paired_students = _pair_students(student_videos)
+        if not paired_students:
+            raise FileNotFoundError(f"No paired front/side student videos found in: {student_dir}")
+        work_items = paired_students
+    else:
+        work_items = student_videos
+
+    export_raw_enabled = bool(args.export_raw) and not paired_mode
+    if paired_mode and bool(args.export_raw):
+        print("--export_raw is not supported in --paired mode; skipping raw skeleton export.")
+
     rows: list[dict[str, Any]] = []
     error_rules_rows: list[dict[str, Any]] = []
     error_joints_rows: list[dict[str, Any]] = []
     jsonl_path = out_dir / "compare_results.jsonl"
     video_workers = max(1, int(args.workers))
 
-    def _process_pose33_video(idx: int, v: Path) -> tuple[int, Any, dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
-        res = ac.compare_video_to_dual_templates(
-            front_tpl,
-            side_tpl,
-            v,
-            workers=1,
-            enable_rules=bool(args.rules),
-            action_scope=str(args.action),
-            enable_error_analysis=enable_error_analysis,
-        )
+    def _process_pose33_video(idx: int, item) -> tuple[int, Any, dict[str, Any], list[dict[str, Any]], list[dict[str, Any]], dict[str, Any] | None]:
+        if paired_mode:
+            student_id, front_student_video, side_student_video = item
+            res = ac.compare_dual_streams(
+                front_tpl,
+                side_tpl,
+                front_student_video,
+                side_student_video,
+                workers=1,
+                enable_rules=bool(args.rules),
+                action_scope=str(args.action),
+                enable_error_analysis=enable_error_analysis,
+            )
+            video_label = str(student_id)
+            error_video_label = str(student_id)
+            payload_extra = {
+                "student_id": str(student_id),
+                "front_video_path": str(front_student_video),
+                "side_video_path": str(side_student_video),
+            }
+        else:
+            v = item
+            res = ac.compare_video_to_dual_templates(
+                front_tpl,
+                side_tpl,
+                v,
+                workers=1,
+                enable_rules=bool(args.rules),
+                action_scope=str(args.action),
+                enable_error_analysis=enable_error_analysis,
+            )
+            video_label = str(v)
+            error_video_label = str(v.name)
+            payload_extra = None
+
         per_video_rule_rows: list[dict[str, Any]] = []
         per_video_joint_rows: list[dict[str, Any]] = []
         if enable_error_analysis and bool(args.rules):
@@ -226,7 +268,7 @@ def main() -> None:
                 for rv in violations:
                     per_video_rule_rows.append(
                         {
-                            "video": str(v.name),
+                            "video": error_video_label,
                             "view": str(view),
                             "rule_id": str(rv.rule_id),
                             "rule_name": str(rv.name),
@@ -251,7 +293,7 @@ def main() -> None:
                 for je in joints:
                     per_video_joint_rows.append(
                         {
-                            "video": str(v.name),
+                            "video": error_video_label,
                             "view": str(view),
                             "joint": str(je.joint),
                             "mean_dist": "" if je.mean_dist is None else float(je.mean_dist),
@@ -261,7 +303,7 @@ def main() -> None:
                         }
                     )
         row = {
-            "video": str(v),
+            "video": video_label,
             "front_score": float(res.front_score),
             "side_score": float(res.side_score),
             "combined_percent": int(res.combined_percent),
@@ -276,28 +318,31 @@ def main() -> None:
             "pose_variant": str(res.pose_variant),
             "fps": float(res.fps),
         }
-        return idx, res, row, per_video_rule_rows, per_video_joint_rows
+        return idx, res, row, per_video_rule_rows, per_video_joint_rows, payload_extra
 
-    compare_results: list[tuple[int, Any, dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]] = []
+    compare_results: list[tuple[int, Any, dict[str, Any], list[dict[str, Any]], list[dict[str, Any]], dict[str, Any] | None]] = []
     if video_workers <= 1:
-        for i, v in enumerate(student_videos):
-            compare_results.append(_process_pose33_video(i, v))
+        for i, item in enumerate(work_items):
+            compare_results.append(_process_pose33_video(i, item))
     else:
         with ThreadPoolExecutor(max_workers=video_workers) as ex:
-            futures = [ex.submit(_process_pose33_video, i, v) for i, v in enumerate(student_videos)]
+            futures = [ex.submit(_process_pose33_video, i, item) for i, item in enumerate(work_items)]
             for fut in as_completed(futures):
                 compare_results.append(fut.result())
     compare_results.sort(key=lambda item: item[0])
 
     with jsonl_path.open("w", encoding="utf-8") as jf:
-        for _idx, res, row, per_video_rule_rows, per_video_joint_rows in compare_results:
-            jf.write(json.dumps(_jsonable(res), ensure_ascii=False) + "\n")
+        for _idx, res, row, per_video_rule_rows, per_video_joint_rows, payload_extra in compare_results:
+            payload = _jsonable(res)
+            if payload_extra:
+                payload.update(payload_extra)
+            jf.write(json.dumps(payload, ensure_ascii=False) + "\n")
             rows.append(row)
             error_rules_rows.extend(per_video_rule_rows)
             error_joints_rows.extend(per_video_joint_rows)
 
     # Export standard raw (front/side) if requested.
-    if args.export_raw:
+    if export_raw_enabled:
         std_front_raw, meta_f = extract_pose_raw(front_video, pose_variant=args.pose)
         std_side_raw, meta_s = extract_pose_raw(side_video, pose_variant=args.pose)
         np.savez_compressed(out_dir / "skeleton" / f"standard_front_raw_{args.pose}.npz", landmarks=std_front_raw, meta=np.array(meta_f, dtype=object))
@@ -349,7 +394,7 @@ def main() -> None:
     print(f"Saved templates: {front_tpl} , {side_tpl}")
     print(f"Saved results:   {csv_path}")
     print(f"Saved jsonl:     {jsonl_path}")
-    if args.export_raw:
+    if export_raw_enabled:
         print(f"Saved skeleton:  {out_dir / 'skeleton'}")
     if enable_error_analysis and bool(args.rules):
         print(f"Saved error rules: {out_dir / 'error_rules.csv'}")
