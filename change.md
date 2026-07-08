@@ -1,3 +1,29 @@
+## 2026-07-08: [apps] _worker_loop_dual_camera 双路 VIDEO 循环 + 双 Label 独立渲染（issue #58）
+
+### 问题描述
+
+双摄像头双面视图（Milestone #7）apps 链下一环。#57 已落地第二摄像头下拉 + `UiState.source2`，但选中后并未真正跑双路预览。issue #58 原描述提到接「两个 `PreviewLandmarkSmoother`」+「在线 matcher 只喂正面流」，但核实当前 `apps/app_ui.py` 单摄路径本身并未接入 `core/preview_smoother.py`（One Euro 平滑）或 `core/online_matcher.py`（在线 DTW 识别）——这两个模块目前只接进了 `apps/ui_backend.py`（Vue/Tauri 桥接层），从未接入 Tkinter。经用户确认，本次范围裁剪为「只做双摄骨架」：两个独立 `MediaPipePipeline` + 两个单槽队列 + 两个 Label，忠实复刻单摄 `_worker_loop` 现有行为（包括它目前就没有的平滑/识别），smoother/matcher 接入 Tkinter 留给后续独立 issue。
+
+### 修改内容
+
+- `apps/app_ui.py`：
+  - `__init__` 新增第二路预览状态：`self._queue2`（单槽队列，同构 `self._queue`）与 `self._photo2`。单摄模式下恒空/恒 None，现有路径零改动。
+  - `_build_ui` 预览区新增第二 `ttk.Label self.preview2`（`grid(row=0, column=1)`），初始 `grid_remove()` 隐藏；`right` 增加列 1 的 grid 权重。
+  - `_start()` 按 `state.source2` 是否非空切换 `preview2` 的显示/隐藏。
+  - `_worker_loop` 在 `cap.isOpened()` 校验之后、单摄 VIDEO/并行分流之前插入分流：`state.source2` 非空且非文件模式时转入新方法 `_worker_loop_dual_camera(state, cap)`。
+  - 新增 `_worker_loop_dual_camera`：仿单摄 VIDEO 分支，两个独立 `MediaPipePipeline`（VIDEO 模式有状态，不共享）+ 新开 `cap2 = open_camera(int(state.source2))`；循环内两路各自 `read → next_timestamp_ms → annotate`，任一路读失败则整体停止；只在正面路叠 FPS/提示文字、只录正面路（`self._rec.write_frame`，侧路预览不落盘，`# ponytail:` 注明升级路径）；分别推 `_post_frame`/新方法 `_post_frame2`。
+  - 新增 `_post_frame2`：与 `_post_frame` 同构，操作 `self._queue2`。
+  - `_tick` 追加非阻塞 drain `self._queue2` 并按现有 fit-to-window 缩放逻辑绘制到 `self.preview2`（重复一份缩放代码是最小必要重复，抽公共 helper 属过度设计）。
+  - 不接 `PreviewLandmarkSmoother`/`OnlineActionMatcher`；不支持双路都存视频文件；`workers>1` 时双摄分支内部仍强制单线程跑两路 VIDEO pipeline（不复用并行摄像头路径）。
+  - 未新增单测文件——AST 守卫等测试已单独列在 issue #59，随后续落地。
+
+### 验证方法
+
+- `py_compile apps/app_ui.py` → OK
+- `pytest tests/test_pose33_v3_golden.py -q` → **16 passed，零漂移**
+- `pytest tests -q`：改动前后各跑一遍全量对比（`git stash` 前后 22 failed / 377-378 passed，失败集合逐一相同），确认本次改动**零新增失败**；既存 22 个失败（`test_app_ui_online_matcher.py` 10 项、`test_s5_hands_toggle.py::test_ui_state_*` 2 项等）均在改动前的干净基线上已存在，与本次改动无关（`test_s5_hands_toggle.py` 的失败是 `_collect_state` 引用了不存在的 `self.save_var`/`self.out_var`，属既存 bug）
+- 人眼验收待硬件到位后补：选两个摄像头 → 并排双骨架预览；只选一个 → 单摄行为不变（结构上保证，逐字复刻单摄分支）
+
 ## 2026-07-08: [apps] Tkinter 第二摄像头选择器 + UiState.source2（issue #57）
 
 ### 问题描述
