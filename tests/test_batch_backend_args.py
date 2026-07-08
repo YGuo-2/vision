@@ -335,6 +335,50 @@ def test_dual_compare_parallel_video_workers_keep_order_and_inner_workers_one(tm
     assert sorted(calls) == [("a_slow.mp4", 1), ("b_fast.mp4", 1)]
 
 
+def test_dual_compare_pairs_students_by_front_side_keywords(tmp_path, capsys):
+    videos = [
+        tmp_path / "张三_正面.mp4",
+        tmp_path / "张三_侧面.mp4",
+        tmp_path / "alice-front.mp4",
+        tmp_path / "alice-side.mp4",
+        tmp_path / "bob_front.mp4",
+        tmp_path / "notes.mp4",
+    ]
+    for video in videos:
+        video.write_bytes(b"fake")
+
+    pairs = batch_dual_compare._pair_students(videos)
+
+    assert [(student_id, front.name, side.name) for student_id, front, side in pairs] == [
+        ("alice", "alice-front.mp4", "alice-side.mp4"),
+        ("张三", "张三_正面.mp4", "张三_侧面.mp4"),
+    ]
+    out = capsys.readouterr().out
+    assert "Skipping unclassified student videos" in out
+    assert "notes.mp4" in out
+    assert "Skipping unpaired student videos" in out
+    assert "bob" in out
+
+
+def test_dual_compare_pair_students_keeps_directories_isolated(tmp_path, capsys):
+    dir_a = tmp_path / "class_a"
+    dir_b = tmp_path / "class_b"
+    dir_a.mkdir()
+    dir_b.mkdir()
+    front = dir_a / "alice_front.mp4"
+    side = dir_b / "alice_side.mp4"
+    front.write_bytes(b"fake")
+    side.write_bytes(b"fake")
+
+    pairs = batch_dual_compare._pair_students([front, side])
+
+    assert pairs == []
+    out = capsys.readouterr().out
+    assert "Skipping unpaired student videos" in out
+    assert "class_a" in out
+    assert "class_b" in out
+
+
 def test_dual_compare_body_core_parallel_keeps_order_and_yolo_metadata(tmp_path, monkeypatch):
     from core import body_core_compare
 
