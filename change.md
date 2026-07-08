@@ -1,3 +1,23 @@
+## 2026-07-08: [test] 补全 compare_dual_streams 单测验收标准（issue #56）
+
+### 问题描述
+
+#55/#56 已在 PR #64 一并落地 `tests/test_compare_dual_streams.py`（3 个测试），但对照 #56 验收标准逐项核对，缺两项：未显式断言 `front_score`/`side_score`/`combined_percent` 的取值范围；未覆盖「正/侧模板 layout 版本不一致时抛 `ValueError`」（`compare_dual_streams` 内部沿用的 `layout_ver_f != layout_ver_s` 守卫，`core/action_compare.py:1205-1206`）。
+
+### 修改内容
+
+- `tests/test_compare_dual_streams.py`：
+  - `test_no_split_and_high_score_for_matching_streams` 补充范围断言：`0.0 <= front_score/side_score <= 1.0`、`0 <= combined_percent <= 100`。
+  - 新增 `test_layout_version_mismatch_raises_value_error`：复制 `front_template.npz`，把 `meta["feature_layout"]` 改成 `LEGACY_DEFAULT_FEATURE_LAYOUT`（v1）另存到 `tmp_path`，与保持 v3 的 `side_template.npz` 一起传入 `compare_dual_streams`，断言抛 `ValueError`。
+  - 不新增产品代码，不新建 fixture，复用已提交的 raw fixture + `golden_harness` 回放。
+
+### 验证方法
+
+- `pytest tests/test_compare_dual_streams.py -q` → **4 passed**
+- `pytest tests/test_pose33_v3_golden.py -q` → **16 passed，golden 零漂移**
+
+
+
 ## 2026-07-08: [core] 提取 _score_view_seq 模块级 helper（issue #54，纯机械 lift）
 
 ### 问题描述

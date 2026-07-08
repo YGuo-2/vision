@@ -72,6 +72,9 @@ def test_no_split_and_high_score_for_matching_streams(registered_videos):
     assert res.front_segment == (0, front_n - 1)
     assert res.side_segment == (0, side_n - 1)
     # 模板正是从这两段源视频生成，同源比对应接近满分。
+    assert 0.0 <= res.front_score <= 1.0
+    assert 0.0 <= res.side_score <= 1.0
+    assert 0 <= res.combined_percent <= 100
     assert res.front_score > 0.9
     assert res.side_score > 0.9
     assert res.front_rule_violations is not None
@@ -114,3 +117,16 @@ def test_raw_series_extracted_once_per_stream_no_cross_contamination(registered_
 
     assert calls.count(Path(FRONT_SRC)) == 1
     assert calls.count(Path(SIDE_SRC)) == 1
+
+
+def test_layout_version_mismatch_raises_value_error(registered_videos, tmp_path):
+    """正/侧模板 layout 版本不一致（v3 vs v1）应抛 ValueError，沿用既有守卫。"""
+    d = np.load(FRONT_TPL, allow_pickle=True)
+    meta = dict(d["meta"].item())
+    meta["feature_layout"] = ac.LEGACY_DEFAULT_FEATURE_LAYOUT
+    mutated_front_tpl = tmp_path / "front_template_v1.npz"
+    np.savez_compressed(mutated_front_tpl, features=d["features"], meta=np.array(meta, dtype=object))
+
+    with H.replay_context():
+        with pytest.raises(ValueError):
+            ac.compare_dual_streams(mutated_front_tpl, SIDE_TPL, FRONT_SRC, SIDE_SRC, pose_variant="full")
