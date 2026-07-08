@@ -106,7 +106,7 @@ npm run package:windows
 - **core/backend_router.py**: **UI bridge / batch / 离线分析共享的后端路由唯一决策点**。纯函数、零重依赖（不 import MediaPipe/YOLO/UI），按 `TaskType`（realtime_preview / offline_body_analysis / formal_score / full_tech_eval / batch_body_core）+ `QualityProfile` + 模型可用性 + 请求能力，决定后端、评分授权与显示范围，并产出 snake_case/camelCase 序列化契约。**不要在入口层复制分叉路由逻辑**
 - **core/pose_features.py**: 姿态归一化（平移/缩放/旋转不变）与 DTW 子序列匹配
 - **core/feature_layout.py**: 特征布局注册表（`FeatureLayoutSpec`），把热路径里散落的 `(22, 2)` 硬编码收敛到显式布局对象（补零/mirror/误差统计/周期裁切按 layout 取值）。注册 `pose33_v3`（baseline 2.0）与 `body_core_v1`（12 点躯干四肢核心，baseline 已标定为 `1.2826`）
-- **core/action_compare.py**: 高层模板匹配 — 从视频建模板并与目标对比，含双模板（正面+侧面）对比与自动视角拆分
+- **core/action_compare.py**: 高层模板匹配 — 从视频建模板并与目标对比，含双模板（正面+侧面）对比、自动视角拆分，以及 `compare_dual_streams` 双独立流评分入口
 - **core/body_core_compare.py**: `body_core_v1`（12 点）模板闭环（生成→匹配），YOLO 与 MediaPipe 均可生成同布局模板供对照；提供离线 high-quality body-only 分析入口（`DEFAULT_YOLO26L_MODEL_NAME`）。结果恒 `score_authorized=False` / `display_scope=internal`
 - **core/yolo_adapter.py**: YOLO 进入主链路的**唯一入口**，ultralytics YOLO-pose 的 COCO17 → BlazePose33-like 映射；提供边界 `infer_frame()` 与实时 `annotate()`。结构性缺失点（嘴角/手指/脚跟脚尖/眼细分）在序列层 `valid_mask=False`、边界层 `synthetic=True`/`visibility=0.0`，**不得伪造成有效点**。所有 artifact 经 `_yolo_authorization_meta()` 强制写入 `raw_layout=pose33_like_coco17` / `feature_layout=body_core_v1` / `capability` / `score_authorized=False` / `calibration_status=unvalidated` / `display_scope=limited|internal`
 - **core/rule_scoring.py**: 规则扣分引擎，基于原始 Pose33 关键点计算违规比例与扣分；缺失能力进入 skipped/missing，不贡献正式扣分
@@ -134,7 +134,7 @@ npm run package:windows
   - `spike_yolo_baseline.py` / `selfcheck_tech_eval.py` / `analyze_*.py`：实验 spike 与自检
 - **batch/**: 离线批处理 CLI
   - `backend_options.py`：共享 `backend_router` 的 CLI 适配层（`--backend` / `--feature-layout` 校验与 meta 透传）
-  - `batch_dual_compare.py` / `batch_export_skeleton.py` / `batch_tech_eval.py`：默认 MediaPipe `pose33_v3`；显式 `body_core_v1` 时走 YOLO 调试闭环，输出与对外评分列分离、多人标「需人工复核」
+  - `batch_dual_compare.py` / `batch_export_skeleton.py` / `batch_tech_eval.py`：默认 MediaPipe `pose33_v3`；显式 `body_core_v1` 时走 YOLO 调试闭环，输出与对外评分列分离、多人标「需人工复核」。`batch_dual_compare.py --paired` 仅在默认 `pose33_v3` 路径中按学员正/侧文件名配对并调用 `compare_dual_streams`
 
 ### Frontend (Vue + Tauri)
 
@@ -170,6 +170,8 @@ Landmarks 11-32（排除脸部）→ 以髋部中心平移 → 按躯干长度�
 4. 各段多匹配子序列 DTW；trimmed mean 聚合（≥3 次时丢弃 max/min）
 5. 正/侧分加权平均 → 整数百分制（0-100）
 6. 可选规则扣分（`rule_scoring.py`）
+
+批处理的默认模式仍按上述单学员单视频自动拆分。显式 `batch_dual_compare.py --paired` 时，`student_dir` 内同一目录下同一学员的正面/侧面文件按 `_FRONT_KEYS` / `_SIDE_KEYS` 关键词配对，并与标准正/侧模板一起送入 `compare_dual_streams(front_tpl, side_tpl, front_video, side_video)`；CSV `video` 列写学员 id，`--export_raw` 在 paired 模式跳过并提示，`body_core_v1` 调试路径不接 paired。
 
 ### Desktop Bridge Contracts（要点，权威版见 `AGENTS.md`）
 
