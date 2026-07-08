@@ -1,3 +1,24 @@
+## 2026-07-08: [core] 提取 _score_view_seq 模块级 helper（issue #54，纯机械 lift）
+
+### 问题描述
+
+双摄像头双面视图（Milestone #7）的下一步 #55 要新增 `compare_dual_streams`（正流↔正模板、侧流↔侧模板各跑一次评分），但评分逻辑 `score_view`（`core/action_compare.py`）是 `compare_video_to_dual_templates` 内的嵌套闭包，绑定了单视频局部变量 `seq`/`fps`/`_raw_slice`/`baseline` 等，无法在函数外部对两路独立流复用。本 issue 只做纯机械 lift，不改任何行为，为 #55 铺路。
+
+### 修改内容
+
+- `core/action_compare.py`：
+  - `_swap_lr`（纯字符串 helper，无闭包状态）原样提到模块级，紧邻 `_trimmed_mean` 之后。
+  - `score_view` 函数体提升为模块级函数 `_score_view_seq(seq, raw_slice_fn, tpl_features, tpl_meta, seg, *, fps, baseline, enable_error_analysis, joint_names, src_idx, num_joints)`，自由变量全部变成参数，语句顺序/取值逐字不变；`_raw_slice(...)` 调用改为 `raw_slice_fn(...)`。
+  - `compare_video_to_dual_templates` 内 `score_view` 收缩成一行 delegate，调用 `_score_view_seq(...)`；调用点 `score_view(feat_f, meta_f, front_seg)` / `score_view(feat_s, meta_s, side_seg)` 不变。
+  - 不新增双流入口（留给 #55），不动单视频 frontness 拆分逻辑。
+
+### 验证方法
+
+- `py_compile core/action_compare.py` → OK
+- `pytest tests/test_pose33_v3_golden.py -q` → **16 passed，golden 零漂移**（含 `test_dual_scores`/`test_dual_segments`/`test_dual_rule_scores`/`test_dual_rule_violations`/`test_dual_joint_errors`，覆盖 `DualCompareResult` 全部字段）
+
+
+
 ## 2026-06-15: 完成 Spce final acceptance 并冻结 accepted 状态
 
 ### 问题描述
