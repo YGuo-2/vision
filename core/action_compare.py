@@ -375,6 +375,158 @@ def _trimmed_mean(scores: list[float]) -> float:
     return float(sum(scores) / len(scores))
 
 
+def _swap_lr(name: str) -> str:
+    if name.startswith("L_"):
+        return "R_" + name[2:]
+    if name.startswith("R_"):
+        return "L_" + name[2:]
+    return name
+
+
+def _score_view_seq(
+    seq: np.ndarray,
+    raw_slice_fn,
+    tpl_features: np.ndarray,
+    tpl_meta: dict,
+    seg: tuple[int, int] | None,
+    *,
+    fps: float,
+    baseline: float,
+    enable_error_analysis: bool,
+    joint_names: list[str],
+    src_idx: list[int],
+    num_joints: int,
+) -> tuple[float, list[RepetitionMatch], list[JointErrorStat] | None]:
+    # 2) 从标准模板中挑一个代表周期，避免整段重复导致匹配过长/过慢。
+    tpl_fps = float(tpl_meta.get("fps") or fps)
+    query = _select_representative_cycle(tpl_features, fps=tpl_fps)
+    if query.size == 0:
+        return 0.0, [], None
+
+    # 3) 选择学员分段（缺失则回退整段视频）。
+    if seg is None:
+        seg_s, seg_e = 0, int(seq.shape[0] - 1)
+    else:
+        seg_s, seg_e = int(seg[0]), int(seg[1])
+        seg_s = max(0, min(seg_s, int(seq.shape[0] - 1)))
+        seg_e = max(seg_s, min(seg_e, int(seq.shape[0] - 1)))
+
+    seg_seq = seq[seg_s : seg_e + 1]
+    seg_offset = seg_s
+
+    # 4) 限制到更“活跃”的区间，减少静止帧对匹配的干扰。
+    if seg_seq.shape[0] >= 2:
+        energy = motion_energy(seg_seq.reshape(seg_seq.shape[0], -1))
+        a_s, a_e = find_active_range(energy, pad=10)
+        a_s = max(0, min(int(a_s), int(seg_seq.shape[0] - 1)))
+        a_e = max(a_s, min(int(a_e), int(seg_seq.shape[0] - 1)))
+        seg_seq = seg_seq[a_s : a_e + 1]
+        seg_offset += int(a_s)
+
+    exclusion = max(3, int(round(0.2 * float(query.shape[0]))))
+    max_matches = int(min(30, max(1, round(float(seg_seq.shape[0]) / max(1.0, float(query.shape[0]))))))
+
+    matches = _multi_subsequence_matches(
+        query,
+        seg_seq,
+        baseline=float(baseline),
+        max_matches=max_matches,
+        exclusion=exclusion,
+        offset=seg_offset,
+    )
+
+    # 兜底：即便没有找到重复匹配，也保证有一个分数输出。
+    if not matches and seg_seq.size > 0:
+        cost, s, e = subsequence_dtw(query, seg_seq)
+        avg = float(cost / max(1, int(query.shape[0])))
+        matches = [
+            RepetitionMatch(
+                start_frame=int(seg_offset + s),
+                end_frame=int(seg_offset + e),
+                avg_cost=float(avg),
+                score=float(float(baseline) / (float(baseline) + float(avg))),
+            )
+        ]
+
+    scores = [m.score for m in matches]
+    joint_stats: list[JointErrorStat] | None = None
+    if enable_error_analysis and seg_seq.size > 0 and query.size > 0:
+        q_m = mirror_pose_features(query)
+        cost1, s1, e1, path1 = subsequence_dtw_with_path(query, seg_seq)
+        cost2, s2, e2, path2 = subsequence_dtw_with_path(q_m, seg_seq)
+        if float(cost2) < float(cost1):
+            q_eff = q_m
+            start_i = int(s2)
+            end_i = int(e2)
+            path = path2
+            mirrored = True
+        else:
+            q_eff = query
+            start_i = int(s1)
+            end_i = int(e1)
+            path = path1
+            mirrored = False
+
+        if start_i <= end_i and path:
+            raw, raw_meta = raw_slice_fn(
+                int(seg_offset),
+                int(seg_offset + int(seg_seq.shape[0]) - 1),
+            )
+            raw_mask = _valid_mask_from_raw(raw, raw_meta)
+            path_arr = np.asarray(path, dtype=np.int64)
+            if path_arr.size:
+                valid_path = (
+                    (path_arr[:, 0] >= 0)
+                    & (path_arr[:, 0] < int(q_eff.shape[0]))
+                    & (path_arr[:, 1] >= 0)
+                    & (path_arr[:, 1] < int(seg_seq.shape[0]))
+                )
+                path_arr = path_arr[valid_path]
+            names = joint_names if not mirrored else [_swap_lr(n) for n in joint_names]
+            joint_stats = []
+            if path_arr.size:
+                q_path = q_eff[path_arr[:, 0]].astype(np.float32, copy=False)
+                s_path = seg_seq[path_arr[:, 1]].astype(np.float32, copy=False)
+                distances = np.linalg.norm(q_path - s_path, axis=2).astype(np.float32, copy=False)
+                visible = np.asarray(raw_mask[path_arr[:, 1]][:, src_idx], dtype=bool)
+                finite = np.isfinite(distances)
+                for k in range(num_joints):
+                    arr = distances[visible[:, k] & finite[:, k], k]
+                    if arr.size == 0:
+                        joint_stats.append(
+                            JointErrorStat(
+                                joint=str(names[k]),
+                                mean_dist=None,
+                                p90_dist=None,
+                                max_dist=None,
+                                valid_frames=0,
+                            )
+                        )
+                    else:
+                        joint_stats.append(
+                            JointErrorStat(
+                                joint=str(names[k]),
+                                mean_dist=float(np.mean(arr)),
+                                p90_dist=float(np.percentile(arr, 90)),
+                                max_dist=float(np.max(arr)),
+                                valid_frames=int(arr.size),
+                            )
+                        )
+            else:
+                joint_stats = [
+                    JointErrorStat(
+                        joint=str(name),
+                        mean_dist=None,
+                        p90_dist=None,
+                        max_dist=None,
+                        valid_frames=0,
+                    )
+                    for name in names
+                ]
+
+    return _trimmed_mean(scores), matches, joint_stats
+
+
 def _feature_frame_shape(features: np.ndarray) -> tuple[int, ...]:
     arr = np.asarray(features)
     if arr.ndim < 2:
@@ -946,146 +1098,24 @@ def compare_video_to_dual_templates(
     src_idx = list(error_layout.source_indices)
     num_joints = error_layout.num_joints
 
-    def _swap_lr(name: str) -> str:
-        if name.startswith("L_"):
-            return "R_" + name[2:]
-        if name.startswith("R_"):
-            return "L_" + name[2:]
-        return name
-
     def score_view(
         tpl_features: np.ndarray,
         tpl_meta: dict,
         seg: tuple[int, int] | None,
     ) -> tuple[float, list[RepetitionMatch], list[JointErrorStat] | None]:
-        # 2) 从标准模板中挑一个代表周期，避免整段重复导致匹配过长/过慢。
-        tpl_fps = float(tpl_meta.get("fps") or fps)
-        query = _select_representative_cycle(tpl_features, fps=tpl_fps)
-        if query.size == 0:
-            return 0.0, [], None
-
-        # 3) 选择学员分段（缺失则回退整段视频）。
-        if seg is None:
-            seg_s, seg_e = 0, int(seq.shape[0] - 1)
-        else:
-            seg_s, seg_e = int(seg[0]), int(seg[1])
-            seg_s = max(0, min(seg_s, int(seq.shape[0] - 1)))
-            seg_e = max(seg_s, min(seg_e, int(seq.shape[0] - 1)))
-
-        seg_seq = seq[seg_s : seg_e + 1]
-        seg_offset = seg_s
-
-        # 4) 限制到更“活跃”的区间，减少静止帧对匹配的干扰。
-        if seg_seq.shape[0] >= 2:
-            energy = motion_energy(seg_seq.reshape(seg_seq.shape[0], -1))
-            a_s, a_e = find_active_range(energy, pad=10)
-            a_s = max(0, min(int(a_s), int(seg_seq.shape[0] - 1)))
-            a_e = max(a_s, min(int(a_e), int(seg_seq.shape[0] - 1)))
-            seg_seq = seg_seq[a_s : a_e + 1]
-            seg_offset += int(a_s)
-
-        exclusion = max(3, int(round(0.2 * float(query.shape[0]))))
-        max_matches = int(min(30, max(1, round(float(seg_seq.shape[0]) / max(1.0, float(query.shape[0]))))))
-
-        matches = _multi_subsequence_matches(
-            query,
-            seg_seq,
-            baseline=float(baseline),
-            max_matches=max_matches,
-            exclusion=exclusion,
-            offset=seg_offset,
+        return _score_view_seq(
+            seq,
+            _raw_slice,
+            tpl_features,
+            tpl_meta,
+            seg,
+            fps=fps,
+            baseline=baseline,
+            enable_error_analysis=enable_error_analysis,
+            joint_names=joint_names,
+            src_idx=src_idx,
+            num_joints=num_joints,
         )
-
-        # 兜底：即便没有找到重复匹配，也保证有一个分数输出。
-        if not matches and seg_seq.size > 0:
-            cost, s, e = subsequence_dtw(query, seg_seq)
-            avg = float(cost / max(1, int(query.shape[0])))
-            matches = [
-                RepetitionMatch(
-                    start_frame=int(seg_offset + s),
-                    end_frame=int(seg_offset + e),
-                    avg_cost=float(avg),
-                    score=float(float(baseline) / (float(baseline) + float(avg))),
-                )
-            ]
-
-        scores = [m.score for m in matches]
-        joint_stats: list[JointErrorStat] | None = None
-        if enable_error_analysis and seg_seq.size > 0 and query.size > 0:
-            q_m = mirror_pose_features(query)
-            cost1, s1, e1, path1 = subsequence_dtw_with_path(query, seg_seq)
-            cost2, s2, e2, path2 = subsequence_dtw_with_path(q_m, seg_seq)
-            if float(cost2) < float(cost1):
-                q_eff = q_m
-                start_i = int(s2)
-                end_i = int(e2)
-                path = path2
-                mirrored = True
-            else:
-                q_eff = query
-                start_i = int(s1)
-                end_i = int(e1)
-                path = path1
-                mirrored = False
-
-            if start_i <= end_i and path:
-                raw, raw_meta = _raw_slice(
-                    int(seg_offset),
-                    int(seg_offset + int(seg_seq.shape[0]) - 1),
-                )
-                raw_mask = _valid_mask_from_raw(raw, raw_meta)
-                path_arr = np.asarray(path, dtype=np.int64)
-                if path_arr.size:
-                    valid_path = (
-                        (path_arr[:, 0] >= 0)
-                        & (path_arr[:, 0] < int(q_eff.shape[0]))
-                        & (path_arr[:, 1] >= 0)
-                        & (path_arr[:, 1] < int(seg_seq.shape[0]))
-                    )
-                    path_arr = path_arr[valid_path]
-                names = joint_names if not mirrored else [_swap_lr(n) for n in joint_names]
-                joint_stats = []
-                if path_arr.size:
-                    q_path = q_eff[path_arr[:, 0]].astype(np.float32, copy=False)
-                    s_path = seg_seq[path_arr[:, 1]].astype(np.float32, copy=False)
-                    distances = np.linalg.norm(q_path - s_path, axis=2).astype(np.float32, copy=False)
-                    visible = np.asarray(raw_mask[path_arr[:, 1]][:, src_idx], dtype=bool)
-                    finite = np.isfinite(distances)
-                    for k in range(num_joints):
-                        arr = distances[visible[:, k] & finite[:, k], k]
-                        if arr.size == 0:
-                            joint_stats.append(
-                                JointErrorStat(
-                                    joint=str(names[k]),
-                                    mean_dist=None,
-                                    p90_dist=None,
-                                    max_dist=None,
-                                    valid_frames=0,
-                                )
-                            )
-                        else:
-                            joint_stats.append(
-                                JointErrorStat(
-                                    joint=str(names[k]),
-                                    mean_dist=float(np.mean(arr)),
-                                    p90_dist=float(np.percentile(arr, 90)),
-                                    max_dist=float(np.max(arr)),
-                                    valid_frames=int(arr.size),
-                                )
-                            )
-                else:
-                    joint_stats = [
-                        JointErrorStat(
-                            joint=str(name),
-                            mean_dist=None,
-                            p90_dist=None,
-                            max_dist=None,
-                            valid_frames=0,
-                        )
-                        for name in names
-                    ]
-
-        return _trimmed_mean(scores), matches, joint_stats
 
     front_score, front_matches, front_joint_errors = score_view(feat_f, meta_f, front_seg)
     side_score, side_matches, side_joint_errors = score_view(feat_s, meta_s, side_seg)
