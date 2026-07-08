@@ -379,6 +379,98 @@ def test_dual_compare_pair_students_keeps_directories_isolated(tmp_path, capsys)
     assert "class_b" in out
 
 
+def test_dual_compare_paired_mode_uses_dual_streams_and_skips_raw_export(tmp_path, monkeypatch, capsys):
+    front = tmp_path / "front.mp4"
+    side = tmp_path / "side.mp4"
+    front.write_bytes(b"fake")
+    side.write_bytes(b"fake")
+    student_dir = tmp_path / "students"
+    student_dir.mkdir()
+    for name in ("a_front.mp4", "a_side.mp4", "b_front.mp4", "b_side.mp4"):
+        (student_dir / name).write_bytes(b"fake")
+    out_dir = tmp_path / "out"
+    calls: list[tuple[str, str, int]] = []
+
+    def fake_template(video_path, *, pose_variant: str, out_path: Path):
+        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(
+            out_path,
+            features=np.zeros((2, 22, 2), dtype=np.float32),
+            meta=np.array({"pose_variant": pose_variant, "feature_layout": "pose33_v3"}, dtype=object),
+        )
+        return Path(out_path)
+
+    def fake_compare_dual_streams(front_tpl, side_tpl, front_video, side_video, **kwargs):
+        front_video = Path(front_video)
+        side_video = Path(side_video)
+        calls.append((front_video.name, side_video.name, int(kwargs["workers"])))
+        if front_video.name.startswith("a_"):
+            time.sleep(0.05)
+        pct = 75 if front_video.name.startswith("a_") else 85
+        return batch_dual_compare.ac.DualCompareResult(
+            front_template_path=Path(front_tpl),
+            side_template_path=Path(side_tpl),
+            video_path=front_video,
+            pose_variant="full",
+            fps=30.0,
+            front_score=0.7,
+            side_score=0.8,
+            combined_score=float(pct) / 100.0,
+            combined_percent=pct,
+            front_matches=(batch_dual_compare.ac.RepetitionMatch(1, 2, 0.1, 0.9),),
+            side_matches=(batch_dual_compare.ac.RepetitionMatch(3, 4, 0.2, 0.8),),
+            front_segment=(0, 9),
+            side_segment=(0, 11),
+        )
+
+    monkeypatch.setattr(batch_dual_compare.ac, "create_template_from_video", fake_template)
+    monkeypatch.setattr(batch_dual_compare.ac, "compare_dual_streams", fake_compare_dual_streams)
+    monkeypatch.setattr(
+        batch_dual_compare.ac,
+        "compare_video_to_dual_templates",
+        lambda *args, **kwargs: pytest.fail("paired mode must use compare_dual_streams"),
+    )
+    monkeypatch.setattr(
+        batch_dual_compare,
+        "extract_pose_raw",
+        lambda *args, **kwargs: pytest.fail("--export_raw must be skipped in paired mode"),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "batch_dual_compare.py",
+            "--front",
+            str(front),
+            "--side",
+            str(side),
+            "--student_dir",
+            str(student_dir),
+            "--out_dir",
+            str(out_dir),
+            "--workers",
+            "2",
+            "--paired",
+            "--export_raw",
+        ],
+    )
+
+    batch_dual_compare.main()
+
+    rows = list(csv.DictReader((out_dir / "compare_results.csv").open(encoding="utf-8-sig")))
+    assert [row["video"] for row in rows] == ["a", "b"]
+    assert [int(row["combined_percent"]) for row in rows] == [75, 85]
+    payloads = [json.loads(line) for line in (out_dir / "compare_results.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [payload["student_id"] for payload in payloads] == ["a", "b"]
+    assert [Path(payload["front_video_path"]).name for payload in payloads] == ["a_front.mp4", "b_front.mp4"]
+    assert sorted(calls) == [
+        ("a_front.mp4", "a_side.mp4", 1),
+        ("b_front.mp4", "b_side.mp4", 1),
+    ]
+    assert "--export_raw is not supported in --paired mode" in capsys.readouterr().out
+    assert not (out_dir / "skeleton" / "a_front_raw_full.npz").exists()
+
+
 def test_dual_compare_body_core_parallel_keeps_order_and_yolo_metadata(tmp_path, monkeypatch):
     from core import body_core_compare
 
