@@ -41,6 +41,9 @@ RECORD_BTN_TEXT = {
     "paused": "继续录制",
 }
 
+# 第二摄像头下拉的「不选」sentinel（双摄像头双面视图，issue #57）。
+NO_SECOND_CAMERA = "无（单摄像头）"
+
 
 def clamp_workers(n: int) -> int:
     """将离线线程数钳制到闭区间 [1, os.cpu_count()]。
@@ -793,6 +796,7 @@ class UiState:
     workers: int
     enable_hands: bool
     out_path: str | None = None
+    source2: str | None = None
 
 
 class SettingsWindow:
@@ -1058,6 +1062,7 @@ class App:
 
         self.source_var = StringVar(value="")
         self.camera_choice_var = StringVar(value="")
+        self.camera_choice_var_2 = StringVar(value=NO_SECOND_CAMERA)
         self.source_hint_var = StringVar(value="当前输入源：未选择")
         self.pose_var = StringVar(value="full")
         self.workers_var = IntVar(value=2)
@@ -1182,6 +1187,16 @@ class App:
         self.camera_combo.bind("<<ComboboxSelected>>", self._on_camera_selected)
         self.refresh_btn = ttk.Button(cam_row, text="刷新", command=self._refresh_cameras)
         self.refresh_btn.pack(side="left", padx=(8, 0))
+
+        # 1b) 第二摄像头（可选，双摄双面视图预览，issue #57）：默认「无」，不影响单摄路径。
+        ttk.Label(primary, text="第二摄像头（可选，双摄预览）：").pack(anchor="w", pady=(10, 0))
+        self.camera_combo_2 = ttk.Combobox(
+            primary,
+            textvariable=self.camera_choice_var_2,
+            values=[NO_SECOND_CAMERA],
+            state="readonly",
+        )
+        self.camera_combo_2.pack(fill="x", pady=(6, 0))
 
         # 2) Model_Selector：人体姿态模型下拉（绑定 self.model_combo，供运行态联动引用）。
         ttk.Label(primary, text="人体姿态模型：").pack(anchor="w", pady=(10, 0))
@@ -1430,6 +1445,17 @@ class App:
             except Exception:
                 pass
 
+        # 第二摄像头下拉：与主摄像头下拉同步禁用/恢复（issue #57）。
+        camera_combo_2 = getattr(self, "camera_combo_2", None)
+        if camera_combo_2 is not None:
+            try:
+                if running:
+                    camera_combo_2.configure(state="disabled")
+                elif self._camera_entries:
+                    camera_combo_2.configure(state="readonly")
+            except Exception:
+                pass
+
         # 刷新控件：复用既有联动（枚举中 / 运行中禁用）。
         self._set_refresh_enabled()
 
@@ -1540,6 +1566,8 @@ class App:
                 if self._source_state.kind == "camera":
                     self._source_state.clear()
                     self.source_var.set("")
+                self.camera_combo_2.configure(values=[NO_SECOND_CAMERA], state="disabled")
+                self.camera_choice_var_2.set(NO_SECOND_CAMERA)
                 return
 
             labels = [e.label for e in entries]
@@ -1550,18 +1578,32 @@ class App:
                 current = labels[0]
             self.camera_choice_var.set(current)
             self._select_camera_by_label(current)
+
+            # 第二摄像头下拉：同步为「无」+ 真实摄像头列表；已选项不在新列表中则回退「无」。
+            labels_2 = [NO_SECOND_CAMERA] + labels
+            self.camera_combo_2.configure(values=labels_2, state="readonly")
+            current_2 = self.camera_choice_var_2.get()
+            if current_2 not in labels_2:
+                current_2 = NO_SECOND_CAMERA
+            self.camera_choice_var_2.set(current_2)
         finally:
             self._enum_busy.clear()
             self._set_refresh_enabled()
 
-    def _select_camera_by_label(self, label: str) -> None:
-        """由显示文本反查编号并记录为摄像头输入源（需求 2.3、3.3）。"""
+    def _camera_index_for_label(self, label: str) -> int | None:
+        """由显示文本反查摄像头编号，找不到返回 None。"""
         for e in self._camera_entries:
             if e.label == label:
-                self._source_state.select_camera(e.index)
-                self.source_var.set(str(e.index))
-                self.source_hint_var.set(self._source_state.hint_text())
-                return
+                return e.index
+        return None
+
+    def _select_camera_by_label(self, label: str) -> None:
+        """由显示文本反查编号并记录为摄像头输入源（需求 2.3、3.3）。"""
+        index = self._camera_index_for_label(label)
+        if index is not None:
+            self._source_state.select_camera(index)
+            self.source_var.set(str(index))
+            self.source_hint_var.set(self._source_state.hint_text())
 
     def _on_camera_selected(self, event=None) -> None:
         self._select_camera_by_label(self.camera_choice_var.get())
@@ -1584,12 +1626,25 @@ class App:
 
         workers = clamp_workers(self.workers_var.get() or 1)
 
+        # 第二摄像头（可选，双摄双面视图，issue #57）：未选或选不到真实条目 → source2=None，
+        # 即今天的单摄行为不变。
+        source2: str | None = None
+        camera_choice_var_2 = getattr(self, "camera_choice_var_2", None)
+        label_2 = camera_choice_var_2.get().strip() if camera_choice_var_2 is not None else ""
+        if label_2 and label_2 != NO_SECOND_CAMERA:
+            index_2 = self._camera_index_for_label(label_2)
+            if index_2 is not None:
+                if source.isdigit() and int(source) == index_2:
+                    raise ValueError("两个摄像头不能选同一个")
+                source2 = str(index_2)
+
         return UiState(
             source=source,
             pose_variant=self.pose_var.get().strip() or "full",
             workers=workers,
             enable_hands=bool(self.enable_hands_var.get()),
             out_path=(self.out_var.get().strip() or None) if bool(self.save_var.get()) else None,
+            source2=source2,
         )
 
     def _start(self) -> None:
