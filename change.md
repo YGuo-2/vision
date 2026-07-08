@@ -1,3 +1,23 @@
+## 2026-07-08: [docs/test] 收尾 batch paired 与双摄骨架测试（issue #59/#62）
+
+### 问题描述
+
+双摄双面视图收尾 issue 中，#60/#61 已分别落地学员正/侧配对 helper 与 `batch_dual_compare.py --paired` 双流批处理入口。剩余 #62 要同步 `change.md`、`CLAUDE.md`、`AGENTS.md`；#59 最新评论已把测试范围裁剪为只守卫双摄 Tkinter 骨架，不再要求 Tkinter 接入 `PreviewLandmarkSmoother` / 在线 matcher。
+
+### 修改内容
+
+- `tests/test_app_ui_dual_camera.py`：新增无需真实 Tk root 的双摄测试，覆盖 `_collect_state` 的 `source2` 收集、同设备守卫、视频文件模式忽略第二摄像头，以及 `_worker_loop_dual_camera` 内双 `MediaPipePipeline` AST 守卫。
+- `CLAUDE.md`：补充 `compare_dual_streams` 双独立流入口和 `batch_dual_compare.py --paired` 的边界：默认单视频模式不变、同目录正/侧关键词配对、CSV `video` 列写学员 id、`--export_raw` 跳过、`body_core_v1` 不接 paired。
+- `AGENTS.md`：补 paired 批处理命令、后续 agent 硬约束和 batch paired / dual-stream 验证门。
+- `change.md`：记录 #59/#62 收尾依据、修改内容和验证结果。
+
+### 验证方法
+
+- `py_compile apps/app_ui.py` → OK
+- `pytest tests/test_app_ui_dual_camera.py -q` → 5 passed
+- `pytest tests/test_batch_backend_args.py tests/test_compare_dual_streams.py -q` → 23 passed
+- `git diff --check` → 仅 Windows 行尾提示，无 whitespace error
+
 ## 2026-07-08: [apps] 修复 PR #67 代码评审发现的两处问题（issue #58 后续）
 
 ### 问题描述

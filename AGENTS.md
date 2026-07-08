@@ -126,6 +126,13 @@ Batch dual-template comparison:
 .\.venv\Scripts\python.exe batch/batch_dual_compare.py --standard_dir "标准样本" --student_dir "学员样本" --pose full --out_dir "输出目录" --rules --action both
 ```
 
+Batch paired front/side student files, opt-in only:
+```powershell
+.\.venv\Scripts\python.exe batch/batch_dual_compare.py --standard_dir "标准样本" --student_dir "学员样本" --pose full --out_dir "输出目录" --paired --rules --action both
+```
+
+`batch_dual_compare.py --paired` 只用于默认 MediaPipe `pose33_v3` 路径：按同一目录下学员文件名里的正/侧关键词配对，调用 `core.action_compare.compare_dual_streams`，CSV `video` 列写学员 id。未加 `--paired` 时仍是单学员单视频自动拆正/侧；`--export_raw` 在 paired 模式会跳过并提示；`body_core_v1`/YOLO 调试批处理不接 paired。
+
 Latest known desktop acceptance evidence, 2026-06-11:
 
 - `npm run verify:desktop` passed: frontend build, frontend smoke, Tauri `cargo check`, Python `py_compile`, and 139 desktop regression tests.
@@ -138,6 +145,7 @@ Latest known desktop acceptance evidence, 2026-06-11:
 本仓库已有 pytest 回归套件，不再是“无正式测试套件”状态。按改动范围选择验证门：
 
 - Python 核心 / 算法：运行相关 `tests/test_*.py`，至少包含 `tests/test_pose33_v3_golden.py` 和受影响模块的契约测试。
+- batch paired / dual-stream：运行 `.\.venv\Scripts\python.exe -m pytest tests/test_batch_backend_args.py -q`，必要时加 `tests/test_compare_dual_streams.py -q`。
 - YOLO / layout / scoring：同时跑 `test_yolo_backend_contract.py`、`test_yolo_landmark_mapping.py`、`test_body_core_layout.py`、`test_tech_eval_contract.py`、`test_valid_mask_migration.py` 中相关子集。
 - Vue/Tauri / bridge：运行 `npm run verify:desktop`；小改也至少跑 `npm --prefix frontend run test` 和相关 `tests/test_ui_backend_*.py`。
 - 打包 / sidecar：运行 `npm run package:windows` 和 `.\.venv\Scripts\python.exe -m pytest tests/test_windows_packaging_smoke.py -q`。
