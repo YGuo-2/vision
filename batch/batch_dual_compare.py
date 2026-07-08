@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, is_dataclass
 from datetime import datetime
@@ -25,6 +26,75 @@ from batch.backend_options import (
 )
 
 
+_VIDEO_SUFFIXES = {".mp4", ".mov", ".avi"}
+_FRONT_KEYS = ("正面", "front", "face", "正", "前")
+_SIDE_KEYS = ("侧面", "side", "ce", "侧")
+_VIEW_SEPARATORS = " _-.()（）[]【】"
+
+
+def _matches_view_key(name: str, key: str) -> re.Match[str] | None:
+    stem = Path(name).stem
+    if any(ord(ch) > 127 for ch in key):
+        return re.search(re.escape(key), stem, flags=re.IGNORECASE)
+    return re.search(rf"(?<![0-9a-zA-Z]){re.escape(key)}(?![0-9a-zA-Z])", stem, flags=re.IGNORECASE)
+
+
+def _find_view_match(name: str) -> tuple[str, str, tuple[int, int]] | None:
+    for view, keys in (("front", _FRONT_KEYS), ("side", _SIDE_KEYS)):
+        for key in keys:
+            match = _matches_view_key(name, key)
+            if match:
+                return view, key, match.span()
+    return None
+
+
+def _classify_view(name: str) -> str | None:
+    match = _find_view_match(name)
+    return None if match is None else match[0]
+
+
+def _student_id_from_view_name(name: str) -> str:
+    stem = Path(name).stem
+    match = _find_view_match(name)
+    if match is None:
+        return stem.strip(_VIEW_SEPARATORS) or stem
+    _view, _key, (start, end) = match
+    cleaned = f"{stem[:start]}{stem[end:]}".strip(_VIEW_SEPARATORS)
+    cleaned = re.sub(r"[\s_.-]+", "_", cleaned).strip("_")
+    return cleaned or stem
+
+
+def _pair_students(videos) -> list[tuple[str, Path, Path]]:
+    buckets: dict[str, dict[str, list[Path]]] = {}
+    skipped_unknown: list[str] = []
+    for video in sorted((Path(v) for v in videos), key=lambda p: p.name.lower()):
+        view = _classify_view(video.name)
+        if view is None:
+            skipped_unknown.append(video.name)
+            continue
+        student_id = _student_id_from_view_name(video.name)
+        buckets.setdefault(student_id, {"front": [], "side": []})[view].append(video)
+
+    if skipped_unknown:
+        print(f"Skipping unclassified student videos: {skipped_unknown}")
+
+    pairs: list[tuple[str, Path, Path]] = []
+    skipped_pairs: list[str] = []
+    for student_id in sorted(buckets):
+        front = buckets[student_id]["front"]
+        side = buckets[student_id]["side"]
+        if len(front) == 1 and len(side) == 1:
+            pairs.append((student_id, front[0], side[0]))
+            continue
+        skipped_pairs.append(
+            f"{student_id}: front={[p.name for p in front]}, side={[p.name for p in side]}"
+        )
+
+    if skipped_pairs:
+        print(f"Skipping unpaired student videos: {skipped_pairs}")
+    return pairs
+
+
 def _find_standard_video(std_dir: Path, *, kind: str) -> Path:
     """
     Find a front/side standard video in `std_dir` using filename heuristics.
@@ -33,15 +103,11 @@ def _find_standard_video(std_dir: Path, *, kind: str) -> Path:
     if kind not in ("front", "side"):
         raise ValueError("kind must be 'front' or 'side'")
 
-    vids = sorted([p for p in std_dir.iterdir() if p.is_file() and p.suffix.lower() in {".mp4", ".mov", ".avi"}])
+    vids = sorted([p for p in std_dir.iterdir() if p.is_file() and p.suffix.lower() in _VIDEO_SUFFIXES])
     if not vids:
         raise FileNotFoundError(f"No videos found in: {std_dir}")
 
-    if kind == "front":
-        keys = ("正面", "正", "front", "face", "前")
-    else:
-        keys = ("侧面", "侧", "side", "ce")
-
+    keys = _FRONT_KEYS if kind == "front" else _SIDE_KEYS
     for k in keys:
         for p in vids:
             if k.lower() in p.name.lower():
@@ -128,7 +194,7 @@ def main() -> None:
     side_tpl = ac.create_template_from_video(side_video, pose_variant=args.pose, out_path=side_tpl)
 
     # 2) Batch compare all student videos.
-    student_videos = sorted([p for p in student_dir.iterdir() if p.is_file() and p.suffix.lower() in {".mp4", ".mov", ".avi"}])
+    student_videos = sorted([p for p in student_dir.iterdir() if p.is_file() and p.suffix.lower() in _VIDEO_SUFFIXES])
     if not student_videos:
         raise FileNotFoundError(f"No student videos found in: {student_dir}")
 
