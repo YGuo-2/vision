@@ -1,3 +1,30 @@
+## 2026-07-08: [apps] Tkinter 第二摄像头选择器 + UiState.source2（issue #57）
+
+### 问题描述
+
+双摄像头双面视图（Milestone #7）apps 链的起手 issue，为 #58（双路 VIDEO 循环 + 双 Label 独立渲染）打地基。现状 `apps/app_ui.py` 全链路单摄：一个 `camera_combo` + `UiState.source` 单字段，无法表达「第二路摄像头」。
+
+### 修改内容
+
+- `apps/app_ui.py`：
+  - 新增模块级常量 `NO_SECOND_CAMERA = "无（单摄像头）"`（第二摄像头下拉的「不选」sentinel）。
+  - `_build_ui` 在现有摄像头下拉之后加第二摄像头下拉 `self.camera_combo_2` + `self.camera_choice_var_2`，初始仅含 sentinel。
+  - 新增 `_camera_index_for_label` helper（按 label 反查 `CameraEntry.index`），`_select_camera_by_label` 改为调用它，消除重复查找逻辑。
+  - `_apply_camera_entries` 两个分支（空列表 / 正常枚举）都同步刷新 `camera_combo_2` 的候选值与选中态；已选项不在新列表中时回退 sentinel。
+  - `UiState` 加字段 `source2: str | None = None`。
+  - `_collect_state` 读取第二摄像头下拉：未选或选不到真实条目 → `source2=None`（即今天的单摄行为不变）；两路选到同一编号时抛 `ValueError("两个摄像头不能选同一个")`。
+  - `_set_running_controls` 让 `camera_combo_2` 与主摄像头下拉同步禁用/恢复（运行中禁用，停止后按是否有摄像头列表恢复 readonly）。
+  - 不实现双路 VIDEO 循环 / 双 Label 渲染（留 #58），不新增单测文件（roadmap 把测试放在 #59，随 #58 一起用 AST 守卫测）。
+
+### 验证方法（干净 worktree 从远程分支 checkout 后实测，非本地脏工作区）
+
+- `py_compile apps/app_ui.py` → OK
+- `pytest tests/test_pose33_v3_golden.py -q` → **16 passed，零漂移**
+- `pytest tests/test_s5_hands_toggle.py -q` → **6 passed**（`_collect_state` 相关既有测试用 `object.__new__(App)` 构造精简假对象，未初始化 `camera_choice_var_2`，靠 `getattr` 兜底为 `source2=None`，行为不变）
+- `pytest tests -q` → **365 passed, 4 failed, 2 skipped**；4 个失败（`test_error_handling.py::test_browse_video_rejects_invalid_file_and_preserves_source`、`test_s6_default_switch_decision.py::test_s6_decision_has_per_chain_outcome_and_reopen_gates`、`test_tracking_issue_sync.py::test_tracking_doc_lists_final_m4_issues_and_decisions`、`test_tracking_issue_sync.py::test_s6_decision_doc_exists_for_tracking_close`）与本次改动无关，在 `main`（`b0bbe34`）干净基线上跑同一条命令同样失败、数量一致；`test_ui_backend_sessions.py::test_camera_preview_drops_stale_frames_when_inference_is_slow` 偶发因 Tk 线程计时抖动失败，单独重跑与全量重跑均 passed，非本次改动引入
+
+
+
 ## 2026-07-08: [test] 补全 compare_dual_streams 单测验收标准（issue #56）
 
 ### 问题描述
