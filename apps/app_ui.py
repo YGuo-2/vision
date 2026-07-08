@@ -1088,6 +1088,10 @@ class App:
         self._worker: threading.Thread | None = None
         self._queue: Queue[tuple[np.ndarray, str]] = Queue(maxsize=1)
         self._photo: ImageTk.PhotoImage | None = None
+        # 第二路预览队列（双摄像头双面视图，issue #58）：单摄模式恒空，preview2 恒隐藏，
+        # 现有单摄路径零改动。
+        self._queue2: Queue[tuple[np.ndarray, str]] = Queue(maxsize=1)
+        self._photo2: ImageTk.PhotoImage | None = None
         self._compare_win: CompareWindow | None = None
         self._settings_win: SettingsWindow | None = None
         self._settings_win: SettingsWindow | None = None
@@ -1286,9 +1290,33 @@ class App:
         right.grid(row=0, column=1, sticky="nsew")
         right.rowconfigure(0, weight=1)
         right.columnconfigure(0, weight=1)
+        # 第二列默认权重 0：grid 会按列权重分配额外空间，即使该列的 widget 被
+        # grid_remove() 隐藏也照样占位挤压第一列。权重随 _set_dual_preview_visible
+        # 与显示/隐藏一起切换，保证单摄模式下第一列仍占满整行（issue #58 逐字不变要求）。
+        right.columnconfigure(1, weight=0)
 
         self.preview = ttk.Label(right)
         self.preview.grid(row=0, column=0, sticky="nsew")
+
+        # 第二路预览（双摄像头双面视图，issue #58）：默认隐藏，仅 source2 选中真实摄像头时显示。
+        self._preview_right = right
+        self.preview2 = ttk.Label(right)
+        self.preview2.grid(row=0, column=1, sticky="nsew")
+        self._set_dual_preview_visible(False)
+
+    def _set_dual_preview_visible(self, visible: bool) -> None:
+        """显示/隐藏第二预览列（双摄像头双面视图，issue #58）。
+
+        隐藏时把列 1 的 grid 权重也置 0：仅 grid_remove() 隐藏 widget 不会释放列的
+        权重分配，空列仍会挤占列 0 的可用宽度，导致单摄模式下主预览被压缩（不满足
+        issue #58「单摄模式预览行为逐字不变」要求）。显示/隐藏必须与权重同步切换。
+        """
+        if visible:
+            self.preview2.grid()
+            self._preview_right.columnconfigure(1, weight=1)
+        else:
+            self._preview_right.columnconfigure(1, weight=0)
+            self.preview2.grid_remove()
 
     def _open_compare(self) -> None:
         if self._compare_win and self._compare_win.is_open():
@@ -1626,15 +1654,17 @@ class App:
 
         workers = clamp_workers(self.workers_var.get() or 1)
 
-        # 第二摄像头（可选，双摄双面视图，issue #57）：未选或选不到真实条目 → source2=None，
-        # 即今天的单摄行为不变。
+        # 第二摄像头（可选，双摄双面视图，issue #57/#58）：未选、选不到真实条目、或主输入源
+        # 不是摄像头（视频文件模式）→ source2=None，即今天的单摄/文件行为不变。双摄预览只在
+        # 主输入源也是摄像头时才有意义，这里是唯一收敛点：调用方（_start/_worker_loop）
+        # 只需检查 state.source2 是否非空，不必重复判断 source 是否为摄像头。
         source2: str | None = None
         camera_choice_var_2 = getattr(self, "camera_choice_var_2", None)
         label_2 = camera_choice_var_2.get().strip() if camera_choice_var_2 is not None else ""
-        if label_2 and label_2 != NO_SECOND_CAMERA:
+        if source.isdigit() and label_2 and label_2 != NO_SECOND_CAMERA:
             index_2 = self._camera_index_for_label(label_2)
             if index_2 is not None:
-                if source.isdigit() and int(source) == index_2:
+                if int(source) == index_2:
                     raise ValueError("两个摄像头不能选同一个")
                 source2 = str(index_2)
 
@@ -1667,6 +1697,11 @@ class App:
         self.progress_text_var.set("")
         self.progress_bar.configure(mode="determinate", maximum=100.0, value=0.0)
 
+        # 双摄像头双面视图（issue #58）：与 _worker_loop_dual_camera 的分流条件同源
+        # （state.source2 非空 ⇒ _collect_state 已保证 source 是摄像头），显示/隐藏/
+        # 分流三处用同一个信号，不再各自重复判断。
+        self._set_dual_preview_visible(bool(state.source2))
+
         self._worker = threading.Thread(target=self._worker_loop, args=(state,), daemon=True)
         self._worker.start()
         # 集中刷新运行态控件（禁用 Camera/Model_Selector、启用 Record_Toggle 等，需求 4.3 等）。
@@ -1693,6 +1728,11 @@ class App:
         if not cap.isOpened():
             self._post_status(f"无法打开输入源：{source}")
             self._post_done()
+            return
+
+        # 双摄像头双面视图（issue #58）：source2 仅在摄像头模式生效（_collect_state 已保证）。
+        if state.source2 and not is_file:
+            self._worker_loop_dual_camera(state, cap)
             return
 
         src_fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
@@ -1786,6 +1826,102 @@ class App:
             self._post_done()
         finally:
             # 覆盖正常结束 / 停止 / 异常：释放 writer 并复位录制状态。
+            self._rec.close_session()
+
+    def _worker_loop_dual_camera(self, state: UiState, cap: cv2.VideoCapture) -> None:
+        """双摄像头双面视图（issue #58）：两路独立 VIDEO 循环，双 Label 独立渲染。
+
+        仿单摄 VIDEO 分支（``_worker_loop`` 上方），每路各一个有状态 MediaPipePipeline，
+        强制单线程（VIDEO 模式的时序状态不可在 worker 间共享）。只录制第一路（正面）；
+        第二路（侧面）仅预览不落盘。
+        """
+        cap2 = open_camera(int(state.source2))
+        if not cap2.isOpened():
+            cap.release()
+            cap2.release()
+            self._post_status(f"无法打开第二摄像头：{state.source2}")
+            self._post_done()
+            return
+
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 1280)
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 720)
+
+        # 录制由 RecordingController 管理：只登记第一路（正面）的写入参数。
+        # ponytail: 侧路预览不录，双路同时落盘留后续需求再加。
+        self._rec.begin_session(fps=30.0, size=(w, h))
+
+        try:
+            try:
+                models_dir_path = models_dir()
+                cfg = PipelineConfig(
+                    pose_variant=state.pose_variant,
+                    running_mode="video",
+                    enable_hands=state.enable_hands,
+                )
+                pipe = MediaPipePipeline(models_dir=models_dir_path, cfg=cfg)
+                pipe2 = MediaPipePipeline(models_dir=models_dir_path, cfg=cfg)
+            except Exception as e:
+                cap.release()
+                cap2.release()
+                self._post_status(f"初始化失败：{e}")
+                self._post_done()
+                return
+
+            t0 = time.monotonic()
+            frame_count = 0
+            self._post_status("运行中…（双摄像头）")
+            self._post_progress(0, 0)
+
+            while not self._stop_evt.is_set():
+                ok, frame = cap.read()
+                ok2, frame2 = cap2.read()
+                if not ok or not ok2:
+                    self._stop_evt.set()
+                    break
+
+                ts = pipe.next_timestamp_ms(is_file=False, fps_for_ts=30.0)
+                ts2 = pipe2.next_timestamp_ms(is_file=False, fps_for_ts=30.0)
+                annotated, actions = pipe.annotate(frame, timestamp_ms=ts)
+                annotated2, actions2 = pipe2.annotate(frame2, timestamp_ms=ts2)
+
+                frame_count += 1
+                fps = frame_count / max(1e-6, (time.monotonic() - t0))
+                cv2.putText(
+                    annotated,
+                    f"FPS: {fps:.1f}",
+                    (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    (255, 255, 255),
+                    2,
+                    cv2.LINE_AA,
+                )
+                cv2.putText(
+                    annotated,
+                    "点击“停止”结束",
+                    (10, annotated.shape[0] - 12),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (255, 255, 255),
+                    1,
+                    cv2.LINE_AA,
+                )
+
+                self._rec.write_frame(annotated)
+
+                actions_text = ", ".join(ACTION_LABELS_ZH.get(a, a) for a in actions) if actions else "-"
+                actions_text2 = ", ".join(ACTION_LABELS_ZH.get(a, a) for a in actions2) if actions2 else "-"
+                self._post_frame(annotated, actions_text)
+                self._post_frame2(annotated2, actions_text2)
+
+            cap.release()
+            cap2.release()
+            cv2.destroyAllWindows()
+
+            self._post_status("已停止")
+            self._post_progress(frame_count, 0)
+            self._post_done()
+        finally:
             self._rec.close_session()
 
     def _worker_loop_parallel_video(
@@ -2014,6 +2150,15 @@ class App:
                 break
         self._queue.put((frame_bgr, actions))
 
+    def _post_frame2(self, frame_bgr: np.ndarray, actions: str) -> None:
+        # 第二路预览队列（双摄像头双面视图，issue #58），与 _post_frame 同构。
+        while True:
+            try:
+                self._queue2.get_nowait()
+            except Empty:
+                break
+        self._queue2.put((frame_bgr, actions))
+
     def _post_status(self, text: str) -> None:
         # Tkinter updates must happen on the main thread.
         self.root.after(0, lambda: self.status_var.set(text))
@@ -2068,6 +2213,24 @@ class App:
 
         self._photo = ImageTk.PhotoImage(img)
         self.preview.configure(image=self._photo)
+
+        # 第二路预览（双摄像头双面视图，issue #58）：单摄模式下 _queue2 恒空，本段恒跳过。
+        try:
+            frame_bgr2, _actions2 = self._queue2.get_nowait()
+        except Empty:
+            frame_bgr2 = None
+        if frame_bgr2 is not None:
+            rgb2 = cv2.cvtColor(frame_bgr2, cv2.COLOR_BGR2RGB)
+            img2 = Image.fromarray(rgb2)
+            pw2 = max(1, self.preview2.winfo_width())
+            ph2 = max(1, self.preview2.winfo_height())
+            iw2, ih2 = img2.size
+            scale2 = min(pw2 / iw2, ph2 / ih2)
+            nw2, nh2 = max(1, int(iw2 * scale2)), max(1, int(ih2 * scale2))
+            img2 = img2.resize((nw2, nh2), Image.BILINEAR)
+            self._photo2 = ImageTk.PhotoImage(img2)
+            self.preview2.configure(image=self._photo2)
+
         self.root.after(30, self._tick)
 
 
