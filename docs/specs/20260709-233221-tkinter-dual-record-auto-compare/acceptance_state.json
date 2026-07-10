@@ -394,6 +394,34 @@
         "T-003"
       ],
       "unit_id": "U-003"
+    },
+    {
+      "agent_id": "round-6-R-U-002",
+      "completed_at": "2026-07-10 05:44:11",
+      "report": "U-002/T-002 ACTIONABLE_ISSUES. P2 residual: st_ino==0 fallback normalizes str(resolved) without Windows namespace stripping, so normal and \\\\?\\ aliases get distinct owner keys and overwrite result. Existing 42 tests cover nonzero inode/missing path only.",
+      "result": "ACTIONABLE_ISSUES",
+      "role": "first_wave",
+      "round": 6,
+      "started_at": "2026-07-10 05:38:34",
+      "status": "completed",
+      "task_ids": [
+        "T-002"
+      ],
+      "unit_id": "U-002"
+    },
+    {
+      "agent_id": "round-6-A-U-002",
+      "completed_at": "2026-07-10 05:50:03",
+      "report": "U-002/T-002 adversarial ACTIONABLE_ISSUES. Confirmed I-021 P2: zero-inode path fallback does not strip Windows namespace; same physical normal/extended aliases both submit and overwrite result. Minimal fix is one case-insensitive namespace text normalizer reused by stat-error and inode-zero branches; no other P0-P2.",
+      "result": "ACTIONABLE_ISSUES",
+      "role": "adversarial",
+      "round": 6,
+      "started_at": "2026-07-10 05:44:45",
+      "status": "completed",
+      "task_ids": [
+        "T-002"
+      ],
+      "unit_id": "U-002"
     }
   ],
   "completed_at": null,
@@ -799,6 +827,46 @@
       "unit_ids": [
         "U-002"
       ]
+    },
+    {
+      "completed_at": "2026-07-10 06:01:13",
+      "created_at": "2026-07-10 05:50:19",
+      "evidence": "统一 stat 失败与 st_ino=0 的 Windows namespace 文本规范化，覆盖普通/扩展/UNC 大小写、执行中及完成后别名拒绝；后处理 45 passed，完整定向 209 passed，首路独立复核 PASS，py_compile/diff/sync-check 通过。",
+      "fix_id": "F-021",
+      "issue_ids": [
+        "I-021"
+      ],
+      "round": 6,
+      "severity": "P2",
+      "started_at": "2026-07-10 05:51:13",
+      "status": "done",
+      "task_ids": [
+        "T-002"
+      ],
+      "title": "零 inode 文件系统回退未统一 Windows namespace",
+      "unit_ids": [
+        "U-002"
+      ]
+    },
+    {
+      "completed_at": "2026-07-10 06:07:05",
+      "created_at": "2026-07-10 06:01:16",
+      "evidence": "每次 submit 同时登记规范文本键与可用 stat 键，任一冲突即拒绝；覆盖 stat_error/zero_inode 与 inode 双向切换的执行中及完成后重复提交，compare=1 且首份 result.json 字节不变。后处理 49 passed、完整定向 213 passed、全量 564 passed/1 skipped/6 个既有无关失败；两路独立 post-fix 复核均 PASS，py_compile/diff/sync-check 通过。",
+      "fix_id": "F-022",
+      "issue_ids": [
+        "I-022"
+      ],
+      "round": 6,
+      "severity": "P2",
+      "started_at": "2026-07-10 06:01:18",
+      "status": "done",
+      "task_ids": [
+        "T-002"
+      ],
+      "title": "目录身份 fallback 与 inode 模式切换可绕过去重",
+      "unit_ids": [
+        "U-002"
+      ]
     }
   ],
   "full_fix_rounds": 3,
@@ -1102,10 +1170,43 @@
       ],
       "title": "Windows 长路径别名可绕过片段目录所有权",
       "unit_id": "U-002"
+    },
+    {
+      "agent_id": "round-6-R-U-002",
+      "created_at": "2026-07-10 05:44:28",
+      "evidence": "F-020 在 stat 成功但 st_ino==0 时直接 normcase(str(resolved))，未复用 \\\\?\\/\\\\?\\UNC 前缀去除；模拟零 inode 端到端探针接受普通/扩展别名两个 ID、比对两次并覆盖 result.json，仍违反 AC-001.3/NFR-002。",
+      "fix_id": "F-021",
+      "issue_id": "I-021",
+      "round": 6,
+      "severity": "P2",
+      "status": "fixed",
+      "task_ids": [
+        "T-002"
+      ],
+      "title": "零 inode 文件系统回退未统一 Windows namespace",
+      "unit_id": "U-002"
+    },
+    {
+      "agent_id": "round-6-A-U-002",
+      "created_at": "2026-07-10 06:01:14",
+      "evidence": "F-021 post-fix 对抗复核证明：_segment_directory_key 在 stat 失败/零 inode 时仅返回 path 键，恢复非零 inode 后仅返回 stat 键；submit 只登记单键。确定性探针中同一目录首次 stat 失败、第二次恢复后两个不同 segment_id 均提交，第二次覆盖首份 result.json，违反 AC-001.3/NFR-002。",
+      "fix_id": "F-022",
+      "issue_id": "I-022",
+      "round": 6,
+      "severity": "P2",
+      "status": "fixed",
+      "task_ids": [
+        "T-002"
+      ],
+      "title": "目录身份 fallback 与 inode 模式切换可绕过去重",
+      "unit_id": "U-002"
     }
   ],
   "max_rounds": 6,
-  "notes": [],
+  "notes": [
+    "Reached max acceptance rounds (6) with blocking P0-P2 issues",
+    "Reached max acceptance rounds (6) with blocking P0-P2 issues"
+  ],
   "original_task_digest": "11b470e44954",
   "original_task_ids": [
     "T-001",
@@ -1132,7 +1233,7 @@
       "last_result": "ACTIONABLE_ISSUES",
       "phase": "阶段 2：后处理协调器与结果契约",
       "review_status": "issues",
-      "round_started": 5,
+      "round_started": 6,
       "status": "issues",
       "task_ids": [
         "T-002"
@@ -1164,10 +1265,10 @@
       "unit_id": "U-004"
     }
   ],
-  "round": 5,
+  "round": 6,
   "schema_version": 1,
   "status": "fixes-complete",
   "task_count": 4,
-  "updated_at": "2026-07-10 05:36:09",
+  "updated_at": "2026-07-10 06:07:05",
   "workflow": "requirements-first"
 }

@@ -1,7 +1,7 @@
 # Acceptance Fixes
 
 > **Source:** E:/CodeProject/vision/docs/specs/20260709-233221-tkinter-dual-record-auto-compare/acceptance_state.json
-> **Round:** 5
+> **Round:** 6
 > **Policy:** rounds 1-3 fix all actionable issues; round 4+ auto-fix P0-P2 only
 > **Original tasks:** 4 frozen tasks; do not append acceptance fixes to tasks.md
 
@@ -29,6 +29,8 @@
 | F-018 | I-018 | P2 | U-002 | done | submit resolves and normcases segment_dir outside the state lock, then atomically reserves canonical directory ownership for one segment_id for processor lifetime. Distinct IDs using the same directory or .. alias are rejected before queue/callback/write; first result remains byte-identical. Postprocess suite: 41 passed; py_compile/diff passed. |
 | F-019 | I-019 | P2 | U-003 | done | Dual-camera worker now posts done exactly once from the outermost finally after pipeline/capture/OpenCV cleanup and recording-pair finalization, covering normal, device/init failure, annotate and writer exceptions; runtime-error regression asserts both resource cleanup and done notification. Dual-camera suite: 54 passed; py_compile passed. |
 | F-020 | I-020 | P2 | U-002 | done | Existing segment directories now use filesystem identity (st_dev, st_ino) computed outside the coordinator lock; normalized namespace-stripped text is only the missing/inode-less fallback. Normal and Windows extended-path aliases are rejected both concurrently and after completion, with one compare and byte-identical first result. Postprocess suite: 42 passed; py_compile passed. |
+| F-021 | I-021 | P2 | U-002 | done | 统一 stat 失败与 st_ino=0 的 Windows namespace 文本规范化，覆盖普通/扩展/UNC 大小写、执行中及完成后别名拒绝；后处理 45 passed，完整定向 209 passed，首路独立复核 PASS，py_compile/diff/sync-check 通过。 |
+| F-022 | I-022 | P2 | U-002 | done | 每次 submit 同时登记规范文本键与可用 stat 键，任一冲突即拒绝；覆盖 stat_error/zero_inode 与 inode 双向切换的执行中及完成后重复提交，compare=1 且首份 result.json 字节不变。后处理 49 passed、完整定向 213 passed、全量 564 passed/1 skipped/6 个既有无关失败；两路独立 post-fix 复核均 PASS，py_compile/diff/sync-check 通过。 |
 
 ## Deferred Issues
 

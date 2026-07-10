@@ -117,23 +117,37 @@ def _default_model_available() -> bool:
     return bool(spec is not None and model_manager.is_installed(spec))
 
 
-def _segment_directory_key(path: Path) -> SegmentDirectoryKey:
+def _segment_directory_text_key(path: Path) -> SegmentDirectoryKey:
+    text = str(path)
+    if os.name == "nt":
+        folded = text.casefold()
+        if folded.startswith("\\\\?\\unc\\"):
+            text = "\\\\" + text[8:]
+        elif folded.startswith("\\\\?\\"):
+            text = text[4:]
+    return ("path", os.path.normcase(os.path.normpath(text)))
+
+
+def _segment_directory_stat(path: Path) -> os.stat_result:
+    return path.stat()
+
+
+def _segment_directory_keys(path: Path) -> tuple[SegmentDirectoryKey, ...]:
     resolved = Path(path).resolve(strict=False)
+    text_key = _segment_directory_text_key(resolved)
     try:
-        stat = resolved.stat()
+        stat = _segment_directory_stat(resolved)
     except OSError:
-        text = str(resolved)
-        if os.name == "nt":
-            if text.startswith("\\\\?\\UNC\\"):
-                text = "\\\\" + text[8:]
-            elif text.startswith("\\\\?\\"):
-                text = text[4:]
-        return ("path", os.path.normcase(os.path.normpath(text)))
+        return (text_key,)
 
     inode = int(getattr(stat, "st_ino", 0) or 0)
     if inode:
-        return ("stat", int(stat.st_dev), inode)
-    return ("path", os.path.normcase(os.path.normpath(str(resolved))))
+        return (text_key, ("stat", int(stat.st_dev), inode))
+    return (text_key,)
+
+
+def _segment_directory_key(path: Path) -> SegmentDirectoryKey:
+    return _segment_directory_keys(path)[-1]
 
 
 def validate_template_pair(front_path: Path, side_path: Path) -> None:
@@ -209,16 +223,17 @@ class DualRecordingPostProcessor:
 
     def submit(self, job: DualRecordingJob) -> bool:
         try:
-            segment_dir_key = _segment_directory_key(job.segment_dir)
+            segment_dir_keys = _segment_directory_keys(job.segment_dir)
         except (OSError, RuntimeError):
             return False
         with self._lock:
             if self._closed or job.segment_id in self._submitted:
                 return False
-            if segment_dir_key in self._segment_dir_owners:
+            if any(key in self._segment_dir_owners for key in segment_dir_keys):
                 return False
             self._submitted.add(job.segment_id)
-            self._segment_dir_owners[segment_dir_key] = job.segment_id
+            for key in segment_dir_keys:
+                self._segment_dir_owners[key] = job.segment_id
             self._queue.put(job)
         return True
 

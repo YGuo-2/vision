@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+import apps.recording_postprocess as recording_postprocess
 from apps.recording_postprocess import (
     DualRecordingJob,
     DualRecordingPostProcessor,
@@ -279,6 +280,161 @@ def test_submit_reserves_windows_extended_path_directory_identity(
         assert not processor.submit(alias_job("record_windows_alias_late"))
         processor._queue.join()
     finally:
+        processor.close(1.0)
+
+    assert compare_calls == 1
+    assert result_path.read_text(encoding="utf-8") == original_result
+    assert json.loads(original_result)["segment_id"] == first.segment_id
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows namespace fallback contract")
+def test_submit_reserves_windows_alias_when_filesystem_has_no_inode(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    completed = threading.Event()
+    compare_calls = 0
+    first = _job(tmp_path, "record_zero_inode_owner")
+    extended_dir = Path("\\\\?\\" + str(first.segment_dir.resolve()))
+    monkeypatch.setattr(
+        recording_postprocess,
+        "_segment_directory_stat",
+        lambda _path: SimpleNamespace(st_dev=17, st_ino=0),
+    )
+
+    def alias_job(segment_id: str) -> DualRecordingJob:
+        return DualRecordingJob(
+            segment_id=segment_id,
+            segment_dir=extended_dir,
+            front_source=extended_dir / first.front_source.name,
+            side_source=extended_dir / first.side_source.name,
+            front_frames=first.front_frames,
+            side_frames=first.side_frames,
+            front_template=first.front_template,
+            side_template=first.side_template,
+        )
+
+    def compare(*_args, **_kwargs):
+        nonlocal compare_calls
+        compare_calls += 1
+        return _result()
+
+    processor = DualRecordingPostProcessor(
+        on_update=lambda update: completed.set()
+        if update.segment_id == first.segment_id and update.status == "completed"
+        else None,
+        transcode=lambda path, _stop: path,
+        compare=compare,
+        video_validator=lambda _path: True,
+        model_available=lambda: True,
+    )
+    try:
+        assert processor.submit(first)
+        assert not processor.submit(alias_job("record_zero_inode_concurrent"))
+        _wait(completed)
+        result_path = first.segment_dir / "result.json"
+        original_result = result_path.read_text(encoding="utf-8")
+        assert not processor.submit(alias_job("record_zero_inode_late"))
+        processor._queue.join()
+    finally:
+        processor.close(1.0)
+
+    assert compare_calls == 1
+    assert result_path.read_text(encoding="utf-8") == original_result
+    assert json.loads(original_result)["segment_id"] == first.segment_id
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows namespace fallback contract")
+@pytest.mark.parametrize(
+    ("extended", "normal"),
+    [
+        (r"\\?\C:\recordings\segment", r"C:\recordings\segment"),
+        (r"\\?\unc\server\share\segment", r"\\server\share\segment"),
+    ],
+)
+def test_windows_namespace_text_fallback_is_case_insensitive(
+    extended: str,
+    normal: str,
+) -> None:
+    assert recording_postprocess._segment_directory_text_key(Path(extended)) == (
+        recording_postprocess._segment_directory_text_key(Path(normal))
+    )
+
+
+@pytest.mark.parametrize(
+    ("first_mode", "later_mode"),
+    [
+        pytest.param("stat_error", "inode", id="stat-error-to-inode"),
+        pytest.param("zero_inode", "inode", id="zero-inode-to-inode"),
+        pytest.param("inode", "stat_error", id="inode-to-stat-error"),
+        pytest.param("inode", "zero_inode", id="inode-to-zero-inode"),
+    ],
+)
+def test_submit_reserves_directory_when_identity_mode_changes(
+    tmp_path: Path,
+    monkeypatch,
+    first_mode: str,
+    later_mode: str,
+) -> None:
+    compare_started = threading.Event()
+    release_compare = threading.Event()
+    completed = threading.Event()
+    compare_calls = 0
+    stat_calls = 0
+    first = _job(tmp_path, f"record_identity_transition_{first_mode}_{later_mode}")
+
+    def changing_stat(_path: Path):
+        nonlocal stat_calls
+        stat_calls += 1
+        mode = first_mode if stat_calls == 1 else later_mode
+        if mode == "stat_error":
+            raise OSError("transient stat failure")
+        if mode == "zero_inode":
+            return SimpleNamespace(st_dev=17, st_ino=0)
+        return SimpleNamespace(st_dev=17, st_ino=23)
+
+    monkeypatch.setattr(recording_postprocess, "_segment_directory_stat", changing_stat)
+
+    def duplicate_job(segment_id: str) -> DualRecordingJob:
+        return DualRecordingJob(
+            segment_id=segment_id,
+            segment_dir=first.segment_dir,
+            front_source=first.front_source,
+            side_source=first.side_source,
+            front_frames=first.front_frames,
+            side_frames=first.side_frames,
+            front_template=first.front_template,
+            side_template=first.side_template,
+        )
+
+    def compare(*_args, **_kwargs):
+        nonlocal compare_calls
+        compare_calls += 1
+        compare_started.set()
+        assert release_compare.wait(2.0)
+        return _result()
+
+    processor = DualRecordingPostProcessor(
+        on_update=lambda update: completed.set()
+        if update.segment_id == first.segment_id and update.status == "completed"
+        else None,
+        transcode=lambda path, _stop: path,
+        compare=compare,
+        video_validator=lambda _path: True,
+        model_available=lambda: True,
+    )
+    try:
+        assert processor.submit(first)
+        _wait(compare_started)
+        assert not processor.submit(duplicate_job("record_identity_transition_concurrent"))
+        release_compare.set()
+        _wait(completed)
+        result_path = first.segment_dir / "result.json"
+        original_result = result_path.read_text(encoding="utf-8")
+        assert not processor.submit(duplicate_job("record_identity_transition_late"))
+        processor._queue.join()
+    finally:
+        release_compare.set()
         processor.close(1.0)
 
     assert compare_calls == 1

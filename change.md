@@ -1,3 +1,22 @@
+## 2026-07-10: [fix/test] Tkinter 双摄自动比对目录身份最终收口
+
+### 问题描述
+
+第六轮验收发现：文件系统返回零 inode 时，普通路径与 Windows `\\?\` / `\\?\UNC` namespace 未经过同一规范化回退。修复后的对抗复核又确认，同一目录若在相邻提交间从 `stat` 失败或零 inode 恢复为非零 inode，所有权键会在文本键与 `(st_dev, st_ino)` 键之间切换，仍可能让不同片段 ID 绕过去重并覆盖首份 `result.json`。
+
+### 修改内容
+
+- 新增统一、大小写不敏感的 Windows namespace 文本规范化，`stat` 失败和零 inode 均复用同一回退，兼容普通盘符路径、`\\?\` 与 `\\?\UNC`。
+- 每次提交始终计算并登记规范文本键；文件系统提供非零 inode 时额外登记 stat 键。锁外完成路径解析和文件系统查询，锁内对最多两个键原子求交并登记，任一身份已被占用即拒绝。
+- 新增零 inode namespace 回归，以及 `stat_error -> inode`、`zero_inode -> inode`、`inode -> stat_error`、`inode -> zero_inode` 四种切换回归；均覆盖任务执行中和完成后的重复提交，验证只比对一次且首份结果字节不变。
+
+### 验证方法
+
+- 后处理完整套件：`49 passed`；自动比对完整定向回归：`213 passed`。
+- 全量 `pytest tests -q`：`564 passed, 1 skipped, 6 failed`；失败集合与接手基线一致，仍为 1 条 YOLO preview routing 和 5 条 `ui_backend` session，本任务未修改 Vue/Tauri/bridge 且未新增失败。
+- 两路独立 post-fix 审查均为 PASS，未发现剩余 P0-P4；`py_compile`、`git diff --check` 和规范 `sync-check` 通过。
+- 实机待验：物理双摄连续两段、录制中主停止、骨架开启后跳过评分三条现场流程仍需接入真实摄像头执行。
+
 ## 2026-07-10: [fix/test] Tkinter 双摄自动比对第五轮 Windows 路径身份修复
 
 ### 问题描述
