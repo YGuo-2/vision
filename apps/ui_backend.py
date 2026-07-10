@@ -60,6 +60,8 @@ RECORD_BTN_TEXT = {
 }
 
 
+# ponytail: 内联 OpenCV VideoCapture 属性 id，刻意不在 bridge 顶层 import cv2
+# （capture_factory 可注入假 cap，热路径解耦），勿换成 cv2.CAP_PROP_*。
 CAP_PROP_FRAME_WIDTH = 3
 CAP_PROP_FRAME_HEIGHT = 4
 CAP_PROP_FPS = 5
@@ -428,23 +430,26 @@ class _PreviewPublishFrame:
     extra_payload: JsonDict | None = None
 
 
-class _LatestPreviewFrameBuffer:
+class _LatestSlotBuffer:
+    """单槽 latest-frame 缓冲基类：新帧覆盖旧帧（计 dropped），get_latest 取走即清空。
+
+    子类各自持有捕获计数器与 snapshot()（snapshot 键属 bridge JSON 契约，不在此统一）。
+    """
+
     def __init__(self) -> None:
         self._condition = threading.Condition()
-        self._latest: _CapturedPreviewFrame | None = None
+        self._latest: Any | None = None
         self._closed = False
-        self._captured = 0
         self._dropped = 0
 
-    def put(self, item: _CapturedPreviewFrame) -> None:
-        with self._condition:
-            if self._latest is not None:
-                self._dropped += 1
-            self._latest = item
-            self._captured += 1
-            self._condition.notify()
+    def _put_locked(self, item: Any) -> None:
+        # 调用方须持 self._condition；只负责覆盖与 dropped 计数，捕获计数由子类 put 做。
+        if self._latest is not None:
+            self._dropped += 1
+        self._latest = item
+        self._condition.notify()
 
-    def get_latest(self, *, timeout: float) -> _CapturedPreviewFrame | None:
+    def get_latest(self, *, timeout: float) -> Any | None:
         with self._condition:
             if self._latest is None and not self._closed:
                 self._condition.wait(timeout)
@@ -463,6 +468,17 @@ class _LatestPreviewFrameBuffer:
     def closed(self) -> bool:
         with self._condition:
             return self._closed
+
+
+class _LatestPreviewFrameBuffer(_LatestSlotBuffer):
+    def __init__(self) -> None:
+        super().__init__()
+        self._captured = 0
+
+    def put(self, item: _CapturedPreviewFrame) -> None:
+        with self._condition:
+            self._captured += 1
+            self._put_locked(item)
 
     def snapshot(self) -> JsonDict:
         with self._condition:
@@ -473,46 +489,20 @@ class _LatestPreviewFrameBuffer:
             }
 
 
-class _LatestPreviewPublishBuffer:
+class _LatestPreviewPublishBuffer(_LatestSlotBuffer):
     def __init__(self) -> None:
-        self._condition = threading.Condition()
-        self._latest: _PreviewPublishFrame | None = None
-        self._closed = False
+        super().__init__()
         self._submitted = 0
-        self._dropped = 0
         self._published = 0
 
     def put(self, item: _PreviewPublishFrame) -> None:
         with self._condition:
-            if self._latest is not None:
-                self._dropped += 1
-            self._latest = item
             self._submitted += 1
-            self._condition.notify()
-
-    def get_latest(self, *, timeout: float) -> _PreviewPublishFrame | None:
-        with self._condition:
-            if self._latest is None and not self._closed:
-                self._condition.wait(timeout)
-            if self._latest is None:
-                return None
-            item = self._latest
-            self._latest = None
-            return item
+            self._put_locked(item)
 
     def mark_published(self) -> None:
         with self._condition:
             self._published += 1
-
-    def close(self) -> None:
-        with self._condition:
-            self._closed = True
-            self._condition.notify_all()
-
-    @property
-    def closed(self) -> bool:
-        with self._condition:
-            return self._closed
 
     def snapshot(self) -> JsonDict:
         with self._condition:
@@ -522,6 +512,7 @@ class _LatestPreviewPublishBuffer:
                 "droppedPreviewFrames": self._dropped,
                 "hasPendingPreviewFrame": self._latest is not None,
             }
+
 
 
 class LatestFrameChannel:
@@ -1695,6 +1686,7 @@ class PreviewSessionService:
         buffer = _LatestPreviewFrameBuffer()
         capture_stop = threading.Event()
         capture_errors: list[BaseException] = []
+        matcher = self._build_online_matcher(ctx)
 
         def _capture_latest() -> None:
             source_index = 0
@@ -1738,7 +1730,15 @@ class PreviewSessionService:
                     started_at=started_at,
                     monotonic=self._monotonic,
                 )
-                annotated_result = pipe.annotate(item.frame, timestamp_ms=timestamp_ms)
+                if matcher is not None:
+                    # 在线识别启用时：infer 一次拿 raw landmarks（喂匹配器），再 draw —— 不重复推理。
+                    # draw 输出与旧 annotate() 逐字节一致（见 vision_pipeline.draw 文档）。
+                    pose_landmarks, hands = pipe.infer(item.frame, timestamp_ms=timestamp_ms)
+                    annotated_result = pipe.draw(item.frame, pose_landmarks, hands)
+                    self._feed_online_matcher(matcher, pose_landmarks, timestamp_ms, frame_count + 1)
+                else:
+                    # 默认路径：annotate 一次到位（YOLO 等仅实现 annotate 的 pipe 仍可用）。
+                    annotated_result = pipe.annotate(item.frame, timestamp_ms=timestamp_ms)
                 annotated, actions, frame_meta = _normalize_annotate_result(annotated_result)
                 frame_count += 1
 
@@ -1777,6 +1777,52 @@ class PreviewSessionService:
             capture_stop.set()
             buffer.close()
             capture_thread.join(timeout=1.0)
+            if matcher is not None:
+                matcher.close()
+
+    def _build_online_matcher(self, ctx: JobContext):
+        """按模板库可用性构建在线动作匹配器；无模板/加载失败则返回 None（预览照常跑）。
+
+        模板库目录 ``templates_dir()/online``，每个 .npz 一个动作（须 pose33_v3/v3）。
+        识别结果走独立事件 ``session.action``（与 ``session.frame`` 解耦），恒不授权对外评分。
+        """
+        try:
+            from core.online_matcher import OnlineActionMatcher, load_template_library
+            from core.paths import templates_dir
+
+            templates = load_template_library(templates_dir() / "online")
+        except Exception as exc:  # noqa: BLE001 - 在线识别是增量能力，加载失败不应拖垮预览。
+            ctx.progress("session.action", {"state": "unavailable", "reason": str(exc)})
+            return None
+        if not templates:
+            return None
+
+        def _on_result(res) -> None:
+            action = res.action
+            ctx.progress(
+                "session.action",
+                {
+                    "action": action,
+                    "actionZh": ACTION_LABELS_ZH.get(str(action), str(action)) if action else None,
+                    "score": round(float(res.score), 4),
+                    "scoreAuthorized": bool(res.score_authorized),  # 在线识别恒 False
+                    "matched": action is not None,
+                    "startFrameIndex": int(res.start_frame),
+                    "endFrameIndex": int(res.end_frame),
+                },
+            )
+
+        return OnlineActionMatcher(templates, _on_result)
+
+    @staticmethod
+    def _feed_online_matcher(matcher, pose_landmarks, timestamp_ms: int, frame_count: int) -> None:
+        if matcher is None or pose_landmarks is None:
+            return
+        from core.pose_features import normalize_pose_xy_v3
+
+        feat = normalize_pose_xy_v3(pose_landmarks)
+        if feat is not None:
+            matcher.push(feat, float(timestamp_ms), int(frame_count))
 
     def _run_parallel_realtime_camera_loop(
         self,
@@ -1794,6 +1840,9 @@ class PreviewSessionService:
         total: int,
         started_at: float,
     ) -> tuple[int, JsonDict]:
+        # ponytail: 并行预览（workers>1）当前非 defer_draw 模式，重排出口拿不到 raw
+        # landmarks，故在线动作识别第一版不接此路径；预览默认 workers=1 已覆盖主用场景。
+        # 接入需把引擎切 defer_draw 并在重排出口喂 matcher，属更大改动，留待有需求再做。
         from core.parallel_pose_engine import ParallelPoseEngine
 
         engine = ParallelPoseEngine(
