@@ -2,25 +2,25 @@
 
 > **Workflow:** requirements-first
 > **Mode:** strict
-> **Status:** Completed
+> **Status:** Accepted
 > **Current Task:** n/a
 > **Approval:** approved
-> **Last Checkpoint:** 2026-07-10 02:01:18
+> **Last Checkpoint:** 2026-07-10 06:09:56
 > **Branch:** feat/tkinter-online-punch-recognition
-> **Last Known Commit:** 09aa101ea55421208e81739a6e88ccd6572f8656
+> **Last Known Commit:** 2112dfe
 
 ## Resume Summary
 - Goal: 执行跨模块回归、现场验收准备并更新变更记录
 - Approved specs: product.md, architecture.md, tasks.md
 - Current task: n/a
-- Next safe action: Run pre-acceptance, then final acceptance.
+- Next safe action: Run spec_status, then continue the current task.
 - Blockers: n/a
 
 ## Active Task State
 - Task ID: n/a
 - Status: done
 - Started at: n/a
-- Verification needed: targeted regression: 177 passed; full pytest: 529 passed and the same 6 unrelated ui_backend baseline failures; real ffmpeg/ffprobe H.264 smoke passed; py_compile and git diff checks passed; change.md updated; fixed templates staged
+- Verification needed: Final acceptance passed through acceptance_state.json
 - Files expected to change: `change.md`, 本任务相关测试文件
 
 ## Completed Work Log
@@ -33,4 +33,4 @@
 | T-004 | 2026-07-10 02:01:18 | 09aa101ea55421208e81739a6e88ccd6572f8656 | targeted regression: 177 passed; full pytest: 529 passed and the same 6 unrelated ui_backend baseline failures; real ffmpeg/ffprobe H.264 smoke passed; py_compile and git diff checks passed; change.md updated; fixed templates staged | n/a |
 
 ## Recovery Notes
-- Completed T-004
+- Final acceptance accepted

@@ -15,6 +15,7 @@
 - 后处理完整套件：`49 passed`；自动比对完整定向回归：`213 passed`。
 - 全量 `pytest tests -q`：`564 passed, 1 skipped, 6 failed`；失败集合与接手基线一致，仍为 1 条 YOLO preview routing 和 5 条 `ui_backend` session，本任务未修改 Vue/Tauri/bridge 且未新增失败。
 - 两路独立 post-fix 审查均为 PASS，未发现剩余 P0-P4；`py_compile`、`git diff --check` 和规范 `sync-check` 通过。
+- Requirements-First 最终 `acceptance-finish` 返回 `accepted`：22 个验收问题全部关闭，无未决问题、修复或审查 agent。
 - 实机待验：物理双摄连续两段、录制中主停止、骨架开启后跳过评分三条现场流程仍需接入真实摄像头执行。
 
 ## 2026-07-10: [fix/test] Tkinter 双摄自动比对第五轮 Windows 路径身份修复
