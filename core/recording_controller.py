@@ -108,6 +108,18 @@ class RecordingController:
             self._frames_written = 0
             self._last_error = None
 
+    def update_session_size(self, *, size: Tuple[int, int]) -> bool:
+        """在 writer 懒创建前用首帧真实尺寸修正会话参数。
+
+        摄像头驱动上报的 ``CAP_PROP_FRAME_WIDTH/HEIGHT`` 可能与实际帧不一致。
+        会话未启动或 writer 已创建时拒绝修改，避免中途改变输出尺寸。
+        """
+        with self._lock:
+            if not self._session_active or self._writer is not None:
+                return False
+            self._size = size
+            return True
+
     def request_toggle(self) -> RecordingState:
         """UI 线程调用：idle→recording / recording→paused / paused→recording 循环切换。
 
@@ -180,7 +192,8 @@ class RecordingController:
 
         - 在锁内执行：无论当前为 ``recording``、``paused`` 还是 ``idle`` 都安全。
         - 释放 writer（``release()`` 后置 ``_writer=None``），复位 ``_state='idle'``，
-          并清空本片段的 ``_result_path`` 与 ``_frames_written``，使下次录制干净开始。
+          并清空本片段的 ``_result_path``、``_frames_written`` 与 ``_last_error``，
+          使同一会话内的下次录制干净开始。
         - 会话未运行时为 no-op，返回 ``None``。
         - 返回本片段实际写入路径（曾录制过则为该路径，否则 ``None``）。
         """
@@ -197,6 +210,7 @@ class RecordingController:
             self._state = "idle"
             self._result_path = None
             self._frames_written = 0
+            self._last_error = None
             return result_path
 
     def close_session(self) -> Optional[Path]:
@@ -206,6 +220,7 @@ class RecordingController:
           writer（调用 ``release()`` 后置 ``_writer=None``）、``_session_active=False``、
           状态复位 ``idle``（需求 4.4/5.8）。
         - ``release()`` 自身可能抛异常：防御性吞掉，确保 state/_writer 始终被复位。
+        - 清空 ``last_error``，防止已结束会话的错误污染下一种输入模式。
         - 返回本会话实际写入路径：曾录制过则为 ``_result_path``，否则 ``None``。
         """
         with self._lock:
@@ -217,6 +232,7 @@ class RecordingController:
             self._writer = None
             self._session_active = False
             self._state = "idle"
+            self._last_error = None
             return self._result_path
 
     def snapshot(self) -> RecordingSnapshot:

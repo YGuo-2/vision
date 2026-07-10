@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import subprocess
 import tempfile
+import time
 from pathlib import Path
+from threading import Event
 
 import cv2
 
 FFMPEG_TRANSCODE_TIMEOUT_S = 30 * 60
+_FFMPEG_POLL_INTERVAL_S = 0.05
+_FFMPEG_TERMINATE_TIMEOUT_S = 1.0
 
 
 def _fourcc(code: str) -> int:
@@ -57,7 +61,49 @@ def open_video_writer(preferred_path: Path, *, fps: float, size: tuple[int, int]
     raise RuntimeError(last_err or "VideoWriter open failed")
 
 
-def transcode_to_h264(src: Path | None) -> Path | None:
+def _terminate_process(process: subprocess.Popen) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        process.terminate()
+        process.wait(timeout=_FFMPEG_TERMINATE_TIMEOUT_S)
+    except (OSError, subprocess.TimeoutExpired):
+        try:
+            process.kill()
+            process.wait(timeout=_FFMPEG_TERMINATE_TIMEOUT_S)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+
+def _run_ffmpeg_cancellable(command: list[str], stop_evt: Event) -> None:
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    deadline = time.monotonic() + FFMPEG_TRANSCODE_TIMEOUT_S
+    while True:
+        if stop_evt.is_set():
+            _terminate_process(process)
+            raise InterruptedError("视频转码已取消")
+
+        return_code = process.poll()
+        if return_code is not None:
+            if return_code != 0:
+                raise subprocess.CalledProcessError(return_code, command)
+            return
+
+        if time.monotonic() >= deadline:
+            _terminate_process(process)
+            raise subprocess.TimeoutExpired(command, FFMPEG_TRANSCODE_TIMEOUT_S)
+        stop_evt.wait(_FFMPEG_POLL_INTERVAL_S)
+
+
+def transcode_to_h264(
+    src: Path | None,
+    *,
+    stop_evt: Event | None = None,
+) -> Path | None:
     """Transcode an AVI recording to H.264 MP4 without risking the source."""
     if src is None:
         return None
@@ -65,6 +111,8 @@ def transcode_to_h264(src: Path | None) -> Path | None:
     src = Path(src)
     if not src.exists() or src.suffix.lower() != ".avi":
         return src
+    if stop_evt is not None and stop_evt.is_set():
+        raise InterruptedError("视频转码已取消")
 
     dst = src.with_suffix(".mp4")
     if dst == src:
@@ -97,10 +145,21 @@ def transcode_to_h264(src: Path | None) -> Path | None:
         str(temporary_dst),
     ]
     try:
-        subprocess.run(command, check=True, timeout=FFMPEG_TRANSCODE_TIMEOUT_S)
+        if stop_evt is None:
+            subprocess.run(command, check=True, timeout=FFMPEG_TRANSCODE_TIMEOUT_S)
+        else:
+            _run_ffmpeg_cancellable(command, stop_evt)
+            if stop_evt.is_set():
+                raise InterruptedError("视频转码已取消")
         if not temporary_dst.is_file() or temporary_dst.stat().st_size <= 0:
             raise OSError("ffmpeg produced no output")
         temporary_dst.replace(dst)
+    except InterruptedError:
+        try:
+            temporary_dst.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         try:
             temporary_dst.unlink(missing_ok=True)
