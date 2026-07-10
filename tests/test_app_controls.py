@@ -129,12 +129,20 @@ def _make_toggle_stub():
     - ``record_btn``：捕获 configure(text=...) 的假控件。
     """
     factory, _created = _make_fake_writer_factory()
+    factory2, _created2 = _make_fake_writer_factory()
     rec = RecordingController(
         writer_factory=factory,
         path_provider=lambda: Path("unused.mp4"),
     )
+    rec2 = RecordingController(
+        writer_factory=factory2,
+        path_provider=lambda: Path("unused-side.mp4"),
+    )
     stub = types.SimpleNamespace(
         _rec=rec,
+        _rec2=rec2,
+        _record_pair_lock=threading.Lock(),
+        _record_stamp=None,
         record_btn=FakeWidget(text=RECORD_BTN_TEXT["idle"]),
     )
     return stub
@@ -176,6 +184,17 @@ def test_on_record_toggle_matches_controller_state_each_step():
         assert stub.record_btn.cget("text") == RECORD_BTN_TEXT[stub._rec.state]
 
 
+def test_on_record_toggle_keeps_both_camera_controllers_in_sync():
+    stub = _make_toggle_stub()
+    stub._rec.begin_session(fps=30.0, size=(640, 480))
+    stub._rec2.begin_session(fps=30.0, size=(480, 640))
+
+    for expected in ("recording", "paused", "recording"):
+        App._on_record_toggle(stub)
+        assert stub._rec.state == expected
+        assert stub._rec2.state == expected
+
+
 def test_on_record_toggle_noop_before_session():
     """会话未运行时 toggle 为 no-op：状态保持 idle、文本保持「开始录制」（需求 5.1）。"""
     stub = _make_toggle_stub()
@@ -212,6 +231,9 @@ def _make_controls_stub(worker_alive: bool = False):
     """
     stub = types.SimpleNamespace(
         camera_combo=FakeWidget(state="readonly"),
+        camera_combo_2=FakeWidget(state="readonly"),
+        rotate_combo=FakeWidget(state="readonly"),
+        rotate_combo_2=FakeWidget(state="readonly"),
         model_combo=FakeWidget(state="readonly"),
         record_btn=FakeWidget(state="disabled", text=RECORD_BTN_TEXT["idle"]),
         compare_btn=FakeWidget(state="normal"),
@@ -237,6 +259,9 @@ def test_set_running_controls_when_running():
 
     # Camera_Selector 禁用（需求 2.5）。
     assert stub.camera_combo.cget("state") == "disabled"
+    assert stub.camera_combo_2.cget("state") == "disabled"
+    assert stub.rotate_combo.cget("state") == "disabled"
+    assert stub.rotate_combo_2.cget("state") == "disabled"
     # Model_Selector 禁用（需求 3.5）。
     assert stub.model_combo.cget("state") == "disabled"
     # Record_Toggle 启用并置「开始录制」（需求 5.2）。
@@ -272,6 +297,9 @@ def test_set_running_controls_when_not_running():
     assert stub.model_combo.cget("state") == "readonly"
     # Camera_Selector 恢复 readonly（有可选列表时）。
     assert stub.camera_combo.cget("state") == "readonly"
+    assert stub.camera_combo_2.cget("state") == "readonly"
+    assert stub.rotate_combo.cget("state") == "readonly"
+    assert stub.rotate_combo_2.cget("state") == "readonly"
     # Status_Area 显示「就绪」（需求 4.5）。
     assert stub.status_var.get() == "就绪"
     # 刷新控件：未运行启用。

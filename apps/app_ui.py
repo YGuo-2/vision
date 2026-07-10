@@ -46,6 +46,47 @@ RECORD_BTN_TEXT = {
 # 第二摄像头下拉的「不选」sentinel（双摄像头双面视图，issue #57）。
 NO_SECOND_CAMERA = "无（单摄像头）"
 
+# 画面旋转：摄像头竖起来拍时手动转正（USB 摄像头一般不给方向传感器，无法可靠自动判断）。
+# 旋转在 cap.read() 之后立即应用，姿态检测 / 预览 / 录制统一用转正后的帧。
+ROTATE_CHOICES = ("0°", "90°", "180°", "270°")
+_VALID_ROTATIONS = frozenset((0, 90, 180, 270))
+_ROTATE_CODES = {
+    90: cv2.ROTATE_90_CLOCKWISE,
+    180: cv2.ROTATE_180,
+    270: cv2.ROTATE_90_COUNTERCLOCKWISE,
+}
+
+
+def _parse_rotate(text: str) -> int:
+    """把下拉文本（"90°"）解析成度数；非法值回退 0。"""
+    try:
+        degrees = int(str(text).rstrip("°").strip())
+    except (TypeError, ValueError):
+        return 0
+    return degrees if degrees in _VALID_ROTATIONS else 0
+
+
+def _apply_rotation(frame: np.ndarray, degrees: int) -> np.ndarray:
+    """按度数旋转帧；0（或非 90 倍数）时原样返回（不复制）。"""
+    code = _ROTATE_CODES.get(degrees)
+    return cv2.rotate(frame, code) if code is not None else frame
+
+
+def _rotated_size(width: int, height: int, degrees: int) -> tuple[int, int]:
+    """返回旋转后的 ``(width, height)``，供 writer 和布局使用。"""
+    if degrees in (90, 270):
+        return height, width
+    return width, height
+
+
+def _choose_dual_preview_layout(
+    size: tuple[int, int], size2: tuple[int, int]
+) -> str:
+    """两路都为竖画面时左右并排；横向、方形或混合方向时上下堆叠。"""
+    w, h = size
+    w2, h2 = size2
+    return "side_by_side" if h > w and h2 > w2 else "stacked"
+
 # 关窗时给采集线程收尾并等待 H.264 转码的最长时间。等待拆成短 join 片段，
 # 避免 Tk 主线程在单次回调里长时间无响应。
 _CLOSE_JOIN_TIMEOUT_S = 3.0
@@ -818,6 +859,8 @@ class UiState:
     out_path: str | None = None
     source2: str | None = None
     online_match_enabled: bool = True
+    rotate: int = 0
+    rotate2: int = 0
 
 
 class SettingsWindow:
@@ -1084,12 +1127,17 @@ class App:
         self.source_var = StringVar(value="")
         self.camera_choice_var = StringVar(value="")
         self.camera_choice_var_2 = StringVar(value=NO_SECOND_CAMERA)
+        self.rotate_var = StringVar(value=ROTATE_CHOICES[0])
+        self.rotate_var_2 = StringVar(value=ROTATE_CHOICES[0])
         self.source_hint_var = StringVar(value="当前输入源：未选择")
         self.pose_var = StringVar(value="full")
         self.workers_var = IntVar(value=default_workers())
         self.enable_hands_var = BooleanVar(value=True)
         # 录制视频保存目录（默认 outputs_dir()）。录制文件名仍由控制器按时间戳生成。
         self.record_dir_var = StringVar(value=str(outputs_dir()))
+        # worker 的 path_provider 不得读取 Tk StringVar；主线程在初始化、选目录和开录时
+        # 把值缓存为普通 Path，避免录制锁与 Tk 主线程形成互等。
+        self._record_base_dir = outputs_dir()
         self.status_var = StringVar(value="就绪")
         self.actions_var = StringVar(value="-")
         self.match_var = StringVar(value="识别：待机")
@@ -1145,6 +1193,18 @@ class App:
         # 注入为读取 self.record_dir_var 的闭包：用户在「录制」分组选择的保存目录
         # 下，按含微秒的时间戳生成 record_<timestamp>.mp4，避免快速重录与后台转码争用同名文件。
         self._rec = RecordingController(path_provider=self._record_path)
+        # 第二路录制（双摄双面视图，issue #58）：仅在双摄循环 begin_session，其余模式恒 idle
+        # no-op，不影响单摄/文件路径。双摄时两路写入同一段目录下的 front.mp4 / side.mp4。
+        self._rec2 = RecordingController(path_provider=self._record_path_cam2)
+        # 双路状态切换、写帧、停止和关闭共享同一把锁，保证 front/side 的片段边界一致。
+        self._record_pair_lock = threading.Lock()
+        # worker 关闭会话前转存尚未被 Tk tick 消费的 writer 错误；close_session 可清理
+        # controller 错误而不让终止边界上的失败静默丢失。
+        self._pending_record_errors: list[str] = []
+        self._dual_active = False
+        # 一段录制共用的时间戳（idle→recording 时刷新）：两路 front/side 一致 → 可配对，
+        # 连续多段各段不同 → 相互隔离。None 表示尚未开始任何录制。
+        self._record_stamp: str | None = None
 
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -1235,16 +1295,31 @@ class App:
         self.camera_combo.bind("<<ComboboxSelected>>", self._on_camera_selected)
         self.refresh_btn = ttk.Button(cam_row, text="刷新", command=self._refresh_cameras)
         self.refresh_btn.pack(side="left", padx=(8, 0))
+        # 画面旋转：摄像头竖起来拍时手动转正。窄下拉附在摄像头选择行右侧。
+        ttk.Label(cam_row, text="旋转：").pack(side="left", padx=(8, 0))
+        self.rotate_combo = ttk.Combobox(
+            cam_row, textvariable=self.rotate_var, values=list(ROTATE_CHOICES),
+            state="readonly", width=5,
+        )
+        self.rotate_combo.pack(side="left")
 
         # 1b) 第二摄像头（可选，双摄双面视图预览，issue #57）：默认「无」，不影响单摄路径。
         ttk.Label(primary, text="第二摄像头（可选，双摄预览）：").pack(anchor="w", pady=(10, 0))
+        cam_row_2 = ttk.Frame(primary)
+        cam_row_2.pack(fill="x", pady=(6, 0))
         self.camera_combo_2 = ttk.Combobox(
-            primary,
+            cam_row_2,
             textvariable=self.camera_choice_var_2,
             values=[NO_SECOND_CAMERA],
             state="readonly",
         )
-        self.camera_combo_2.pack(fill="x", pady=(6, 0))
+        self.camera_combo_2.pack(side="left", fill="x", expand=True)
+        ttk.Label(cam_row_2, text="旋转：").pack(side="left", padx=(8, 0))
+        self.rotate_combo_2 = ttk.Combobox(
+            cam_row_2, textvariable=self.rotate_var_2, values=list(ROTATE_CHOICES),
+            state="readonly", width=5,
+        )
+        self.rotate_combo_2.pack(side="left")
 
         # 2) Model_Selector：人体姿态模型下拉（绑定 self.model_combo，供运行态联动引用）。
         ttk.Label(primary, text="人体姿态模型：").pack(anchor="w", pady=(10, 0))
@@ -1344,18 +1419,19 @@ class App:
         right.grid(row=0, column=1, sticky="nsew")
         right.rowconfigure(0, weight=1)
         right.columnconfigure(0, weight=1)
-        # 第二行默认权重 0：grid 会按行权重分配额外空间，即使该行的 widget 被
-        # grid_remove() 隐藏也照样占位挤压第一行。权重随 _set_dual_preview_visible
-        # 与显示/隐藏一起切换，保证单摄模式下第一行仍占满整列（issue #58 逐字不变要求）。
+        # 第二行/列默认权重 0。双摄时根据旋转后的画面比例切换上下或左右排布；
+        # 单摄隐藏第二路时必须同时清空第二条 grid 轨道的权重，避免主预览被空白挤压。
         right.rowconfigure(1, weight=0)
+        right.columnconfigure(1, weight=0)
 
         self.preview = ttk.Label(right)
         self.preview.grid(row=0, column=0, sticky="nsew")
         self.preview.bind("<Configure>", self._on_preview_configure)
 
         # 第二路预览（双摄像头双面视图，issue #58）：默认隐藏，仅 source2 选中真实摄像头时显示。
-        # 上下堆叠（第二路在下方），横向空间充足时比左右并排更省地方。
         self._preview_right = right
+        self._dual_preview_visible = False
+        self._dual_preview_layout = "stacked"
         self.preview2 = ttk.Label(right)
         self.preview2.grid(row=1, column=0, sticky="nsew")
         self.preview2.bind("<Configure>", self._on_preview2_configure)
@@ -1370,18 +1446,58 @@ class App:
         self._preview_wh2 = (event.width, event.height)
 
     def _set_dual_preview_visible(self, visible: bool) -> None:
-        """显示/隐藏第二预览列（双摄像头双面视图，issue #58）。
-
-        隐藏时把行 1 的 grid 权重也置 0：仅 grid_remove() 隐藏 widget 不会释放行的
-        权重分配，空行仍会挤占行 0 的可用高度，导致单摄模式下主预览被压缩（不满足
-        issue #58「单摄模式预览行为逐字不变」要求）。显示/隐藏必须与权重同步切换。
-        """
+        """显示/隐藏第二预览，并同步清理不再使用的 grid 轨道。"""
+        self._dual_preview_visible = bool(visible)
         if visible:
             self.preview2.grid()
-            self._preview_right.rowconfigure(1, weight=1)
-        else:
+            self._set_dual_preview_layout(self._dual_preview_layout)
+            return
+
+        # 隐藏时复位到单路布局。仅 grid_remove() 不会释放旧行/列权重，空轨道仍会
+        # 挤占主预览；因此坐标和四个权重必须一起复位。
+        self._dual_preview_layout = "stacked"
+        self.preview.grid_configure(row=0, column=0, sticky="nsew")
+        self.preview2.grid_configure(row=1, column=0, sticky="nsew")
+        self.preview2.grid_remove()
+        self._preview_right.rowconfigure(0, weight=1)
+        self._preview_right.rowconfigure(1, weight=0)
+        self._preview_right.columnconfigure(0, weight=1)
+        self._preview_right.columnconfigure(1, weight=0)
+
+    def _set_dual_preview_layout(self, layout: str) -> None:
+        """在 Tk 主线程切换双摄布局：竖画面左右、其他情况上下。"""
+        if layout not in ("stacked", "side_by_side"):
+            raise ValueError(f"未知双摄预览布局：{layout}")
+
+        self._dual_preview_layout = layout
+        self.preview.grid_configure(row=0, column=0, sticky="nsew")
+        if not getattr(self, "_dual_preview_visible", False):
+            self._preview_right.rowconfigure(0, weight=1)
             self._preview_right.rowconfigure(1, weight=0)
-            self.preview2.grid_remove()
+            self._preview_right.columnconfigure(0, weight=1)
+            self._preview_right.columnconfigure(1, weight=0)
+            return
+
+        if layout == "side_by_side":
+            self.preview2.grid_configure(row=0, column=1, sticky="nsew")
+            self._preview_right.rowconfigure(0, weight=1)
+            self._preview_right.rowconfigure(1, weight=0)
+            self._preview_right.columnconfigure(0, weight=1)
+            self._preview_right.columnconfigure(
+                1, weight=1 if self._dual_preview_visible else 0
+            )
+        else:
+            self.preview2.grid_configure(row=1, column=0, sticky="nsew")
+            self._preview_right.rowconfigure(0, weight=1)
+            self._preview_right.rowconfigure(
+                1, weight=1 if self._dual_preview_visible else 0
+            )
+            self._preview_right.columnconfigure(0, weight=1)
+            self._preview_right.columnconfigure(1, weight=0)
+
+    def _post_dual_preview_layout(self, layout: str) -> None:
+        """从采集线程把双摄布局更新投递回 Tk 主线程。"""
+        self.root.after(0, lambda: self._set_dual_preview_layout(layout))
 
     def _build_online_matcher(self) -> online_matcher.OnlineActionMatcher | None:
         """加载实时模板库；模板缺失或不兼容时保持预览可用。"""
@@ -1457,13 +1573,32 @@ class App:
     def _record_path(self) -> Path:
         """RecordingController 的 path_provider：在用户选择的录制目录下按时间戳生成文件名。
 
-        目录取自 self.record_dir_var；为空时回退到 outputs_dir()。文件名沿用
-        record_<timestamp>.mp4 约定；时间戳包含微秒，确保快速结束并重录也不互相覆盖。
+        目录取自 self.record_dir_var；为空时回退到 outputs_dir()。所有录制先按日期归到
+        <YYYYMMDD>/ 父目录。单摄/文件模式平铺为 <日期>/record_<timestamp>.mp4；双摄模式下
+        本段两路收进 <日期>/record_<timestamp>/ 子目录，第一路 front.mp4、第二路 side.mp4，
+        一天一父集、一段一文件夹，便于按时间归档与配对。
         """
-        base = self.record_dir_var.get().strip()
-        directory = Path(base) if base else outputs_dir()
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        return directory / f"record_{timestamp}.mp4"
+        if self._dual_active:
+            return self._record_dir_for_stamp() / "front.mp4"
+        return self._record_day_dir() / f"record_{self._current_stamp()}.mp4"
+
+    def _record_path_cam2(self) -> Path:
+        """第二路（侧面）录制的 path_provider：与第一路同段子目录，存 side.mp4。"""
+        return self._record_dir_for_stamp() / "side.mp4"
+
+    def _current_stamp(self) -> str:
+        # 同一段录制共用 _record_stamp：两路 front/side 收进同一子目录，
+        # 连续多段各自换新戳自然隔离。首帧懒创建 writer 时读取。
+        return self._record_stamp or datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+
+    def _record_day_dir(self) -> Path:
+        # 按日期的父集：同一天的录制归到 <YYYYMMDD>/ 下。日期取自本段时间戳前缀，
+        # 跨零点续写也稳定落在开录当天。这里只读普通 Path 缓存，不从 worker 访问 Tk。
+        directory = getattr(self, "_record_base_dir", outputs_dir())
+        return Path(directory) / self._current_stamp()[:8]
+
+    def _record_dir_for_stamp(self) -> Path:
+        return self._record_day_dir() / f"record_{self._current_stamp()}"
 
     def _transcode_async(self, path: Path | None) -> None:
         """后台把 MJPG/AVI 回退产物转成 H.264，避免阻塞 GUI 或推理线程。"""
@@ -1504,7 +1639,24 @@ class App:
         Record_Toggle 控件由任务 9.2 在 _build_ui 中创建并绑定到 self.record_btn；
         此处对其存在性做保护，使方法在控件尚未创建时仍可安全调用。
         """
-        new_state = self._rec.request_toggle()
+        # 只在 Tk 主线程读取保存目录，随后 path_provider 仅访问普通 Path 缓存。
+        record_dir_var = getattr(self, "record_dir_var", None)
+        next_base_dir = getattr(self, "_record_base_dir", outputs_dir())
+        if record_dir_var is not None:
+            base = record_dir_var.get().strip()
+            next_base_dir = Path(base) if base else outputs_dir()
+
+        with self._record_pair_lock:
+            prev_state = self._rec.state
+            # 必须先发布新时间戳再暴露 recording 状态；否则 worker 可能让 front 使用旧戳、
+            # side 使用新戳，导致同一段落入两个目录。
+            if prev_state == "idle":
+                # 保存根目录与时间戳都是片段级不可变数据；暂停/继续不重新发布。
+                self._record_base_dir = Path(next_base_dir)
+                self._record_stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            new_state = self._rec.request_toggle()
+            # 第二路录制跟随主录制（双摄时已 begin_session；单摄/文件时恒 idle no-op）。
+            self._rec2.request_toggle()
         record_btn = getattr(self, "record_btn", None)
         if record_btn is not None:
             record_btn.configure(text=RECORD_BTN_TEXT[new_state])
@@ -1519,11 +1671,44 @@ class App:
         调用控制器 ``stop_recording()`` 复位为 idle（保持会话运行），随后把切换按钮
         文本复位为「开始录制」、禁用「结束录制」，使用户可在同一会话内重新开始录制。
         """
-        self._transcode_async(self._rec.stop_recording())
+        with self._record_pair_lock:
+            path = self._rec.stop_recording()
+            path2 = self._rec2.stop_recording()
+        self._transcode_async(path)
+        self._transcode_async(path2)
         record_btn = getattr(self, "record_btn", None)
         if record_btn is not None:
             record_btn.configure(text=RECORD_BTN_TEXT["idle"])
         self._sync_record_stop_enabled("idle")
+
+    def _write_recording_pair(self, frame: np.ndarray, frame2: np.ndarray) -> None:
+        """把双摄同一轮的两帧写入放在同一片段边界内。"""
+        with self._record_pair_lock:
+            self._rec.write_frame(frame)
+            self._rec2.write_frame(frame2)
+
+    def _close_primary_recording_session(self) -> Path | None:
+        """关闭主路会话，并保留 Tk 尚未消费的 writer 错误。"""
+        with self._record_pair_lock:
+            snap = self._rec.snapshot()
+            path = self._rec.close_session()
+            if snap.last_error is not None:
+                self._pending_record_errors.append(f"第一路：{snap.last_error}")
+            return path
+
+    def _close_recording_pair(self) -> tuple[Path | None, Path | None]:
+        """原子关闭双路会话，并转存两路尚未消费的 writer 错误。"""
+        with self._record_pair_lock:
+            snap = self._rec.snapshot()
+            snap2 = self._rec2.snapshot()
+            path = self._rec.close_session()
+            path2 = self._rec2.close_session()
+            if snap.last_error is not None:
+                self._pending_record_errors.append(f"第一路：{snap.last_error}")
+            if snap2.last_error is not None:
+                self._pending_record_errors.append(f"第二路：{snap2.last_error}")
+            self._dual_active = False
+            return path, path2
 
     def _sync_record_stop_enabled(self, state: RecordingState) -> None:
         """根据录制状态联动「结束录制」按钮的可用性：recording/paused 启用，idle 禁用。"""
@@ -1546,17 +1731,37 @@ class App:
           「开始录制」、清除录制文本（需求 5.11）。用 _record_error_shown 守卫，
           避免每 30ms 重复弹框。
         """
-        snap = self._rec.snapshot()
-
+        with self._record_pair_lock:
+            snap = self._rec.snapshot()
+            snap2 = self._rec2.snapshot()
+            dual_active = self._dual_active
+            errors = list(self._pending_record_errors)
+            self._pending_record_errors.clear()
         if snap.last_error is not None:
+            error = f"第一路：{snap.last_error}"
+            if error not in errors:
+                errors.append(error)
+        if dual_active and snap2.last_error is not None:
+            error = f"第二路：{snap2.last_error}"
+            if error not in errors:
+                errors.append(error)
+
+        if errors:
             if not self._record_error_shown:
                 self._record_error_shown = True
+                # 双摄录制必须保持成对状态。任一路 writer 失败时结束两路当前片段，
+                # 避免下一次暂停/继续后两个控制器进入相反状态。
+                with self._record_pair_lock:
+                    path = self._rec.stop_recording()
+                    path2 = self._rec2.stop_recording()
+                self._transcode_async(path)
+                self._transcode_async(path2)
                 record_btn = getattr(self, "record_btn", None)
                 if record_btn is not None:
                     record_btn.configure(text=RECORD_BTN_TEXT["idle"])
                 self._sync_record_stop_enabled("idle")
                 self.recording_status_var.set("")
-                messagebox.showerror("录制失败", f"录制发生错误：{snap.last_error}")
+                messagebox.showerror("录制失败", "录制发生错误：\n" + "\n".join(errors))
             return
 
         # 无错误：复位守卫，下次错误可再次提示。
@@ -1564,6 +1769,11 @@ class App:
 
         if snap.state in ("recording", "paused"):
             path_text = str(snap.result_path) if snap.result_path is not None else "（准备中）"
+            if dual_active:
+                path_text2 = (
+                    str(snap2.result_path) if snap2.result_path is not None else "（准备中）"
+                )
+                path_text = f"正面 {path_text}；侧面 {path_text2}"
             label = "录制中" if snap.state == "recording" else "已暂停"
             self.recording_status_var.set(f"{label}：{path_text}")
         else:  # idle
@@ -1613,6 +1823,15 @@ class App:
                     camera_combo_2.configure(state="readonly")
             except Exception:
                 pass
+
+        # 旋转角度会在启动时写入不可变 UiState；运行中锁定，避免界面值变化却不生效。
+        for name in ("rotate_combo", "rotate_combo_2"):
+            rotate_combo = getattr(self, name, None)
+            if rotate_combo is not None:
+                try:
+                    rotate_combo.configure(state="disabled" if running else "readonly")
+                except Exception:
+                    pass
 
         # 刷新控件：复用既有联动（枚举中 / 运行中禁用）。
         self._set_refresh_enabled()
@@ -1924,6 +2143,8 @@ class App:
                 if hasattr(self, "online_match_var")
                 else True
             ),
+            rotate=_parse_rotate(self.rotate_var.get()) if hasattr(self, "rotate_var") else 0,
+            rotate2=_parse_rotate(self.rotate_var_2.get()) if hasattr(self, "rotate_var_2") else 0,
         )
 
     def _start(self) -> None:
@@ -2056,8 +2277,9 @@ class App:
             self._worker_loop_parallel_video(state, cap, fps_for_ts, total)
             return
 
-        # 录制由 RecordingController 管理：进入帧循环前登记本会话写入参数（fps/size）。
-        self._rec.begin_session(fps=fps_for_ts, size=(w, h))
+        # 仅实时摄像头使用旋转选项；离线视频保持原尺寸和既有处理行为。
+        session_size = (w, h) if is_file else _rotated_size(w, h, state.rotate)
+        self._rec.begin_session(fps=fps_for_ts, size=session_size)
         matcher = (
             self._build_online_matcher()
             if (not is_file and state.online_match_enabled)
@@ -2084,6 +2306,7 @@ class App:
 
             t0 = time.monotonic()
             frame_count = 0
+            actual_size_checked = is_file
             self._post_status("运行中…")
             self._post_progress(0, total)
 
@@ -2093,6 +2316,15 @@ class App:
                     # Video ended or camera read failed.
                     self._stop_evt.set()
                     break
+
+                if not is_file:
+                    # 在推理前转正，保证 landmarks、预览和录制使用同一坐标系。
+                    frame = _apply_rotation(frame, state.rotate)
+                    if not actual_size_checked:
+                        self._rec.update_session_size(
+                            size=(int(frame.shape[1]), int(frame.shape[0]))
+                        )
+                        actual_size_checked = True
 
                 ts = pipe.next_timestamp_ms(is_file=is_file, fps_for_ts=fps_for_ts)
                 if is_file:
@@ -2152,14 +2384,13 @@ class App:
             # 覆盖正常结束 / 停止 / 异常：释放 writer 并复位录制状态。
             if matcher is not None:
                 matcher.close()
-            self._transcode_async(self._rec.close_session())
+            self._transcode_async(self._close_primary_recording_session())
 
     def _worker_loop_dual_camera(self, state: UiState, cap: cv2.VideoCapture) -> None:
         """双摄像头双面视图（issue #58）：两路独立 VIDEO 循环，双 Label 独立渲染。
 
         仿单摄 VIDEO 分支（``_worker_loop`` 上方），每路各一个有状态 MediaPipePipeline，
-        强制单线程（VIDEO 模式的时序状态不可在 worker 间共享）。只录制第一路（正面）；
-        第二路（侧面）仅预览不落盘。
+        强制单线程（VIDEO 模式的时序状态不可在 worker 间共享），并分别录制正面/侧面。
         """
         cap2 = open_camera(int(state.source2))
         if not cap2.isOpened():
@@ -2172,9 +2403,17 @@ class App:
         w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 1280)
         h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 720)
 
-        # 录制由 RecordingController 管理：只登记第一路（正面）的写入参数。
-        # ponytail: 侧路预览不录，双路同时落盘留后续需求再加。
-        self._rec.begin_session(fps=30.0, size=(w, h))
+        # 录制由 RecordingController 管理：两路各自登记写入参数（正面 _rec / 侧面 _rec2）。
+        # _dual_active 让两个 path_provider 写入同一段目录下的 front.mp4 / side.mp4。
+        w2 = int(cap2.get(cv2.CAP_PROP_FRAME_WIDTH) or 1280)
+        h2 = int(cap2.get(cv2.CAP_PROP_FRAME_HEIGHT) or 720)
+        size = _rotated_size(w, h, state.rotate)
+        size2 = _rotated_size(w2, h2, state.rotate2)
+        with self._record_pair_lock:
+            self._dual_active = True
+            self._rec.begin_session(fps=30.0, size=size)
+            self._rec2.begin_session(fps=30.0, size=size2)
+        self._post_dual_preview_layout(_choose_dual_preview_layout(size, size2))
 
         try:
             try:
@@ -2195,6 +2434,7 @@ class App:
 
             t0 = time.monotonic()
             frame_count = 0
+            actual_layout_checked = False
             self._post_status("运行中…（双摄像头）")
             self._post_progress(0, 0)
 
@@ -2204,6 +2444,19 @@ class App:
                 if not ok or not ok2:
                     self._stop_evt.set()
                     break
+
+                frame = _apply_rotation(frame, state.rotate)
+                frame2 = _apply_rotation(frame2, state.rotate2)
+                if not actual_layout_checked:
+                    actual_size = (int(frame.shape[1]), int(frame.shape[0]))
+                    actual_size2 = (int(frame2.shape[1]), int(frame2.shape[0]))
+                    with self._record_pair_lock:
+                        self._rec.update_session_size(size=actual_size)
+                        self._rec2.update_session_size(size=actual_size2)
+                    self._post_dual_preview_layout(
+                        _choose_dual_preview_layout(actual_size, actual_size2)
+                    )
+                    actual_layout_checked = True
 
                 ts = pipe.next_timestamp_ms(is_file=False, fps_for_ts=30.0)
                 ts2 = pipe2.next_timestamp_ms(is_file=False, fps_for_ts=30.0)
@@ -2233,8 +2486,7 @@ class App:
                     cv2.LINE_AA,
                 )
 
-                self._rec.write_frame(annotated)
-
+                self._write_recording_pair(annotated, annotated2)
                 actions_text = ", ".join(ACTION_LABELS_ZH.get(a, a) for a in actions) if actions else "-"
                 actions_text2 = ", ".join(ACTION_LABELS_ZH.get(a, a) for a in actions2) if actions2 else "-"
                 self._post_frame(annotated, actions_text)
@@ -2248,7 +2500,9 @@ class App:
             self._post_progress(frame_count, 0)
             self._post_done()
         finally:
-            self._transcode_async(self._rec.close_session())
+            path, path2 = self._close_recording_pair()
+            self._transcode_async(path)
+            self._transcode_async(path2)
 
     def _worker_loop_parallel_video(
         self,
@@ -2366,7 +2620,7 @@ class App:
             self._post_done()
         finally:
             # 覆盖正常结束 / 停止 / 异常：释放 writer 并复位录制状态。
-            self._transcode_async(self._rec.close_session())
+            self._transcode_async(self._close_primary_recording_session())
 
     def _worker_loop_parallel_camera(self, state: UiState) -> None:
         """实时摄像头多核并行推理（IMAGE 模式 + 满则丢帧）。
@@ -2423,18 +2677,26 @@ class App:
             fps_for_ts = 30.0
             w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 1280)
             h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 720)
-            self._rec.begin_session(fps=fps_for_ts, size=(w, h))
+            session_size = _rotated_size(w, h, state.rotate)
+            self._rec.begin_session(fps=fps_for_ts, size=session_size)
 
             capture_t0 = time.monotonic()
             timestamp_ready = threading.Condition()
             submitted_timestamps: dict[int, int] = {}
 
             def reader() -> None:
+                actual_size_checked = False
                 try:
                     while not self._stop_evt.is_set():
                         ok, frame = cap.read()
                         if not ok:
                             break
+                        frame = _apply_rotation(frame, state.rotate)
+                        if not actual_size_checked:
+                            self._rec.update_session_size(
+                                size=(int(frame.shape[1]), int(frame.shape[0]))
+                            )
+                            actual_size_checked = True
                         timestamp_ms = int((time.monotonic() - capture_t0) * 1000.0)
                         submitted_index = engine.submit(frame)
                         if submitted_index is not None:
@@ -2534,7 +2796,7 @@ class App:
                 t_reader.join(timeout=2.0)
             if matcher is not None:
                 matcher.close()
-            self._transcode_async(self._rec.close_session())
+            self._transcode_async(self._close_primary_recording_session())
 
     def _post_frame(self, frame_bgr: np.ndarray, actions: str) -> None:
         # 点1：cvtColor(BGR→RGB) + aspect-fit resize 移到 worker 线程，GUI 主线程 _tick

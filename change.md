@@ -1,3 +1,43 @@
+## 2026-07-09: [feat/fix/test] 摄像头画面转正与双摄预览自适应
+
+### 问题描述
+
+USB 摄像头竖置后通常仍输出横向分辨率且不提供方向传感器，旧 Tkinter 入口没有逐路转正能力，姿态推理、预览和录制都会保留错误方向。双摄预览同时固定为上下堆叠，不能根据转正后的画面比例利用横向空间；90°/270° 旋转若不更新 writer 尺寸还会导致录制尺寸与帧不一致。
+
+### 修改内容
+
+- `apps/app_ui.py` 为两路摄像头分别增加 `0°/90°/180°/270°` 旋转下拉，严格解析四个合法角度，并在运行期间锁定控件；旋转只作用于实时摄像头，离线视频单/多 worker 路径保持原行为。
+- 串行单摄、双摄两路和实时多 worker reader 均在 MediaPipe 推理前应用旋转，使 landmarks、在线匹配、预览与录制共用转正后的坐标系；90°/270° 先交换驱动上报尺寸，再由旋转后的首帧真实 shape 通过 `RecordingController.update_session_size()` 校正 writer，避免错误 `CAP_PROP` 造成空文件或坏文件。
+- 双摄根据旋转后宽高比自动排布：两路都为竖画面时左右并排，横向/方形/混合方向时上下堆叠；先按设备尺寸切换，再用首帧真实尺寸校正，所有 Tk grid 更新通过主线程执行，单摄隐藏时同步清空第二行/列权重。
+- 补齐双路录制一致性：共享录制锁覆盖片段级保存根目录/时间戳发布和两路 toggle/begin/write/stop/close，保证 front/side 的片段边界与目录一致；目录选择只更新 Tk 变量，真正的普通 `Path` 在下一次 `idle -> recording` 时锁内发布，worker 不再持锁读取 `StringVar`。UI 同时显示正面/侧面输出路径，任一路 writer 失败时结束两路片段并明确标注失败路。
+- `core/recording_controller.py` 在片段停止/会话关闭时清理 `last_error`，且单摄模式忽略第二路错误，避免侧路失败污染同会话重试或下一次单摄/离线会话；worker 在 close 前把 Tk 尚未消费的错误转存到待提示队列，最后一帧失败也不会静默丢失。
+- 新增 headless 回归，覆盖角度像素方向、非法值、writer 首帧尺寸校正、布局坐标/权重、状态采集、三条实时采集路径、离线视频隔离、运行态控件、第二路 writer 失败收敛，以及真实双线程下 toggle/时间戳/双写/stop 不交错。
+
+### 验证方法
+
+- `.\.venv\Scripts\python.exe -m pytest tests/test_app_ui_dual_camera.py tests/test_app_controls.py tests/test_app_ui_lifecycle.py tests/test_recording_controller.py -q`：`80 passed`。
+- `.\.venv\Scripts\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_s5_hands_toggle.py tests/test_error_handling.py tests/test_input_source_state.py -q`：`34 passed`。
+- 全量 `.\.venv\Scripts\python.exe -m pytest tests -q`：`468 passed, 6 failed, 5 warnings`；失败集合与接手前记录一致，仍为 1 条 YOLO preview routing 和 5 条 `ui_backend` session 在制品，本次未新增失败。
+- `.\.venv\Scripts\python.exe -m py_compile apps\app_ui.py core\recording_controller.py tests\test_app_ui_dual_camera.py tests\test_app_controls.py tests\test_app_ui_lifecycle.py tests\test_recording_controller.py` 通过。
+- `git diff --check` 通过，无 whitespace error（仅 Windows 行尾提示）。
+- 自动化验证不依赖真实摄像头；两台物理摄像头的竖置方向与驱动尺寸仍需现场快速目视确认。
+
+## 2026-07-09: [feat] 双摄双面视图两路同步落盘 + 按日期/录制段归档
+
+### 问题描述
+
+双摄双面视图（issue #58）录制时只有第一路（正面）落盘，第二路（侧面）仅预览不存储（`apps/app_ui.py` 原 `ponytail:` 注释标注的推迟点）。同时单一录制路径无法区分双摄两路来源。
+
+### 修改内容
+
+- `apps/app_ui.py` 新增第二路录制控制器 `self._rec2`（`path_provider=_record_path_cam2`），在 `_worker_loop_dual_camera` 中与第一路各自 `begin_session` / `write_frame` / `close_session`；`_on_record_toggle` / `_on_record_stop` 同步切换两路。`_rec2` 在单摄/文件模式恒 idle no-op。
+- 录制路径按日期和片段归档：单摄/文件写入 `<保存目录>/<YYYYMMDD>/record_<时间戳>.mp4`；双摄两路共用同一时间戳与片段目录，分别写入 `<保存目录>/<YYYYMMDD>/record_<时间戳>/front.mp4` 和 `side.mp4`。`_dual_active` 在双摄循环进入时置 True、finally 复位。
+
+### 验证方法
+
+- `py_compile apps/app_ui.py` 通过。
+- `pytest tests/test_app_ui_lifecycle.py tests/test_recording_controller.py -q`：`20 passed`。
+
 ## 2026-07-09: [fix/test/docs] 修复 PR #71 五项审查问题并对齐最新 main
 
 ### 问题描述

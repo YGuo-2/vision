@@ -273,6 +273,7 @@ class ReferenceModel:
     def close_session(self) -> Optional[Path]:
         self.session_active = False
         self.state = "idle"
+        self.last_error = None
         return self.result_path
 
 
@@ -345,6 +346,60 @@ def test_fixture_smoke_write_failure_resets() -> None:
     assert snap.last_error is not None
     assert factory.last_writer is not None
     assert factory.last_writer.release_calls == 1
+
+
+def test_first_frame_size_overrides_reported_capture_size_before_writer_creation() -> None:
+    """首帧真实尺寸应覆盖不可靠的 CAP_PROP 尺寸，但 writer 创建后不得再变更。"""
+    create_args: list[tuple[Path, float, Tuple[int, int]]] = []
+    writer = FakeWriter()
+
+    def _factory(path: Path, fps: float, size: Tuple[int, int]):
+        create_args.append((Path(path), fps, size))
+        return writer, Path(path), "fake"
+
+    rc = RecordingController(
+        writer_factory=_factory,
+        path_provider=make_fake_path_provider(),
+    )
+
+    assert rc.update_session_size(size=(720, 1280)) is False
+    rc.begin_session(fps=30.0, size=(1280, 720))
+    assert rc.request_toggle() == "recording"
+    assert rc.update_session_size(size=(720, 1280)) is True
+
+    rc.write_frame(object())
+
+    assert create_args == [(DEFAULT_FAKE_PATH, 30.0, (720, 1280))]
+    assert rc.update_session_size(size=(640, 480)) is False
+
+
+def test_stop_recording_clears_last_error_for_same_session_retry() -> None:
+    factory = make_fake_writer_factory(raise_on_create=True)
+    rc = _make_controller(factory)
+    rc.begin_session(fps=30.0, size=(64, 48))
+    assert rc.request_toggle() == "recording"
+    rc.write_frame(object())
+    assert rc.snapshot().last_error is not None
+
+    rc.stop_recording()
+
+    assert rc.snapshot().last_error is None
+    assert rc.request_toggle() == "recording"
+
+
+def test_close_session_clears_last_error_before_next_mode() -> None:
+    factory = make_fake_writer_factory(raise_on_create=True)
+    rc = _make_controller(factory)
+    rc.begin_session(fps=30.0, size=(64, 48))
+    assert rc.request_toggle() == "recording"
+    rc.write_frame(object())
+    assert rc.snapshot().last_error is not None
+
+    rc.close_session()
+
+    snap = rc.snapshot()
+    assert snap.state == "idle"
+    assert snap.last_error is None
 
 
 def test_reference_model_matches_controller_on_simple_sequence() -> None:
