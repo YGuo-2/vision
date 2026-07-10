@@ -2829,18 +2829,24 @@ class App:
                 self._rec2.begin_session(fps=30.0, size=size2)
             self._post_dual_preview_layout(_choose_dual_preview_layout(size, size2))
 
-            try:
-                models_dir_path = models_dir()
-                cfg = PipelineConfig(
-                    pose_variant=state.pose_variant,
-                    running_mode="video",
-                    enable_hands=state.enable_hands,
-                )
-                pipe = MediaPipePipeline(models_dir=models_dir_path, cfg=cfg)
-                pipe2 = MediaPipePipeline(models_dir=models_dir_path, cfg=cfg)
-            except Exception as e:
-                self._post_status(f"初始化失败：{e}")
-                return
+            # 仅当勾选「写入骨架」时才做实时姿态推理；默认不勾选走原始画面，
+            # 省掉双路 heavy 实时推理的开销（录完再由黑盒检测重新提特征）。
+            draw_skeleton = bool(state.record_skeleton)
+            pipe = None
+            pipe2 = None
+            if draw_skeleton:
+                try:
+                    models_dir_path = models_dir()
+                    cfg = PipelineConfig(
+                        pose_variant=state.pose_variant,
+                        running_mode="video",
+                        enable_hands=state.enable_hands,
+                    )
+                    pipe = MediaPipePipeline(models_dir=models_dir_path, cfg=cfg)
+                    pipe2 = MediaPipePipeline(models_dir=models_dir_path, cfg=cfg)
+                except Exception as e:
+                    self._post_status(f"初始化失败：{e}")
+                    return
 
             t0 = time.monotonic()
             frame_count = 0
@@ -2868,10 +2874,15 @@ class App:
                     )
                     actual_layout_checked = True
 
-                ts = pipe.next_timestamp_ms(is_file=False, fps_for_ts=30.0)
-                ts2 = pipe2.next_timestamp_ms(is_file=False, fps_for_ts=30.0)
-                annotated, actions = pipe.annotate(frame, timestamp_ms=ts)
-                annotated2, actions2 = pipe2.annotate(frame2, timestamp_ms=ts2)
+                if draw_skeleton:
+                    ts = pipe.next_timestamp_ms(is_file=False, fps_for_ts=30.0)
+                    ts2 = pipe2.next_timestamp_ms(is_file=False, fps_for_ts=30.0)
+                    annotated, actions = pipe.annotate(frame, timestamp_ms=ts)
+                    annotated2, actions2 = pipe2.annotate(frame2, timestamp_ms=ts2)
+                else:
+                    # 不推理：预览用原始帧副本（FPS 文字画在副本上），录像仍写原始帧。
+                    annotated, actions = frame.copy(), []
+                    annotated2, actions2 = frame2.copy(), []
 
                 frame_count += 1
                 fps = frame_count / max(1e-6, (time.monotonic() - t0))

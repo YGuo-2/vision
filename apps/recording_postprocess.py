@@ -30,7 +30,9 @@ PostprocessStatus = Literal[
 
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "skipped", "cancelled"})
 _QUEUE_SENTINEL = object()
-_EXPECTED_TEMPLATE_LAYOUT = "pose_indices_11_32_xy_rot_scale_norm_v2"
+# 黑盒检测（录制后自动比对）统一走精度最高的 heavy + pose33_v3 链路。
+_EXPECTED_TEMPLATE_LAYOUT = "pose33_v3"
+_EXPECTED_TEMPLATE_POSE_VARIANT = "heavy"
 
 
 def utc_timestamp() -> str:
@@ -39,7 +41,7 @@ def utc_timestamp() -> str:
 
 def default_template_paths() -> tuple[Path, Path]:
     root = templates_dir()
-    return root / "standard_front_full.npz", root / "standard_side_full.npz"
+    return root / "standard_front_heavy.npz", root / "standard_side_heavy.npz"
 
 
 @dataclass(frozen=True)
@@ -113,7 +115,7 @@ def _default_video_validator(path: Path) -> bool:
 
 
 def _default_model_available() -> bool:
-    spec = next((item for item in model_manager.MEDIAPIPE_MODELS if item.key == "pose_full"), None)
+    spec = next((item for item in model_manager.MEDIAPIPE_MODELS if item.key == "pose_heavy"), None)
     return bool(spec is not None and model_manager.is_installed(spec))
 
 
@@ -172,8 +174,11 @@ def validate_template_pair(front_path: Path, side_path: Path) -> None:
             )
         if not np.isfinite(features).all():
             raise PostprocessError("template_invalid", f"固定模板包含非有限特征：{path}")
-        if str(meta.get("pose_variant") or "") != "full":
-            raise PostprocessError("template_invalid", f"固定模板必须使用 full 模型：{path}")
+        if str(meta.get("pose_variant") or "") != _EXPECTED_TEMPLATE_POSE_VARIANT:
+            raise PostprocessError(
+                "template_invalid",
+                f"固定模板必须使用 {_EXPECTED_TEMPLATE_POSE_VARIANT} 模型：{path}",
+            )
         return features, meta
 
     _front_features, front_meta = _load(front_path)
@@ -388,7 +393,7 @@ class DualRecordingPostProcessor:
         if not self._model_available():
             raise PostprocessError(
                 "model_missing",
-                "缺少 pose_landmarker_full.task，请先在模型管理中安装 full 模型",
+                "缺少 pose_landmarker_heavy.task，请先在模型管理中安装 heavy 模型",
             )
 
         self._raise_if_cancelled(stop_evt)
@@ -405,7 +410,7 @@ class DualRecordingPostProcessor:
             job.side_template,
             context.front_video,
             context.side_video,
-            pose_variant=None,
+            pose_variant=_EXPECTED_TEMPLATE_POSE_VARIANT,
             workers=1,
             w_front=0.4,
             w_side=0.6,

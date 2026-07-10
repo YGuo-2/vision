@@ -1,3 +1,26 @@
+## 2026-07-10: [feat] 黑盒检测统一 heavy+pose33_v3 + 未勾选骨架时预览跳过推理
+
+### 问题描述
+
+「录制＋检测一条龙」两处需求：
+
+1. 录制后自动比对（黑盒检测）此前锁定在 MediaPipe **full + v2 布局**（`standard_front/side_full.npz`），精度非最高，且与在线识别的 heavy+pose33_v3 模板格式分裂。用户要求黑盒检测全部改用精度最高的 heavy 链路（模板后续重录）。
+2. 双摄 worker 每帧无条件跑双路 `annotate()` 实时推理，即便未勾选「双摄录像写入骨架」也照跑，heavy 双路实时推理开销大且对录后黑盒检测无用（黑盒检测会在录像上重新提特征）。
+
+### 修改内容
+
+- `apps/recording_postprocess.py`：`_EXPECTED_TEMPLATE_LAYOUT` 从 `pose_indices_11_32_xy_rot_scale_norm_v2` 改为 `pose33_v3`；新增 `_EXPECTED_TEMPLATE_POSE_VARIANT="heavy"`。默认模板路径改为 `standard_front_heavy.npz` / `standard_side_heavy.npz`。模型可用性检查 `pose_full`→`pose_heavy`，`model_missing` 文案同步。模板校验由「必须 full」改为「必须 heavy」。`compare_dual_streams` 调用 `pose_variant=None`→`"heavy"`（不再回退推断）。
+- `apps/app_ui.py` 双摄 worker（`_worker_loop_dual`）：新增 `draw_skeleton = bool(state.record_skeleton)`。仅当勾选骨架时才创建 `MediaPipePipeline` 并跑 `annotate()`；未勾选时 `pipe/pipe2=None`，每帧用原始帧副本作预览（FPS 文字画在副本上），录像仍写原始帧，完全跳过双路 heavy 实时推理。finally 已有 `if pipeline is not None` 守护，安全。
+- `templates/`：用现有标准 `正面.mp4`/`侧面.mp4` 生成占位默认模板 `standard_front_heavy.npz`/`standard_side_heavy.npz`（heavy+pose33_v3），满足 `test_fixed_templates_are_delivered_and_compatible` 契约；**用户后续用直拳标准视频重录并覆盖同名文件即可**。
+- `tests/test_recording_postprocess.py`：`_write_template` 默认 `pose_variant="heavy"`/`layout="pose33_v3"`；invalid-pose_variant 变异改用 `full`（现为被拒项）；compare mock 断言 `pose_variant` `None`→`"heavy"`。
+
+### 验证方法
+
+- `py_compile apps/app_ui.py apps/recording_postprocess.py` 通过。
+- `pytest tests/test_recording_postprocess.py -q`：`49 passed`。
+- 双摄/控件/生命周期回归（分文件跑，规避多文件后台通道挂起）：`test_app_ui_dual_camera.py 45 passed`、`test_app_controls.py 10 passed`、`test_app_ui_lifecycle.py 37 passed`。
+- 实机待验：未勾选骨架时双摄预览为无骨架原始画面且帧率提升、录制后黑盒检测走 heavy 模板出分；需接真实双摄执行。用户重录直拳标准模板后再确认相似度合理。
+
 ## 2026-07-10: [fix/test] Tkinter 双摄自动比对目录身份最终收口
 
 ### 问题描述

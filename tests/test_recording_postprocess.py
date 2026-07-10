@@ -85,7 +85,7 @@ def test_fifo_single_consumer_and_atomic_completed_results(tmp_path: Path) -> No
     def compare(_ft, _st, front, _side, **kwargs):
         nonlocal concurrency, max_concurrency
         assert kwargs == {
-            "pose_variant": None,
+            "pose_variant": "heavy",
             "workers": 1,
             "w_front": 0.4,
             "w_side": 0.6,
@@ -1487,8 +1487,8 @@ def _write_template(
     path: Path,
     *,
     shape: tuple[int, ...] = (3, 22, 2),
-    pose_variant: str = "full",
-    layout: str = "pose_indices_11_32_xy_rot_scale_norm_v2",
+    pose_variant: str = "heavy",
+    layout: str = "pose33_v3",
     nonfinite: bool = False,
 ) -> None:
     features = np.zeros(shape, dtype=np.float32)
@@ -1522,7 +1522,7 @@ def test_template_pair_rejects_invalid_metadata_and_features(
     elif mutation == "nonfinite":
         _write_template(front, nonfinite=True)
     elif mutation == "pose_variant":
-        _write_template(front, pose_variant="heavy")
+        _write_template(front, pose_variant="full")
     else:
         _write_template(side, layout="other_layout")
 
