@@ -204,6 +204,21 @@ def test_on_record_toggle_noop_before_session():
     assert stub.record_btn.cget("text") == RECORD_BTN_TEXT["idle"]
 
 
+def test_on_record_toggle_noop_after_stop_requested():
+    stub = _make_toggle_stub()
+    stub._rec.begin_session(fps=30.0, size=(640, 480))
+    stub._rec2.begin_session(fps=30.0, size=(480, 640))
+    stub._stop_evt = threading.Event()
+    stub._stop_evt.set()
+
+    App._on_record_toggle(stub)
+
+    assert stub._record_stamp is None
+    assert stub._rec.state == "idle"
+    assert stub._rec2.state == "idle"
+    assert stub.record_btn.cget("text") == RECORD_BTN_TEXT["idle"]
+
+
 # ---------------------------------------------------------------------------
 # 3. App._set_running_controls 运行态联动（stub self + 假控件，无 Tk）
 #    —— 需求 4.3 / 5.2 / 6.4 / 6.5（兼带 2.5 / 3.5 / 3.6 / 4.5）
@@ -235,6 +250,7 @@ def _make_controls_stub(worker_alive: bool = False):
         rotate_combo=FakeWidget(state="readonly"),
         rotate_combo_2=FakeWidget(state="readonly"),
         model_combo=FakeWidget(state="readonly"),
+        record_skeleton_check=FakeWidget(state="normal"),
         record_btn=FakeWidget(state="disabled", text=RECORD_BTN_TEXT["idle"]),
         compare_btn=FakeWidget(state="normal"),
         start_btn=FakeWidget(state="normal", text="开始"),
@@ -264,6 +280,7 @@ def test_set_running_controls_when_running():
     assert stub.rotate_combo_2.cget("state") == "disabled"
     # Model_Selector 禁用（需求 3.5）。
     assert stub.model_combo.cget("state") == "disabled"
+    assert stub.record_skeleton_check.cget("state") == "disabled"
     # Record_Toggle 启用并置「开始录制」（需求 5.2）。
     assert stub.record_btn.cget("state") == "normal"
     assert stub.record_btn.cget("text") == RECORD_BTN_TEXT["idle"] == "开始录制"
@@ -295,6 +312,7 @@ def test_set_running_controls_when_not_running():
     assert stub.stop_btn.cget("state") == "disabled"
     # Model_Selector 恢复 readonly（需求 3.6）。
     assert stub.model_combo.cget("state") == "readonly"
+    assert stub.record_skeleton_check.cget("state") == "normal"
     # Camera_Selector 恢复 readonly（有可选列表时）。
     assert stub.camera_combo.cget("state") == "readonly"
     assert stub.camera_combo_2.cget("state") == "readonly"

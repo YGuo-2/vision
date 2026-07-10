@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import subprocess
+import threading
 from pathlib import Path
+
+import pytest
 
 from core import video_writer
 
@@ -137,6 +140,27 @@ def test_transcode_to_h264_passes_through_none_missing_and_non_avi(
     assert video_writer.transcode_to_h264(mp4) == mp4
 
 
+def test_pre_cancelled_pass_through_inputs_keep_legacy_return_semantics(
+    tmp_path: Path, monkeypatch
+) -> None:
+    stop_evt = threading.Event()
+    stop_evt.set()
+    missing = tmp_path / "missing.avi"
+    mp4 = tmp_path / "recording.mp4"
+    mp4.write_bytes(b"mp4")
+    monkeypatch.setattr(
+        video_writer.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("ffmpeg must not start for pass-through inputs")
+        ),
+    )
+
+    assert video_writer.transcode_to_h264(None, stop_evt=stop_evt) is None
+    assert video_writer.transcode_to_h264(missing, stop_evt=stop_evt) == missing
+    assert video_writer.transcode_to_h264(mp4, stop_evt=stop_evt) == mp4
+
+
 def test_transcode_to_h264_keeps_avi_when_ffmpeg_is_missing(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -204,3 +228,69 @@ def test_transcode_to_h264_timeout_cleans_partial_and_keeps_avi(
     assert src.exists()
     assert not src.with_suffix(".mp4").exists()
     assert list(tmp_path.glob(".recording.*.tmp.mp4")) == []
+
+
+def test_transcode_to_h264_cancellation_terminates_ffmpeg_and_cleans_partial(
+    tmp_path: Path, monkeypatch
+) -> None:
+    src = tmp_path / "recording.avi"
+    src.write_bytes(b"avi")
+    stop_evt = threading.Event()
+
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.terminated = False
+            self.killed = False
+            self.return_code = None
+
+        def poll(self):
+            return self.return_code
+
+        def terminate(self) -> None:
+            self.terminated = True
+            self.return_code = -15
+
+        def kill(self) -> None:
+            self.killed = True
+            self.return_code = -9
+
+        def wait(self, timeout=None):
+            return self.return_code
+
+    process = FakeProcess()
+
+    def fake_popen(command, **_kwargs):
+        Path(command[-1]).write_bytes(b"partial")
+        stop_evt.set()
+        return process
+
+    monkeypatch.setattr(video_writer.subprocess, "Popen", fake_popen)
+
+    with pytest.raises(InterruptedError, match="转码已取消"):
+        video_writer.transcode_to_h264(src, stop_evt=stop_evt)
+
+    assert process.terminated
+    assert not process.killed
+    assert src.exists()
+    assert not src.with_suffix(".mp4").exists()
+    assert list(tmp_path.glob(".recording.*.tmp.mp4")) == []
+
+
+def test_transcode_to_h264_pre_cancelled_does_not_start_ffmpeg(
+    tmp_path: Path, monkeypatch
+) -> None:
+    src = tmp_path / "recording.avi"
+    src.write_bytes(b"avi")
+    stop_evt = threading.Event()
+    stop_evt.set()
+
+    monkeypatch.setattr(
+        video_writer.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("ffmpeg must not start for a cancelled task")
+        ),
+    )
+
+    with pytest.raises(InterruptedError, match="转码已取消"):
+        video_writer.transcode_to_h264(src, stop_evt=stop_evt)

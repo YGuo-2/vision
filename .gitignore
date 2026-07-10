@@ -16,6 +16,8 @@ models/*.onnx
 models/*.engine
 models/*.part
 templates/*
+!templates/standard_front_full.npz
+!templates/standard_side_full.npz
 !templates/online/
 templates/online/*
 !templates/online/直拳_左手.npz

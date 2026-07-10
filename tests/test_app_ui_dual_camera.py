@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import ast
 import sys
+import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -67,6 +69,7 @@ def _app_stub(
     second_label: str = app_ui.NO_SECOND_CAMERA,
     rotate: str = "0°",
     rotate2: str = "0°",
+    record_skeleton: bool = False,
 ):
     app = object.__new__(app_ui.App)
     app.source_var = _Var(source)
@@ -78,6 +81,7 @@ def _app_stub(
     app.camera_choice_var_2 = _Var(second_label)
     app.rotate_var = _Var(rotate)
     app.rotate_var_2 = _Var(rotate2)
+    app.record_skeleton_var = _Var(record_skeleton)
     app._source_state = app_ui.InputSourceState()
     if source.isdigit():
         app._source_state.select_camera(int(source))
@@ -107,6 +111,20 @@ def _function_node(name: str) -> ast.FunctionDef:
     return next(
         node
         for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == name
+    )
+
+
+def _app_method_node(name: str) -> ast.FunctionDef:
+    tree = ast.parse(Path(app_ui.__file__).read_text(encoding="utf-8"))
+    app_class = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "App"
+    )
+    return next(
+        node
+        for node in app_class.body
         if isinstance(node, ast.FunctionDef) and node.name == name
     )
 
@@ -237,6 +255,54 @@ def test_collect_state_captures_each_camera_rotation():
     assert state.rotate2 == 270
 
 
+def test_collect_state_captures_dual_record_skeleton_choice():
+    app = _app_stub(
+        source="0",
+        second_label="摄像头 1",
+        record_skeleton=True,
+    )
+
+    state = app_ui.App._collect_state(app)
+
+    assert state.record_skeleton is True
+
+
+def test_app_initializes_dual_record_skeleton_toggle_disabled():
+    init = _app_method_node("__init__")
+    assignments = [
+        node
+        for node in ast.walk(init)
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Attribute)
+            and target.attr == "record_skeleton_var"
+            for target in node.targets
+        )
+    ]
+
+    assert len(assignments) == 1
+    value = assignments[0].value
+    assert isinstance(value, ast.Call)
+    assert any(
+        keyword.arg == "value"
+        and isinstance(keyword.value, ast.Constant)
+        and keyword.value.value is False
+        for keyword in value.keywords
+    )
+
+
+def test_collect_state_ignores_record_skeleton_for_single_camera():
+    app = _app_stub(
+        source="0",
+        second_label=app_ui.NO_SECOND_CAMERA,
+        record_skeleton=True,
+    )
+
+    state = app_ui.App._collect_state(app)
+
+    assert state.record_skeleton is False
+
+
 def test_collect_state_leaves_source2_none_for_single_camera_mode():
     app = _app_stub(source="0", second_label=app_ui.NO_SECOND_CAMERA)
 
@@ -246,12 +312,17 @@ def test_collect_state_leaves_source2_none_for_single_camera_mode():
 
 
 def test_collect_state_ignores_second_camera_for_video_file_source():
-    app = _app_stub(source="input.mp4", second_label="摄像头 1")
+    app = _app_stub(
+        source="input.mp4",
+        second_label="摄像头 1",
+        record_skeleton=True,
+    )
 
     state = app_ui.App._collect_state(app)
 
     assert state.source == "input.mp4"
     assert state.source2 is None
+    assert state.record_skeleton is False
 
 
 def test_collect_state_rejects_same_camera_for_both_views():
@@ -315,6 +386,183 @@ def test_parallel_video_path_does_not_apply_camera_rotation():
     assert _named_calls(worker, "_apply_rotation") == []
     assert _named_calls(worker, "_rotated_size") == []
     assert _named_calls(worker, "update_session_size") == []
+
+
+def test_dual_recording_frame_selector_defaults_to_raw_frames():
+    frame = np.zeros((2, 3, 3), dtype=np.uint8)
+    frame2 = np.ones((2, 3, 3), dtype=np.uint8)
+    annotated = np.full((2, 3, 3), 2, dtype=np.uint8)
+    annotated2 = np.full((2, 3, 3), 3, dtype=np.uint8)
+
+    selected = app_ui._select_dual_recording_frames(
+        frame,
+        frame2,
+        annotated,
+        annotated2,
+        record_skeleton=False,
+    )
+
+    assert selected[0] is frame
+    assert selected[1] is frame2
+
+
+def test_dual_recording_frame_selector_can_write_annotated_frames():
+    frame = np.zeros((2, 3, 3), dtype=np.uint8)
+    frame2 = np.ones((2, 3, 3), dtype=np.uint8)
+    annotated = np.full((2, 3, 3), 2, dtype=np.uint8)
+    annotated2 = np.full((2, 3, 3), 3, dtype=np.uint8)
+
+    selected = app_ui._select_dual_recording_frames(
+        frame,
+        frame2,
+        annotated,
+        annotated2,
+        record_skeleton=True,
+    )
+
+    assert selected[0] is annotated
+    assert selected[1] is annotated2
+
+
+def test_dual_worker_writes_selected_frames_but_previews_annotated_frames():
+    worker = _function_node("_worker_loop_dual_camera")
+    select_calls = _named_calls(worker, "_select_dual_recording_frames")
+    write_calls = _named_calls(worker, "_write_recording_pair")
+    preview_calls = _named_calls(worker, "_post_frame")
+    preview2_calls = _named_calls(worker, "_post_frame2")
+
+    assert len(select_calls) == 1
+    assert [ast.unparse(arg) for arg in select_calls[0].args] == [
+        "frame",
+        "frame2",
+        "annotated",
+        "annotated2",
+    ]
+    assert [ast.unparse(arg) for arg in write_calls[0].args] == [
+        "record_frame",
+        "record_frame2",
+    ]
+    assert ast.unparse(preview_calls[0].args[0]) == "annotated"
+    assert ast.unparse(preview2_calls[0].args[0]) == "annotated2"
+
+
+def test_dual_worker_finally_always_closes_recording_pair():
+    worker = _function_node("_worker_loop_dual_camera")
+    finally_calls = [
+        call
+        for node in ast.walk(worker)
+        if isinstance(node, ast.Try)
+        for statement in node.finalbody
+        for call in _named_calls(statement, "_close_recording_pair")
+    ]
+
+    assert len(finally_calls) == 1
+
+
+@pytest.mark.parametrize("failure_phase", ["annotate", "write"])
+def test_dual_worker_releases_captures_and_pipelines_after_runtime_error(
+    failure_phase, monkeypatch
+):
+    frame = np.zeros((4, 6, 3), dtype=np.uint8)
+
+    class _Capture:
+        def __init__(self) -> None:
+            self.release_calls = 0
+
+        def isOpened(self) -> bool:
+            return True
+
+        def get(self, prop) -> int:
+            return 6 if prop == app_ui.cv2.CAP_PROP_FRAME_WIDTH else 4
+
+        def read(self):
+            return True, frame.copy()
+
+        def release(self) -> None:
+            self.release_calls += 1
+
+    class _RecordingSession:
+        def begin_session(self, **_kwargs) -> None:
+            pass
+
+        def update_session_size(self, **_kwargs) -> None:
+            pass
+
+    class _Pipeline:
+        def __init__(self, *, fail_annotate: bool) -> None:
+            self.fail_annotate = fail_annotate
+            self.close_calls = 0
+
+        def next_timestamp_ms(self, **_kwargs) -> int:
+            return 1
+
+        def annotate(self, current_frame, **_kwargs):
+            if self.fail_annotate:
+                raise RuntimeError("annotate failed")
+            return current_frame.copy(), []
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    front_cap = _Capture()
+    side_cap = _Capture()
+    pipelines: list[_Pipeline] = []
+
+    def pipeline_factory(**_kwargs):
+        pipeline = _Pipeline(
+            fail_annotate=failure_phase == "annotate" and not pipelines
+        )
+        pipelines.append(pipeline)
+        return pipeline
+
+    close_pair_calls: list[bool] = []
+
+    def write_pair(_front, _side) -> None:
+        if failure_phase == "write":
+            raise RuntimeError("write failed")
+
+    app = SimpleNamespace(
+        _record_pair_lock=threading.Lock(),
+        _rec=_RecordingSession(),
+        _rec2=_RecordingSession(),
+        _stop_evt=threading.Event(),
+        _post_dual_preview_layout=lambda _layout: None,
+        _post_status=lambda _status: None,
+        _post_progress=lambda _current, _total: None,
+        _post_done=lambda: None,
+        _post_frame=lambda _frame, _actions: None,
+        _post_frame2=lambda _frame, _actions: None,
+        _write_recording_pair=write_pair,
+        _close_recording_pair=lambda: close_pair_calls.append(True),
+    )
+    state = SimpleNamespace(
+        source2="1",
+        pose_variant="full",
+        enable_hands=True,
+        rotate=0,
+        rotate2=0,
+        record_skeleton=False,
+    )
+    monkeypatch.setattr(app_ui, "open_camera", lambda _index: side_cap)
+    monkeypatch.setattr(app_ui, "models_dir", lambda: Path("models"))
+    monkeypatch.setattr(app_ui, "MediaPipePipeline", pipeline_factory)
+    monkeypatch.setattr(app_ui.cv2, "putText", lambda image, *_args, **_kwargs: image)
+    monkeypatch.setattr(app_ui.cv2, "destroyAllWindows", lambda: None)
+
+    with pytest.raises(RuntimeError, match=f"{failure_phase} failed"):
+        app_ui.App._worker_loop_dual_camera(app, state, front_cap)
+
+    assert front_cap.release_calls == 1
+    assert side_cap.release_calls == 1
+    assert len(pipelines) == 2
+    assert [pipeline.close_calls for pipeline in pipelines] == [1, 1]
+    assert close_pair_calls == [True]
+
+
+def test_main_stop_does_not_cancel_background_compare_queue():
+    stop = _app_method_node("_stop")
+
+    assert _named_calls(stop, "cancel_all") == []
 
 
 @pytest.mark.parametrize(

@@ -1,3 +1,28 @@
+## 2026-07-10: [feat/fix/test] Tkinter 双摄录制后自动后台比对
+
+### 问题描述
+
+Tkinter 双摄已能同步预览和录制，但片段结束后没有自动接入既有正面/侧面 DTW 比对；连续录制、主停止、writer 失败和关窗之间还缺少统一的片段终结、后台串行调度、结果留档与取消边界。带骨架录像若再次做姿态提取会产生失真分数，也需要明确跳过。
+
+### 修改内容
+
+- 新增无 Tk 依赖的 `DualRecordingPostProcessor`：按 `segment_id` 去重，单消费者 FIFO 顺序执行双路 H.264 转码、录像/固定模板/full 模型校验和 `compare_dual_streams()`；固定 `workers=1`、正侧权重 `0.4/0.6`、baseline `2.0`，规则与误差分析关闭。
+- 每个片段目录通过临时文件原子替换生成 schema v1 `result.json`，完整记录成功、失败、跳过、取消、最终录像路径、转码 warning、三项分数和匹配区间；一次性写盘失败稳定归类为 `result_write_failed`，单任务失败不终止后续队列。
+- Tkinter 双摄新增默认关闭且会话期间锁定的“录像写入骨架”开关；预览始终显示标注帧，关闭时 writer 保存旋转后的原始帧并自动比对，开启时保存标注帧、完成转码后写 `skipped/annotated_recording`。
+- 显式“结束录制”、主“停止”、writer 错误、worker `finally` 和关窗统一经过串行终结器；锁内快照/释放、锁外非阻塞提交，零帧也提交为 `recording_empty`，每段最多提交一次，下一段可立即开始。
+- 主窗口新增最近已提交片段的排队/转码/校验/比对状态、正面分、侧面分、综合百分比和稳定错误码；旧任务只更新自己的 JSON。后处理、双摄布局和摄像头枚举均用线程安全队列回到 Tk 主线程。
+- 关窗先登记当前有效片段，再停止新提交并取消活动/排队任务；即使 3 秒等待预算耗尽也投递消费者退出哨兵。ffmpeg、VideoCapture 和 MediaPipe 在成功、失败、取消时统一释放。
+- 交付并校验固定模板 `templates/standard_front_full.npz` 与 `templates/standard_side_full.npz`，保持现有 `full + v2` 兼容路径；Vue/Tauri、单摄、离线视频和评分算法不变。
+
+### 验证方法
+
+- T-003 Tk 生命周期与后处理定向套件：`122 passed`。
+- 跨模块回归（含转码、双流比对、模板 metadata、录制控制器和 `pose33_v3` golden）：`177 passed`。
+- 全量 `pytest tests -q`：`529 passed, 6 failed`；失败集合与接手基线一致，仍为 1 条 YOLO preview routing 和 5 条 `ui_backend` session 在制品，本任务未修改 Vue/Tauri/bridge 且未新增失败。
+- 真实 ffmpeg/ffprobe 烟测：短 MJPG AVI 经实际 `transcode_to_h264()` 输出 `codec_name=h264` 的 1683-byte MP4，源 AVI 已删除且临时文件残留为 0。
+- `py_compile` 与 `git diff --check` 通过（仅 Windows 行尾提示）。
+- 实机待验：骨架关闭时连续录制两段并确认各自产生 `front/side` 视频及完成结果；录制中直接主“停止”并确认结果落盘；骨架开启时确认视频保留且结果明确为“带骨架录像未自动比对”。
+
 ## 2026-07-09: [feat/fix/test] 摄像头画面转正与双摄预览自适应
 
 ### 问题描述

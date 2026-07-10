@@ -40,6 +40,11 @@ from .video_writer import open_video_writer
 ProgressCb = Callable[[str, int, int], None]  # (stage, done, total)
 
 
+def _raise_if_compare_cancelled(stop_evt: Event | None) -> None:
+    if stop_evt is not None and stop_evt.is_set():
+        raise InterruptedError("动作比对已取消")
+
+
 # 历史模板曾把 feature_layout 写成 normalizer 描述字符串；Issue #6 后统一写注册表布局名。
 LEGACY_DEFAULT_FEATURE_LAYOUT = "pose_indices_11_32_xy_rot_scale_norm"
 LEGACY_POSE33_V3_FEATURE_LAYOUT = "pose_indices_11_32_xy_rot_scale_norm_v3"
@@ -178,13 +183,18 @@ def _extract_pose_features(
     """
     stop_evt = stop_evt or Event()
     zero_frame_shape = tuple(int(x) for x in layout.shape)
+    workers = max(1, int(workers))
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
+        cap.release()
         raise RuntimeError(f"无法打开视频：{video_path}")
 
-    fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0) or 30.0
-    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-    workers = max(1, int(workers))
+    try:
+        fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0) or 30.0
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    except BaseException:
+        cap.release()
+        raise
 
     def _emit(done: int) -> None:
         if progress_cb is not None:
@@ -192,43 +202,55 @@ def _extract_pose_features(
 
     # Single-thread path: VIDEO mode (more stable landmarks).
     if workers == 1:
-        models_dir_path = models_dir()
-        pipe = MediaPipePipeline(
-            models_dir=models_dir_path,
-            cfg=PipelineConfig(pose_variant=pose_variant, running_mode="video", enable_hands=False),
-        )
-        feats: list[np.ndarray] = []
-        views: list[float] | None = [] if compute_view else None
-        last_view = 0.0
-        i = 0
-        while not stop_evt.is_set():
-            ok, frame = cap.read()
-            if not ok:
-                break
-            ts = int(i * 1000.0 / fps)
-            pose_landmarks, _hands = pipe.infer(frame, timestamp_ms=ts)
-            f = normalizer(pose_landmarks)
-            if f is None:
-                if feats:
-                    f = feats[-1].copy()
-                else:
-                    f = np.zeros(zero_frame_shape, dtype=np.float32)
-            feats.append(f)
-            if views is not None:
-                v = pose_view_score(pose_landmarks)
-                if v is None:
-                    v = last_view
-                else:
-                    last_view = float(v)
-                views.append(float(v))
-            i += 1
-            if (i % 10 == 0) or (total > 0 and i == total):
-                _emit(i)
-        cap.release()
-        if not feats:
-            raise RuntimeError("视频为空或无法读取帧")
-        view_arr = np.array(views, dtype=np.float32) if views is not None else None
-        return np.stack(feats, axis=0), fps, view_arr
+        pipe: MediaPipePipeline | None = None
+        try:
+            models_dir_path = models_dir()
+            pipe = MediaPipePipeline(
+                models_dir=models_dir_path,
+                cfg=PipelineConfig(pose_variant=pose_variant, running_mode="video", enable_hands=False),
+            )
+            feats: list[np.ndarray] = []
+            views: list[float] | None = [] if compute_view else None
+            last_view = 0.0
+            i = 0
+            while not stop_evt.is_set():
+                ok, frame = cap.read()
+                if not ok:
+                    break
+                ts = int(i * 1000.0 / fps)
+                pose_landmarks, _hands = pipe.infer(frame, timestamp_ms=ts)
+                f = normalizer(pose_landmarks)
+                if f is None:
+                    if feats:
+                        f = feats[-1].copy()
+                    else:
+                        f = np.zeros(zero_frame_shape, dtype=np.float32)
+                feats.append(f)
+                if views is not None:
+                    v = pose_view_score(pose_landmarks)
+                    if v is None:
+                        v = last_view
+                    else:
+                        last_view = float(v)
+                    views.append(float(v))
+                i += 1
+                if (i % 10 == 0) or (total > 0 and i == total):
+                    _emit(i)
+
+            if stop_evt.is_set():
+                raise InterruptedError("姿态特征提取已取消")
+            if not feats:
+                raise RuntimeError("视频为空或无法读取帧")
+            view_arr = np.array(views, dtype=np.float32) if views is not None else None
+            return np.stack(feats, axis=0), fps, view_arr
+        finally:
+            try:
+                cap.release()
+            finally:
+                if pipe is not None:
+                    close = getattr(pipe, "close", None)
+                    if callable(close):
+                        close()
 
     # Multi-thread path: split the video into segments and process each segment sequentially
     # with VIDEO mode (tracking enabled within each segment). This keeps features comparable
@@ -254,6 +276,8 @@ def _extract_pose_features(
     view_arr = np.zeros((total,), dtype=np.float32) if compute_view else None
 
     done_lock = Lock()
+    error_lock = Lock()
+    worker_errors: list[BaseException] = []
     done = 0
 
     def _inc_done(n: int = 1) -> None:
@@ -266,48 +290,78 @@ def _extract_pose_features(
 
     overlap = 15  # warm-up frames per segment to stabilize tracking
 
+    def _record_worker_error(exc: BaseException) -> None:
+        with error_lock:
+            worker_errors.append(exc)
+        stop_evt.set()
+
     def seg_worker(seg_start: int, seg_end: int) -> None:
-        warm_start = max(0, seg_start - overlap)
-        cap2 = cv2.VideoCapture(str(video_path))
-        if not cap2.isOpened():
-            stop_evt.set()
-            return
-        # Seek to warm_start; if seek fails, OpenCV will usually continue from 0.
-        cap2.set(cv2.CAP_PROP_POS_FRAMES, float(warm_start))
+        cap2: cv2.VideoCapture | None = None
+        pipe: MediaPipePipeline | None = None
+        try:
+            if stop_evt.is_set():
+                return
+            warm_start = max(0, seg_start - overlap)
+            cap2 = cv2.VideoCapture(str(video_path))
+            if not cap2.isOpened():
+                raise RuntimeError(f"无法打开视频分段：{video_path}")
+            # Seek to warm_start; if seek fails, OpenCV will usually continue from 0.
+            cap2.set(cv2.CAP_PROP_POS_FRAMES, float(warm_start))
 
-        pipe = MediaPipePipeline(
-            models_dir=models_dir_path,
-            cfg=PipelineConfig(pose_variant=pose_variant, running_mode="video", enable_hands=False),
-        )
+            pipe = MediaPipePipeline(
+                models_dir=models_dir_path,
+                cfg=PipelineConfig(
+                    pose_variant=pose_variant,
+                    running_mode="video",
+                    enable_hands=False,
+                ),
+            )
 
-        last: np.ndarray | None = None
-        last_view: float | None = None
-        i = warm_start
-        while (not stop_evt.is_set()) and i <= seg_end:
-            ok, frame = cap2.read()
-            if not ok:
-                break
-            ts = int(i * 1000.0 / fps)
-            pose_landmarks, _hands = pipe.infer(frame, timestamp_ms=ts)
-            f = normalizer(pose_landmarks)
-            if f is None:
-                f = last.copy() if last is not None else np.zeros(zero_frame_shape, dtype=np.float32)
-            else:
-                last = f
+            last: np.ndarray | None = None
+            last_view: float | None = None
+            i = warm_start
+            while (not stop_evt.is_set()) and i <= seg_end:
+                ok, frame = cap2.read()
+                if not ok:
+                    break
+                ts = int(i * 1000.0 / fps)
+                pose_landmarks, _hands = pipe.infer(frame, timestamp_ms=ts)
+                f = normalizer(pose_landmarks)
+                if f is None:
+                    f = (
+                        last.copy()
+                        if last is not None
+                        else np.zeros(zero_frame_shape, dtype=np.float32)
+                    )
+                else:
+                    last = f
 
-            if i >= seg_start:
-                feat_arr[i] = f
-                if view_arr is not None:
-                    v = pose_view_score(pose_landmarks)
-                    if v is None:
-                        v = float(last_view or 0.0)
-                    else:
-                        last_view = float(v)
-                    view_arr[i] = float(v)
-                _inc_done(1)
-            i += 1
-
-        cap2.release()
+                if i >= seg_start:
+                    feat_arr[i] = f
+                    if view_arr is not None:
+                        v = pose_view_score(pose_landmarks)
+                        if v is None:
+                            v = float(last_view or 0.0)
+                        else:
+                            last_view = float(v)
+                        view_arr[i] = float(v)
+                    _inc_done(1)
+                i += 1
+        except BaseException as exc:  # thread failures must reach the caller
+            _record_worker_error(exc)
+        finally:
+            if cap2 is not None:
+                try:
+                    cap2.release()
+                except BaseException as exc:
+                    _record_worker_error(exc)
+            if pipe is not None:
+                close = getattr(pipe, "close", None)
+                if callable(close):
+                    try:
+                        close()
+                    except BaseException as exc:
+                        _record_worker_error(exc)
 
     # Partition [0, total) across workers
     segs: list[tuple[int, int]] = []
@@ -323,6 +377,10 @@ def _extract_pose_features(
     for t in threads:
         t.join()
 
+    if worker_errors:
+        raise worker_errors[0]
+    if stop_evt.is_set():
+        raise InterruptedError("姿态特征提取已取消")
     if done == 0:
         raise RuntimeError("视频为空或无法读取帧")
     return feat_arr, fps, view_arr
@@ -396,10 +454,13 @@ def _score_view_seq(
     joint_names: list[str],
     src_idx: list[int],
     num_joints: int,
+    stop_evt: Event | None = None,
 ) -> tuple[float, list[RepetitionMatch], list[JointErrorStat] | None]:
+    _raise_if_compare_cancelled(stop_evt)
     # 2) 从标准模板中挑一个代表周期，避免整段重复导致匹配过长/过慢。
     tpl_fps = float(tpl_meta.get("fps") or fps)
     query = _select_representative_cycle(tpl_features, fps=tpl_fps)
+    _raise_if_compare_cancelled(stop_evt)
     if query.size == 0:
         return 0.0, [], None
 
@@ -433,11 +494,13 @@ def _score_view_seq(
         max_matches=max_matches,
         exclusion=exclusion,
         offset=seg_offset,
+        stop_evt=stop_evt,
     )
+    _raise_if_compare_cancelled(stop_evt)
 
     # 兜底：即便没有找到重复匹配，也保证有一个分数输出。
     if not matches and seg_seq.size > 0:
-        cost, s, e = subsequence_dtw(query, seg_seq)
+        cost, s, e = subsequence_dtw(query, seg_seq, stop_evt=stop_evt)
         avg = float(cost / max(1, int(query.shape[0])))
         matches = [
             RepetitionMatch(
@@ -451,9 +514,18 @@ def _score_view_seq(
     scores = [m.score for m in matches]
     joint_stats: list[JointErrorStat] | None = None
     if enable_error_analysis and seg_seq.size > 0 and query.size > 0:
+        _raise_if_compare_cancelled(stop_evt)
         q_m = mirror_pose_features(query)
-        cost1, s1, e1, path1 = subsequence_dtw_with_path(query, seg_seq)
-        cost2, s2, e2, path2 = subsequence_dtw_with_path(q_m, seg_seq)
+        cost1, s1, e1, path1 = subsequence_dtw_with_path(
+            query,
+            seg_seq,
+            stop_evt=stop_evt,
+        )
+        cost2, s2, e2, path2 = subsequence_dtw_with_path(
+            q_m,
+            seg_seq,
+            stop_evt=stop_evt,
+        )
         if float(cost2) < float(cost1):
             q_eff = q_m
             start_i = int(s2)
@@ -491,6 +563,7 @@ def _score_view_seq(
                 visible = np.asarray(raw_mask[path_arr[:, 1]][:, src_idx], dtype=bool)
                 finite = np.isfinite(distances)
                 for k in range(num_joints):
+                    _raise_if_compare_cancelled(stop_evt)
                     arr = distances[visible[:, k] & finite[:, k], k]
                     if arr.size == 0:
                         joint_stats.append(
@@ -524,6 +597,7 @@ def _score_view_seq(
                     for name in names
                 ]
 
+    _raise_if_compare_cancelled(stop_evt)
     return _trimmed_mean(scores), matches, joint_stats
 
 
@@ -689,11 +763,13 @@ def _multi_subsequence_matches(
     max_matches: int = 30,
     exclusion: int = 5,
     offset: int = 0,
+    stop_evt: Event | None = None,
 ) -> list[RepetitionMatch]:
     """
     Greedy multi-match: repeatedly find the best subsequence DTW match, exclude it, and repeat.
     Returns matches in arbitrary order (not necessarily chronological).
     """
+    _raise_if_compare_cancelled(stop_evt)
     if query.size == 0 or seq.size == 0:
         return []
 
@@ -709,14 +785,16 @@ def _multi_subsequence_matches(
     ref_avg: float | None = None
 
     while remaining and len(out) < int(max_matches):
+        _raise_if_compare_cancelled(stop_evt)
         best: tuple[float, int, int] | None = None  # (avg_cost, start, end) in seq-local indices
 
         for seg_s, seg_e in remaining:
+            _raise_if_compare_cancelled(stop_evt)
             if seg_e - seg_s + 1 < max(8, q_len // 2):
                 continue
             sub = seq[seg_s : seg_e + 1]
-            cost1, s1, e1 = subsequence_dtw(q, sub)
-            cost2, s2, e2 = subsequence_dtw(q_m, sub)
+            cost1, s1, e1 = subsequence_dtw(q, sub, stop_evt=stop_evt)
+            cost2, s2, e2 = subsequence_dtw(q_m, sub, stop_evt=stop_evt)
             avg1 = float(cost1 / max(1, q_len))
             avg2 = float(cost2 / max(1, q_len))
             if avg2 < avg1:
@@ -765,6 +843,7 @@ def _multi_subsequence_matches(
                 new_remaining.append((exc_e + 1, seg_e))
         remaining = new_remaining
 
+    _raise_if_compare_cancelled(stop_evt)
     return out
 
 
@@ -1173,6 +1252,7 @@ def compare_dual_streams(
     scored on its full length — no split needed.
     """
     stop_evt = stop_evt or Event()
+    _raise_if_compare_cancelled(stop_evt)
     front_template_path = Path(front_template_path)
     side_template_path = Path(side_template_path)
     front_video_path = Path(front_video_path)
@@ -1228,6 +1308,7 @@ def compare_dual_streams(
         progress_cb=progress_cb,
         stop_evt=stop_evt,
     )
+    _raise_if_compare_cancelled(stop_evt)
     _assert_feature_layout_match(
         feat_f,
         seq_f,
@@ -1246,6 +1327,7 @@ def compare_dual_streams(
         progress_cb=progress_cb,
         stop_evt=stop_evt,
     )
+    _raise_if_compare_cancelled(stop_evt)
     _assert_feature_layout_match(
         feat_s,
         seq_s,
@@ -1272,27 +1354,33 @@ def compare_dual_streams(
 
     rule_front = None
     rule_side = None
+    _raise_if_compare_cancelled(stop_evt)
     if enable_rules:
         raw_f, raw_meta_f_slice = _raw_slice_f(None, None)
+        _raise_if_compare_cancelled(stop_evt)
         rule_front = score_rules(
             raw_f,
             view="front",
             action_scope=action_scope,
             valid_mask=_valid_mask_from_raw(raw_f, raw_meta_f_slice),
         )
+        _raise_if_compare_cancelled(stop_evt)
         raw_s, raw_meta_s_slice = _raw_slice_s(None, None)
+        _raise_if_compare_cancelled(stop_evt)
         rule_side = score_rules(
             raw_s,
             view="side",
             action_scope=action_scope,
             valid_mask=_valid_mask_from_raw(raw_s, raw_meta_s_slice),
         )
+        _raise_if_compare_cancelled(stop_evt)
 
     error_layout = POSE33_V3
     joint_names = list(error_layout.joint_names)
     src_idx = list(error_layout.source_indices)
     num_joints = error_layout.num_joints
 
+    _raise_if_compare_cancelled(stop_evt)
     front_score, front_matches, front_joint_errors = _score_view_seq(
         seq_f,
         _raw_slice_f,
@@ -1305,7 +1393,9 @@ def compare_dual_streams(
         joint_names=joint_names,
         src_idx=src_idx,
         num_joints=num_joints,
+        stop_evt=stop_evt,
     )
+    _raise_if_compare_cancelled(stop_evt)
     side_score, side_matches, side_joint_errors = _score_view_seq(
         seq_s,
         _raw_slice_s,
@@ -1318,11 +1408,14 @@ def compare_dual_streams(
         joint_names=joint_names,
         src_idx=src_idx,
         num_joints=num_joints,
+        stop_evt=stop_evt,
     )
+    _raise_if_compare_cancelled(stop_evt)
 
     combined = float((w_front * float(front_score)) + (w_side * float(side_score)))
     combined = float(np.clip(combined, 0.0, 1.0))
     pct = int(np.clip(int(round(combined * 100.0)), 0, 100))
+    _raise_if_compare_cancelled(stop_evt)
 
     return DualCompareResult(
         front_template_path=front_template_path,
