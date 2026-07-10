@@ -1,21 +1,137 @@
-## 2026-07-08: [docs/test] 收尾 batch paired 与双摄骨架测试（issue #59/#62）
+## 2026-07-09: [apps/core] 接通 Tkinter 实时直拳识别、预览平滑与录制 H.264 转码
 
 ### 问题描述
 
-双摄双面视图收尾 issue 中，#60/#61 已分别落地学员正/侧配对 helper 与 `batch_dual_compare.py --paired` 双流批处理入口。剩余 #62 要同步 `change.md`、`CLAUDE.md`、`AGENTS.md`；#59 最新评论已把测试范围裁剪为只守卫双摄 Tkinter 骨架，不再要求 Tkinter 接入 `PreviewLandmarkSmoother` / 在线 matcher。
+- `core/online_matcher.py`、`templates/online/` 左右手直拳模板和对应测试已经存在，但 `apps/app_ui.py` 未接线，Tkinter 单摄实时预览无法显示在线识别结果与分数。
+- `core/preview_smoother.py` 已实现 One Euro 平滑，但单线程与并行摄像头预览均未使用；并行路径还在 worker 内直接绘制，无法在有序出口做有状态平滑。
+- OpenCV 缺少 H.264 编码器时录制回退为 MJPG AVI，录制结束后没有调用系统 ffmpeg 转为最终 H.264 MP4。
 
 ### 修改内容
 
-- `tests/test_app_ui_dual_camera.py`：新增无需真实 Tk root 的双摄测试，覆盖 `_collect_state` 的 `source2` 收集、同设备守卫、视频文件模式忽略第二摄像头，以及 `_worker_loop_dual_camera` 内双 `MediaPipePipeline` AST 守卫。
-- `CLAUDE.md`：补充 `compare_dual_streams` 双独立流入口和 `batch_dual_compare.py --paired` 的边界：默认单视频模式不变、同目录正/侧关键词配对、CSV `video` 列写学员 id、`--export_raw` 跳过、`body_core_v1` 不接 paired。
-- `AGENTS.md`：补 paired 批处理命令、后续 agent 硬约束和 batch paired / dual-stream 验证门。
-- `change.md`：记录 #59/#62 收尾依据、修改内容和验证结果。
+- `apps/app_ui.py`：
+  - 新增默认开启的「实时动作识别」开关、`match_var` 命中/分数显示，以及 `_build_online_matcher`、`_feed_online_matcher`、`_post_match` 三个接入边界；模板缺失/不兼容时安全降级为无 matcher，关窗与停止竞态不会刷新已销毁 UI。
+  - 开关值在 Tk 主线程收集进 `UiState.online_match_enabled`，worker 不跨线程读取 `BooleanVar`；matcher 仅接单摄实时流，双摄和离线文件不接。
+  - 单线程摄像头按 `infer(raw) -> matcher(raw) -> smoother -> draw` 执行；文件 VIDEO 路径继续走原 `annotate()`，保留内部帧序号/时间戳语义。
+  - 并行摄像头启用 `ParallelPoseEngine(defer_draw=True)`，在有序出口喂 raw matcher、平滑并绘制；使用采集时的 monotonic 时间戳，保留满队列丢帧造成的真实时间间隔。
+  - 单线程和并行绘制均以 raw landmarks 做原有单帧动作分类，以 smoothed landmarks 画骨架，保证 smoother 不回流识别/评分序列。
+  - 新增 `_transcode_async`，接入手动结束录制与单线程、双摄、并行视频、并行摄像头四个会话收敛点；录制文件名加入微秒，避免同秒重录与后台转码争用同名文件。
+- `core/vision_pipeline.py`：`draw_pose_frame` / `MediaPipePipeline.draw` 新增可选 `action_pose_landmarks`，默认仍使用绘制 landmarks，旧调用行为不变；Tkinter 平滑预览显式传 raw landmarks 做动作分类。
+- `core/video_writer.py`：新增 `transcode_to_h264`，仅把 AVI 用 `libx264 / medium / CRF 20 / yuv420p` 转为 MP4；成功且目标非空才删除 AVI，ffmpeg 缺失、失败或无有效输出时保留原录像。
+- 新增 `tests/test_video_writer_transcode.py` 与 `tests/test_preview_draw_contract.py`，覆盖转码命令/失败保留源文件以及 raw 分类、smoothed 绘制边界。
+
+### 验证方法
+
+- 定向与回归安全网共 **96 passed**：在线 matcher、Tkinter 接入、预览平滑/绘制边界、转码、`pose33_v3` golden、`valid_mask`、双摄、手部开关、并行引擎和录制控制器相关测试全部通过。
+- `py_compile apps/app_ui.py core/vision_pipeline.py core/video_writer.py tests/test_preview_draw_contract.py tests/test_video_writer_transcode.py` 通过。
+- 真实 Tk 构建 smoke 通过：默认开关/待机文案正确，`templates/online` 两套左右手直拳模板可加载并正常关闭 matcher。
+- 使用真实系统 ffmpeg 把临时 MJPG AVI 转码：输出 `codec_name=h264` 的 MP4，文件非空，源 AVI 已删除。
+- `git diff --check` 无 whitespace error（仅 Windows LF/CRLF 提示）。
+- 摄像头前实际左右手出拳命中、平滑观感和录制按钮全链路仍需场地人员按现场机位做最终人工确认与阈值标定。
+
+## 2026-07-09: [templates] 新增左/右手直拳在线模板，区分左右手出拳（方案A）
+
+### 问题描述
+
+Tkinter 实时预览已能识别「直拳」，但无法区分左手/右手出拳。原 `templates/online/` 三个模板（正面/左侧/右侧）实为**同一只右手直拳**的三机位，无左手素材，DTW 无从区分左右手。
+
+### 修改内容
+
+- 用 `标准样本/侧面_直拳_左手.mp4`、`标准样本/侧面_直拳_右手.mp4` 各建一套 pose33_v3 模板（`make_template.py --pose heavy`，默认布局，零代码）：
+  - `templates/online/直拳_右手.npz`（分段 15..53，39 帧）
+  - `templates/online/直拳_左手.npz`（分段 528..580，53 帧）
+- 删除旧的 `直拳_正面.npz` / `直拳_左侧.npz` / `直拳_右侧.npz`（均为右手素材，标签会与新左右手模板混淆）。现 `templates/online/` 只留左右手两套。
+- 在线匹配器（`core/online_matcher.py`）用 `.npz` 文件名（stem）作动作标签，DTW 天然区分左右手，无需改代码。
+
+### 验证方法
+
+- `load_template_library('templates/online')` 加载成功，5→2 套模板布局/normalizer 校验全部通过（layout=pose33_v3、normalizer=v3），形状均 (M,22,2)。
+- 待现场对着摄像头实测左右手命中与分数（`MatcherConfig` 阈值现场标定）。
+
+## 2026-07-08: [apps/core] 预览渲染解绑 + 摄像头预打开 + 下载加锁（启动/预览性能 第二波 点1~4）
+
+### 问题描述
+
+承接第一波（默认 workers 自适应 + 并行 open/载模型 + 先出裸画面）。用户反馈点击→预览仍偏慢、且「整机性能严重过剩没榨满」。逐环节耗时分析后确认四个可压点，本轮全部落地。
+
+### 修改内容
+
+- **点1 预览渲染解绑**（`apps/app_ui.py`）：把每帧 `cvtColor(BGR→RGB)` + aspect-fit `resize` 从 GUI 主线程 `_tick` 移到 worker 线程的 `_post_frame`/`_post_frame2`（5 个送帧点走这单一收敛点，零改调用点）；`_tick` 只剩 `Image.fromarray`+`ImageTk.PhotoImage`+`configure`；新增 `_preview_wh`/`_preview_wh2` 字段 + preview/preview2 的 `<Configure>` 绑定缓存尺寸供 worker 读；tick 间隔 30ms→16ms。cvtColor/resize 均产新数组，不 mutate `annotated`（`write_frame` 仍拿到 BGR）。稳态预览帧率不再被 GUI 单线程封在 ~25fps。
+- **点2 摄像头预打开**（`apps/app_ui.py`）：选好摄像头即后台 `open_camera()` 预热，`_start` 复用，藏掉 0.5–2.5s 驱动冷启动。新增 `_preopen_cap`/`_preopen_index`/`_preopen_lock` + `_kick_preopen`/`_preopen_camera`/`_take_preopen_cap`/`_release_preopen_cap`；触发在收敛点 `_select_camera_by_label`；消费在 `_worker_loop`/`_worker_loop_parallel_camera` open 前；存入前**双重校验**（当前选中仍是该 index 且会话未运行）防泄漏/双开；切换/切「无」/关闭全覆盖释放，转移所有权后不双 release。v1 不动双摄。
+- **点3**（`apps/app_ui.py`）：`_worker_loop_parallel_camera` 的 `engine.get(timeout=0.2)`→`0.05`，加载期裸帧过渡从 ~5fps 提到 ~20fps。
+- **点4 `_ensure_file` 下载保护**（`core/vision_pipeline.py`）：多 worker 首次并发下载同一模型文件有损坏风险。加模块级 `threading.Lock` + double-check + 下载到 `.part` 临时文件后 `os.replace` 原子落位 + 失败清理。签名 `(url,path)` 不变、非首次路径不变（不影响 golden）。竞争是同进程线程，无需 filelock 依赖。
+
+### 验证方法
+
+- `py_compile apps/app_ui.py core/vision_pipeline.py` → OK
+- 新增 `tests/test_ensure_file_download_lock.py`（4 测试：已存在跳过 / `.part`+`os.replace` 原子落位 / 幂等不重下 / 失败清理 `.part`）→ 4 passed
+- 核心套件 **39 passed**：点4 自检 + `test_s5_hands_toggle` + `test_app_ui_dual_camera` + `test_app_ui_online_matcher` + `test_mediapipe_delegate_config` + **golden 安全网 `test_pose33_v3_golden`/`test_valid_mask_migration`**（后者绿 = 未碰 MediaPipe 默认路径）
+- 备注：`test_ui_backend_models` 在当前无网 linux 环境下挂起（该测试自身依赖网络/sidecar，与本次 `_ensure_file` 改动无关，签名与非首次路径均未变）
+- 执行说明：点1/2/3 由 Sonnet5 子代理落地（该 agent 后因 prompt 过长中断），点4 与最终验收由主 Opus 完成
+
+## 2026-07-08: [apps] 缩短点击→预览等待 + 默认榨满多核
+
+### 问题描述
+
+1. 从点击「开始」到看到预览耗时较长（常 3–8s），期间预览区全空白。链路是后台线程里 3 步串行、全发生在首帧之前：`open_camera()` 摄像头冷启动（1–3s）→ `MediaPipePipeline` 载 pose+hand 模型（1–3s）→ 首帧推理 warmup。
+2. 用户反馈整机性能严重过剩、没被有效利用：主预览默认 `workers=2`，在多核机（如 32 核）上摄像头实时只用到约 2 个 worker，CPU 利用率极低；而 `parallel_pose_engine` 本可近线性扩展（6 worker≈57fps）。且注释写「默认线程数=1 走单线程 VIDEO」，与 UI 实际默认 2 不符。
+
+### 修改内容
+
+- `apps/app_ui.py`：
+  - 新增模块级 `default_workers()`：按 `os.cpu_count()` 自适应，`max(2, min(8, cpu-2))`——留 2 核给 UI/采集/系统，上限 8（实测 6 worker 已达 ~57fps，再多是拿每 worker 一份模型的内存换不到 fps）。`self.workers_var` 默认从 `2` 改为 `default_workers()`，摄像头默认即走多核并行引擎榨吞吐。想更激进仍可在「线程数」spinbox 手调（上限 16）。
+  - 并行「开摄像头 + 载模型」：`_worker_loop` 顶部对「摄像头 + 非双摄 + workers>1」这条主路径提前分流（open 下放到分支内部），删掉原先 open 之后的重复分流。`_worker_loop_parallel_camera` 签名由 `(state, cap, fps_for_ts)` 改为 `(state)`，先 `engine.start()`（各 worker 后台线程各自建模型），**再** `open_camera()`，使两段冷启动重叠而非串行；`begin_session` 后移到拿到 cap 之后；cap 释放收敛到 `finally` 单点（去掉主循环后重复的 `cap.release()`）。
+  - 单线程 VIDEO / 双摄 / 并行视频文件三条路径行为不变。
 
 ### 验证方法
 
 - `py_compile apps/app_ui.py` → OK
+- `pytest tests/test_s5_hands_toggle.py tests/test_app_ui_dual_camera.py tests/test_app_ui_online_matcher.py -q` → 12 passed
+- `default_workers()` 边界断言（monkeypatch `os.cpu_count`）：`{None:2, 1:2, 4:2, 6:4, 10:8, 32:8}` 全部命中
+
+## 2026-07-08: [apps] 修复主窗口崩溃 + 双摄预览改上下堆叠
+
+### 问题描述
+
+1. 点击「开始识别」崩溃：`'App' object has no attribute 'save_var'`。`_collect_state` 里 `out_path=(self.out_var.get()... if self.save_var.get()...)` 引用了 `App` 从未定义的属性（943f1c0 引入的死代码，同名变量属于 `CompareWindow`）。主实时会话保存早已由 `RecordingController` 接管，worker loop 也不读 `state.out_path`。
+2. 双摄预览左右并排太占横向空间，用户要求改成上下堆叠。
+
+### 修改内容
+
+- `apps/app_ui.py`：
+  - `_collect_state`：删除引用 `self.out_var`/`self.save_var` 的死代码行，`out_path` 走 dataclass 默认 `None`。
+  - 双摄预览布局：第二路 Label 从 `row=0, column=1` 移到 `row=1, column=0`；显隐权重从 `columnconfigure(1)` 换成 `rowconfigure(1)`，单摄模式下主预览仍占满整列。渲染是 fit-to-window 自适应，未改。
+
+### 验证方法
+
+- `py_compile apps/app_ui.py` → OK
+- `pytest tests/test_s5_hands_toggle.py tests/test_app_ui_dual_camera.py -q` → 11 passed
+
+## 2026-07-08: [batch/docs/test] 收尾双摄双面视图剩余 issue #59-#62
+
+### 问题描述
+
+GitHub 仍有 #59-#62 四条 open issue，其中 #60-#62 是用户点名的“三条”收尾主线，#59 最新评论已裁剪为只补 Tkinter 双摄骨架测试。batch 侧缺少学员正/侧文件名配对和 `--paired` 双独立流入口；文档也还停留在默认单视频自动拆分描述。
+
+### 修改内容
+
+- `tests/test_app_ui_dual_camera.py`：新增无需真实 Tk root 的双摄测试，覆盖 `_collect_state` 的 `source2` 收集、同设备守卫、视频文件模式忽略第二摄像头，以及 `_worker_loop_dual_camera` 内双 `MediaPipePipeline` AST 守卫；不再要求 `PreviewLandmarkSmoother` / matcher。
+- `batch/batch_dual_compare.py`：
+  - 提取 `_FRONT_KEYS` / `_SIDE_KEYS` / `_VIDEO_SUFFIXES` 常量，并新增 `_classify_view`、`_pair_students`。
+  - 新增 `--paired` opt-in；默认单文件模式继续调用 `compare_video_to_dual_templates`。
+  - paired 模式按学员 id 配对正/侧文件，调用 `compare_dual_streams`，CSV `video` 列写学员 id，JSONL 额外记录 `student_id`、`front_video_path`、`side_video_path`。
+  - paired 模式下 `--export_raw` gated off 并打印提示；`body_core_v1`/YOLO 调试批处理不接 paired。
+- `tests/test_batch_backend_args.py`：新增配对 helper 测试和 paired 主流程测试，覆盖 warning/skip、调用 `compare_dual_streams`、顺序稳定、raw 导出跳过。
+- `CLAUDE.md` / `AGENTS.md`：同步 `compare_dual_streams` 和 `batch_dual_compare.py --paired` 的真实边界与验证命令。
+- `docs/specs/20260708-085116-dual-view-issue-closeout/`：按 Spec workflow 新增本轮 requirements-first 五件套与任务进度。
+
+### 验证方法
+
+- `py_compile batch/batch_dual_compare.py` → OK
 - `pytest tests/test_app_ui_dual_camera.py -q` → 5 passed
-- `pytest tests/test_batch_backend_args.py tests/test_compare_dual_streams.py -q` → 23 passed
+- `pytest tests/test_batch_backend_args.py -q` → 18 passed
+- `pytest tests/test_compare_dual_streams.py -q` → 4 passed
+- `pytest tests -q` → 22 failed / 385 passed / 6 warnings；失败集中在开工前已有的未跟踪/半成品路径（`test_app_ui_online_matcher.py`、UI backend session、旧 `App` stub 缺 `save_var` 等），本轮新增和受影响测试均通过
+- `validate_spec.py docs/specs/20260708-085116-dual-view-issue-closeout --workflow requirements-first --color never` → 34 passed / 0 failed
 - `git diff --check` → 仅 Windows 行尾提示，无 whitespace error
 
 ## 2026-07-08: [apps] 修复 PR #67 代码评审发现的两处问题（issue #58 后续）
@@ -91,8 +207,6 @@ PR #67（issue #58 双摄双路预览）代码评审提出两处问题：
 - `pytest tests/test_s5_hands_toggle.py -q` → **6 passed**（`_collect_state` 相关既有测试用 `object.__new__(App)` 构造精简假对象，未初始化 `camera_choice_var_2`，靠 `getattr` 兜底为 `source2=None`，行为不变）
 - `pytest tests -q` → **365 passed, 4 failed, 2 skipped**；4 个失败（`test_error_handling.py::test_browse_video_rejects_invalid_file_and_preserves_source`、`test_s6_default_switch_decision.py::test_s6_decision_has_per_chain_outcome_and_reopen_gates`、`test_tracking_issue_sync.py::test_tracking_doc_lists_final_m4_issues_and_decisions`、`test_tracking_issue_sync.py::test_s6_decision_doc_exists_for_tracking_close`）与本次改动无关，在 `main`（`b0bbe34`）干净基线上跑同一条命令同样失败、数量一致；`test_ui_backend_sessions.py::test_camera_preview_drops_stale_frames_when_inference_is_slow` 偶发因 Tk 线程计时抖动失败，单独重跑与全量重跑均 passed，非本次改动引入
 
-
-
 ## 2026-07-08: [test] 补全 compare_dual_streams 单测验收标准（issue #56）
 
 ### 问题描述
@@ -110,8 +224,6 @@ PR #67（issue #58 双摄双路预览）代码评审提出两处问题：
 
 - `pytest tests/test_compare_dual_streams.py -q` → **4 passed**
 - `pytest tests/test_pose33_v3_golden.py -q` → **16 passed，golden 零漂移**
-
-
 
 ## 2026-07-08: [core] 提取 _score_view_seq 模块级 helper（issue #54，纯机械 lift）
 
@@ -131,8 +243,6 @@ PR #67（issue #58 双摄双路预览）代码评审提出两处问题：
 
 - `py_compile core/action_compare.py` → OK
 - `pytest tests/test_pose33_v3_golden.py -q` → **16 passed，golden 零漂移**（含 `test_dual_scores`/`test_dual_segments`/`test_dual_rule_scores`/`test_dual_rule_violations`/`test_dual_joint_errors`，覆盖 `DualCompareResult` 全部字段）
-
-
 
 ## 2026-06-15: 完成 Spce final acceptance 并冻结 accepted 状态
 
