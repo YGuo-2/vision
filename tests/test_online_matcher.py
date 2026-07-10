@@ -10,10 +10,13 @@ import time
 
 import numpy as np
 
+from core import paths
+from core.feature_layout import POSE33_V3
 from core.online_matcher import (
     ActionTemplate,
     MatcherConfig,
     OnlineActionMatcher,
+    load_template_library,
     match_window,
 )
 
@@ -75,6 +78,20 @@ def _wait_results(results, n, timeout=3.0):
         if len(results) >= n:
             return
         time.sleep(0.02)
+
+
+def test_bundled_straight_punch_templates_load_from_default_library():
+    templates = load_template_library(paths.templates_dir() / "online")
+    by_name = {template.name: template for template in templates}
+
+    assert {"直拳_左手", "直拳_右手"} <= by_name.keys()
+    for name in ("直拳_左手", "直拳_右手"):
+        features = by_name[name].features
+        assert features.dtype == np.float32
+        assert features.ndim == 3
+        assert features.shape[0] > 0
+        assert features.shape[1:] == POSE33_V3.shape
+        assert np.isfinite(features).all()
 
 
 def test_match_window_picks_closest_template():

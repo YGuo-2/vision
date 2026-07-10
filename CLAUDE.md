@@ -153,7 +153,7 @@ npm run package:windows
   - `calibrate_body_core.py`：`body_core_v1` S3 标定（baseline/conf sweep/多人闸门），产出带授权元数据的 CSV/JSONL/NPZ
   - `bench_annotate_fps.py`：MediaPipe/YOLO 端到端 FPS 与 GPU delegate / FP16 / imgsz benchmark
   - `offline_matching_profile.py`：离线 DTW / 序列提取 profile（先 profile 后优化）
-  - `spike_yolo_baseline.py` / `selfcheck_tech_eval.py` / `analyze_*.py`：实验 spike 与自检
+  - `spike_yolo_baseline.py`：YOLO 实验 spike；tech_eval 自检已迁入 `tests/test_selfcheck_tech_eval.py`
 - **batch/**: 离线批处理 CLI
   - `backend_options.py`：共享 `backend_router` 的 CLI 适配层（`--backend` / `--feature-layout` 校验与 meta 透传）
   - `batch_dual_compare.py` / `batch_export_skeleton.py` / `batch_tech_eval.py`：默认 MediaPipe `pose33_v3`；显式 `body_core_v1` 时走 YOLO 调试闭环，输出与对外评分列分离、多人标「需人工复核」。`batch_dual_compare.py --paired` 仅在默认 `pose33_v3` 路径中按学员正/侧文件名配对并调用 `compare_dual_streams`
@@ -233,7 +233,7 @@ Landmarks 11-32（排除脸部）→ 以髋部中心平移 → 按躯干长度�
 - 模块边界清晰：UI 逻辑留在 `apps/app_ui.py` / `frontend/`，bridge 适配在 `apps/ui_backend.py`，推理与评分留在 `core/` / `analysis/`。**不要把视觉算法搬进 Rust 或 TypeScript**
 - 后端路由只走 `core/backend_router.py`，不要在 CLI/UI/batch 入口层复制分叉判断
 - 前端不存大图 base64/blob URL 历史；实时预览用 Rust-owned latest-frame 通道 + 帧身份单调不回退 guard
-- **视频导出默认 H.264**：本机 OpenCV 构建不含 H.264 编码器，`open_video_writer` 会回退成 MJPG avi（体积约为 H.264 的 7 倍）。导出/离线出片后统一用系统 `ffmpeg` 转 H.264 mp4（`-c:v libx264 -preset medium -crf 20 -pix_fmt yuv420p`），转码完成删掉临时 avi。不要把 MJPG avi 当最终产物交付
+- **视频导出默认 H.264**：本机 OpenCV 构建不含 H.264 编码器，`open_video_writer` 会回退成 MJPG/XVID AVI。导出/离线出片后统一用系统 `ffmpeg` 转 H.264 MP4（`-c:v libx264 -preset medium -crf 20 -pix_fmt yuv420p`），转码完成删掉临时 AVI。不要把回退 AVI 当最终产物交付
 - MediaPipe 模型首次运行自动下载到 `models/`（gitignored）；YOLO 权重需手动安装到 `models/`
 - 不提交大产物（models/videos）与生成产物（`dist/`、`build/`、`frontend/dist/`、`frontend/src-tauri/target/`、`frontend/src-tauri/resources/*.exe`）
 - Conventional Commits：`feat:`、`fix:`、`refactor:`、`docs:`、`test:`、`chore:`

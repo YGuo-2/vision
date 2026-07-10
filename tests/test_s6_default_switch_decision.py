@@ -38,7 +38,8 @@ def test_s6_decision_records_all_default_paths_stay_mediapipe():
 def test_s6_decision_has_per_chain_outcome_and_reopen_gates():
     text = DECISION.read_text(encoding="utf-8")
     for chain in (
-        "实时预览（CLI / UI）",
+        "实时预览（CLI / Tkinter UI）",
+        "Vue/Tauri 实时预览",
         "模板匹配",
         "规则 / 技术评估",
         "Hybrid",

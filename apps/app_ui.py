@@ -46,6 +46,12 @@ RECORD_BTN_TEXT = {
 # 第二摄像头下拉的「不选」sentinel（双摄像头双面视图，issue #57）。
 NO_SECOND_CAMERA = "无（单摄像头）"
 
+# 关窗时给采集线程收尾并等待 H.264 转码的最长时间。等待拆成短 join 片段，
+# 避免 Tk 主线程在单次回调里长时间无响应。
+_CLOSE_JOIN_TIMEOUT_S = 3.0
+_CLOSE_JOIN_SLICE_S = 0.05
+_CLOSE_POLL_MS = 50
+
 
 def clamp_workers(n: int) -> int:
     """将离线线程数钳制到闭区间 [1, os.cpu_count()]。
@@ -1107,6 +1113,15 @@ class App:
         self._preopen_lock = threading.Lock()
         self._preopen_cap: cv2.VideoCapture | None = None
         self._preopen_index: int | None = None
+        # 每次预打开请求、消费或释放都递增 generation。后台 open 完成时只有仍匹配
+        # 当前 generation 的任务才可提交结果，防止较晚返回的旧任务覆盖新 cap。
+        self._preopen_generation = 0
+
+        # H.264 转码不能依赖 daemon 线程碰运气完成；登记所有 worker，关窗时有界等待。
+        self._transcode_lock = threading.Lock()
+        self._transcode_workers: set[threading.Thread] = set()
+        self._closing = False
+        self._close_deadline: float | None = None
 
         self._stop_evt = threading.Event()
         self._worker: threading.Thread | None = None
@@ -1454,11 +1469,23 @@ class App:
         """后台把 MJPG/AVI 回退产物转成 H.264，避免阻塞 GUI 或推理线程。"""
         if path is None:
             return
-        threading.Thread(
-            target=video_writer.transcode_to_h264,
-            args=(path,),
-            daemon=True,
-        ).start()
+
+        def _run() -> None:
+            try:
+                video_writer.transcode_to_h264(path)
+            finally:
+                current = threading.current_thread()
+                with self._transcode_lock:
+                    self._transcode_workers.discard(current)
+
+        worker = threading.Thread(target=_run, name="h264-transcode", daemon=False)
+        with self._transcode_lock:
+            self._transcode_workers.add(worker)
+            try:
+                worker.start()
+            except Exception:
+                self._transcode_workers.discard(worker)
+                raise
 
     def _choose_record_dir(self) -> None:
         """选择录制视频保存目录。"""
@@ -1760,28 +1787,62 @@ class App:
 
         `open_camera` 阻塞 0.5–2.5s（驱动冷启动），必须放后台线程，仿 `_start_enumeration`。
         """
-        self._release_preopen_cap()
-        threading.Thread(target=self._preopen_camera, args=(index,), daemon=True).start()
+        with self._preopen_lock:
+            self._preopen_generation += 1
+            generation = self._preopen_generation
+            # 同一摄像头的重复预热在新 cap 成功后再原子替换；新 open
+            # 失败时保留已有有效 handle。切到不同摄像头则立即释放旧设备。
+            same_index = self._preopen_index == index
+            old_cap = None if same_index else self._preopen_cap
+            if not same_index:
+                self._preopen_cap = None
+                self._preopen_index = None
+        if old_cap is not None:
+            old_cap.release()
+        threading.Thread(
+            target=self._preopen_camera,
+            args=(index, generation),
+            daemon=True,
+        ).start()
 
-    def _preopen_camera(self, index: int) -> None:
+    def _preopen_camera(self, index: int, generation: int) -> None:
         """预打开线程体：open_camera 完成后双重校验（锁下）才存入 _preopen_cap/_preopen_index。
 
-        仅当 (a) 用户当前选中仍是该 index——读取非 Tkinter 的 `_source_state`（跨线程碰
-        Tkinter 变量不安全）——且 (b) 会话未运行才存入；否则（用户已切走，或会话已启动、
-        可能已自行打开同设备）直接释放刚开的 cap、不存入，防泄漏也防与 worker 争用同一设备。
+        仅当 (a) 请求 generation 仍是最新，(b) 用户当前选中仍是该 index——读取非 Tkinter
+        的 `_source_state`（跨线程碰 Tkinter 变量不安全），(c) 会话未运行，且 (d) cap 确实
+        已打开时才提交。提交与替换在同一锁内完成，被替换或失效的 handle 在锁外释放。
         """
-        cap = open_camera(index)
+        try:
+            cap = open_camera(index)
+        except Exception:
+            return
+
+        try:
+            opened = bool(cap is not None and cap.isOpened())
+        except Exception:
+            opened = False
+
+        replaced_cap = None
         with self._preopen_lock:
             running = bool(self._worker and self._worker.is_alive())
             still_selected = (
                 self._source_state.kind == "camera" and self._source_state.value == str(index)
             )
-            keep = still_selected and not running
+            keep = (
+                generation == self._preopen_generation
+                and still_selected
+                and not running
+                and opened
+            )
             if keep:
+                replaced_cap = self._preopen_cap
                 self._preopen_cap = cap
                 self._preopen_index = index
+        if replaced_cap is not None and replaced_cap is not cap:
+            replaced_cap.release()
         if not keep:
-            cap.release()
+            if cap is not None:
+                cap.release()
 
     def _take_preopen_cap(self, index: int):
         """消费预热 cap（转移所有权）：命中且仍 isOpened() 才返回，否则 None（回退 open_camera）。
@@ -1789,19 +1850,30 @@ class App:
         命中但已失效（如设备被拔出）时就地释放并清空，不留僵尸引用。
         """
         with self._preopen_lock:
-            if self._preopen_index != index or self._preopen_cap is None:
-                return None
+            # 会话开始消费时，所有尚未完成的预打开任务都不再有提交资格。
+            self._preopen_generation += 1
             cap = self._preopen_cap
+            cached_index = self._preopen_index
             self._preopen_cap = None
             self._preopen_index = None
-        if cap.isOpened():
+        if cap is None:
+            return None
+        if cached_index != index:
+            cap.release()
+            return None
+        try:
+            opened = bool(cap.isOpened())
+        except Exception:
+            opened = False
+        if opened:
             return cap
         cap.release()
         return None
 
     def _release_preopen_cap(self) -> None:
-        """释放并清空预热 cap（锁下弹出、锁外 release，避免持锁做阻塞的设备释放调用）。"""
+        """失效所有请求并清空预热 cap（锁下弹出、锁外 release，避免阻塞设备调用）。"""
         with self._preopen_lock:
+            self._preopen_generation += 1
             cap = self._preopen_cap
             self._preopen_cap = None
             self._preopen_index = None
@@ -1832,12 +1904,20 @@ class App:
                     raise ValueError("两个摄像头不能选同一个")
                 source2 = str(index_2)
 
+        # 保留旧的 save_var/out_var 测试桩与外部嵌入兼容；当前主窗口已由
+        # RecordingController 接管录制，没有这两个控件时安全回退为 None。
+        save_var = getattr(self, "save_var", None)
+        out_var = getattr(self, "out_var", None)
+        out_path = None
+        if save_var is not None and out_var is not None and bool(save_var.get()):
+            out_path = out_var.get().strip() or None
+
         return UiState(
             source=source,
             pose_variant=self.pose_var.get().strip() or "full",
             workers=workers,
             enable_hands=bool(self.enable_hands_var.get()),
-            # 主实时会话的保存已由 RecordingController 接管（录制分组），out_path 在此路径不再消费。
+            out_path=out_path,
             source2=source2,
             online_match_enabled=(
                 bool(self.online_match_var.get())
@@ -1862,6 +1942,7 @@ class App:
         self._set_refresh_enabled()
         self.status_var.set("启动中…（首次运行可能需要下载模型）")
         self.actions_var.set("-")
+        self.match_var.set("识别：待机")
         self.progress_var.set(0.0)
         self.progress_text_var.set("")
         self.progress_bar.configure(mode="determinate", maximum=100.0, value=0.0)
@@ -1882,9 +1963,60 @@ class App:
         self.status_var.set("正在停止…")
 
     def _on_close(self) -> None:
+        if self._closing:
+            return
+        self._closing = True
         self._stop_evt.set()
         self._release_preopen_cap()
-        self.root.after(50, self.root.destroy)
+        self._close_deadline = time.monotonic() + _CLOSE_JOIN_TIMEOUT_S
+        self._poll_close_workers()
+
+    def _poll_close_workers(self) -> None:
+        """分片 join 采集/转码 worker；全部结束或到达期限后销毁 Tk 窗口。"""
+        deadline = self._close_deadline or time.monotonic()
+        remaining = deadline - time.monotonic()
+        capture_worker = self._worker
+        current = threading.current_thread()
+        if (
+            capture_worker is not None
+            and capture_worker is not current
+            and capture_worker.is_alive()
+            and remaining > 0.0
+        ):
+            capture_worker.join(timeout=min(_CLOSE_JOIN_SLICE_S, remaining))
+
+        with self._transcode_lock:
+            finished = {worker for worker in self._transcode_workers if not worker.is_alive()}
+            self._transcode_workers.difference_update(finished)
+            transcode_workers = tuple(self._transcode_workers)
+
+        remaining = deadline - time.monotonic()
+        if transcode_workers and remaining > 0.0:
+            join_budget = min(_CLOSE_JOIN_SLICE_S, remaining)
+            per_worker = join_budget / len(transcode_workers)
+            for worker in transcode_workers:
+                if worker is not current:
+                    worker.join(timeout=per_worker)
+
+        # capture 的 finally 可能在上面 join 期间新建转码线程。决定销毁前
+        # 必须重新快照两类 worker，不复用 join 前的旧集合。
+        capture_alive = bool(self._worker and self._worker.is_alive())
+        with self._transcode_lock:
+            finished = {worker for worker in self._transcode_workers if not worker.is_alive()}
+            self._transcode_workers.difference_update(finished)
+            transcodes_alive = bool(self._transcode_workers)
+
+        if (capture_alive or transcodes_alive) and time.monotonic() < deadline:
+            try:
+                self.root.after(_CLOSE_POLL_MS, self._poll_close_workers)
+            except (TclError, RuntimeError):
+                pass
+            return
+
+        try:
+            self.root.destroy()
+        except (TclError, RuntimeError):
+            pass
 
     def _worker_loop(self, state: UiState) -> None:
         source = state.source

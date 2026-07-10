@@ -9,13 +9,17 @@ __pycache__/
 # 统一 artifact 根目录（YOLO 迁移 S1 / Issue #6）
 # ---------------------------------------------------------------------------
 # 三个顶层产物根由 core/paths.py 统一解析（<repo_root>/models|templates|outputs）。
-# 模型权重（.task/.pt/.onnx）与 templates/outputs 产物一律不入库。
+# 模型权重（.task/.pt/.onnx）与本地 templates/outputs 产物不入库；运行必需模板在下方逐文件放行。
 models/*.task
 models/*.pt
 models/*.onnx
 models/*.engine
 models/*.part
-templates/
+templates/*
+!templates/online/
+templates/online/*
+!templates/online/直拳_左手.npz
+!templates/online/直拳_右手.npz
 outputs/
 
 # 旧的分包 models 拷贝仍留在磁盘（core/models、analysis/models），统一后不再使用，

@@ -23,10 +23,12 @@ def test_tracking_doc_lists_final_m4_issues_and_decisions():
         "#23 GPU 复测决策门：CUDA 环境已修复并完成 6/6 样本复测",
         "#24 batch backend/layout 参数",
         "#25 CLI 实时预览：按 #23 CUDA 实测 no-go 继续关闭 / 不实现",
-        "#26 UI 后端选择：按 #23 / #25 结论继续关闭 / 不实现",
+        "#26 Tkinter UI 后端选择：按 #23 / #25 结论继续关闭 / 不实现",
         "#27 Hybrid：默认不实现",
         "#28",
-        "全部不切默认，仅保留离线 / 实验入口",
+        "正式评分 / full tech_eval / CLI / Tkinter 默认路径全部不切 YOLO",
+        "Vue/Tauri 仅保留受控",
+        "body-only 预览与内部分析入口",
     ):
         assert keyword in text, f"总追踪清单缺少最终收尾状态：{keyword}"
 
@@ -47,4 +49,5 @@ def test_s6_decision_doc_exists_for_tracking_close():
     assert S6_DECISION.exists(), "Issue #12 收尾需要 S6 决策文档存在"
     text = S6_DECISION.read_text(encoding="utf-8")
     assert "YOLO 迁移 S6 默认切换决策（Issue #28）" in text
-    assert "全部不切默认，仅保留离线 / 实验入口" in text
+    assert "正式评分 / full tech_eval / CLI / Tkinter 默认路径全部不切 YOLO" in text
+    assert "Vue/Tauri 新桌面" in text

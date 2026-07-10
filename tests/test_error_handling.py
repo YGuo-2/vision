@@ -3,19 +3,17 @@
 
 设计来源：``.kiro/specs/ui-layout-redesign/design.md`` 的 Error Handling 章节。
 
-本文件以**不依赖真实 Tk 窗口**的方式验证三类错误处理路径：
+本文件以**不依赖真实 Tk 窗口**的方式验证两类错误处理路径：
   1. 无有效输入源点击「开始」：``_collect_state`` 抛 ``ValueError``，``_start`` 弹框、
      不启动会话（不调用 ``_rec.begin_session``）。（需求 4.2）
-  2. 选择无效视频文件：``_browse_video`` 拒绝并弹「视频文件无效」，保留先前输入源
-     （不修改 ``_source_state``）。（需求 7.5）
-  3. 比对窗口创建失败：``_open_compare`` 捕获异常、弹「打开失败」，主窗口状态不变
+  2. 比对窗口创建失败：``_open_compare`` 捕获异常、弹「打开失败」，主窗口状态不变
      （``_compare_win`` 保持原值）。（需求 6.3）
 
 设计意图：以 stub self 绑定调用未绑定的 ``App`` 方法（``App._method(stub, ...)``），
-并用 monkeypatch 替换 ``apps.app_ui`` 的 ``messagebox`` / ``filedialog`` /
+并用 monkeypatch 替换 ``apps.app_ui`` 的 ``messagebox`` /
 ``CompareWindow``，从而在无显示（headless / CI）环境中也能稳定运行，不会 skip。
 
-_Requirements: 4.2, 6.3, 7.5_
+_Requirements: 4.2, 6.3_
 """
 from __future__ import annotations
 
@@ -46,25 +44,6 @@ class FakeVar:
 
     def get(self):
         return self._value
-
-
-class FakeWidget:
-    """记录 ``configure``/``set`` 调用的假控件。"""
-
-    def __init__(self, **initial) -> None:
-        self.config = dict(initial)
-        self.calls: list[dict] = []
-        self.set_values: list = []
-
-    def configure(self, **kwargs) -> None:
-        self.config.update(kwargs)
-        self.calls.append(dict(kwargs))
-
-    def set(self, value) -> None:
-        self.set_values.append(value)
-
-    def cget(self, key):
-        return self.config.get(key)
 
 
 class RecordingSpy:
@@ -139,42 +118,7 @@ def test_start_with_no_source_shows_error_and_does_not_begin_session(monkeypatch
 
 
 # ---------------------------------------------------------------------------
-# 2. 无效视频（需求 7.5）
-# ---------------------------------------------------------------------------
-
-
-def test_browse_video_rejects_invalid_file_and_preserves_source(monkeypatch):
-    """选择不存在的视频文件：弹「视频文件无效」一次、保留先前输入源（kind 仍为 none）（需求 7.5）。"""
-    missing_path = str(Path(__file__).resolve().parent / "__no_such_video__.mp4")
-    assert not Path(missing_path).exists()
-
-    monkeypatch.setattr(
-        app_ui.filedialog, "askopenfilename", lambda *a, **k: missing_path
-    )
-    recorder = ShowErrorRecorder()
-    monkeypatch.setattr(app_ui.messagebox, "showerror", recorder)
-
-    source_state = InputSourceState()  # kind == "none"
-    stub = types.SimpleNamespace(
-        _source_state=source_state,
-        source_var=FakeVar(""),
-        camera_combo=FakeWidget(),
-        source_hint_var=FakeVar(""),
-    )
-
-    App._browse_video(stub)
-
-    # 弹出一次「视频文件无效」错误提示。
-    assert recorder.count == 1
-    # 先前输入源被保留：未被改写为 video。
-    assert stub._source_state.kind == "none"
-    assert stub._source_state.value == ""
-    # 同一对象未被替换。
-    assert stub._source_state is source_state
-
-
-# ---------------------------------------------------------------------------
-# 3. 比对窗口创建失败（需求 6.3）
+# 2. 比对窗口创建失败（需求 6.3）
 # ---------------------------------------------------------------------------
 
 
