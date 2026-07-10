@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -229,6 +230,58 @@ def test_submit_reserves_resolved_segment_directory_for_processor_lifetime(
 
     assert compare_ids == [first.segment_id]
     assert {update.segment_id for update in updates} == {first.segment_id}
+    assert result_path.read_text(encoding="utf-8") == original_result
+    assert json.loads(original_result)["segment_id"] == first.segment_id
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows namespace alias contract")
+def test_submit_reserves_windows_extended_path_directory_identity(
+    tmp_path: Path,
+) -> None:
+    completed = threading.Event()
+    compare_calls = 0
+    first = _job(tmp_path, "record_windows_directory_owner")
+    extended_dir = Path("\\\\?\\" + str(first.segment_dir.resolve()))
+    assert os.path.samefile(first.segment_dir, extended_dir)
+
+    def alias_job(segment_id: str) -> DualRecordingJob:
+        return DualRecordingJob(
+            segment_id=segment_id,
+            segment_dir=extended_dir,
+            front_source=extended_dir / first.front_source.name,
+            side_source=extended_dir / first.side_source.name,
+            front_frames=first.front_frames,
+            side_frames=first.side_frames,
+            front_template=first.front_template,
+            side_template=first.side_template,
+        )
+
+    def compare(*_args, **_kwargs):
+        nonlocal compare_calls
+        compare_calls += 1
+        return _result()
+
+    processor = DualRecordingPostProcessor(
+        on_update=lambda update: completed.set()
+        if update.segment_id == first.segment_id and update.status == "completed"
+        else None,
+        transcode=lambda path, _stop: path,
+        compare=compare,
+        video_validator=lambda _path: True,
+        model_available=lambda: True,
+    )
+    try:
+        assert processor.submit(first)
+        assert not processor.submit(alias_job("record_windows_alias_concurrent"))
+        _wait(completed)
+        result_path = first.segment_dir / "result.json"
+        original_result = result_path.read_text(encoding="utf-8")
+        assert not processor.submit(alias_job("record_windows_alias_late"))
+        processor._queue.join()
+    finally:
+        processor.close(1.0)
+
+    assert compare_calls == 1
     assert result_path.read_text(encoding="utf-8") == original_result
     assert json.loads(original_result)["segment_id"] == first.segment_id
 

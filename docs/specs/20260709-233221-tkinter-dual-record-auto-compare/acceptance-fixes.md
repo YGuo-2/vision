@@ -1,7 +1,7 @@
 # Acceptance Fixes
 
 > **Source:** E:/CodeProject/vision/docs/specs/20260709-233221-tkinter-dual-record-auto-compare/acceptance_state.json
-> **Round:** 4
+> **Round:** 5
 > **Policy:** rounds 1-3 fix all actionable issues; round 4+ auto-fix P0-P2 only
 > **Original tasks:** 4 frozen tasks; do not append acceptance fixes to tasks.md
 
@@ -28,6 +28,7 @@
 | F-017 | I-017 | P3 | U-003 | done | Recording status refresh now guards only closing before pair lock/Tk access; with stop_evt set but non-closing it reads worker-finalized idle state, clears stale recording text and disables stop control. Explicit record-stop retains closing/stop guard. Tk lifecycle/control/dual suites: 101 passed. |
 | F-018 | I-018 | P2 | U-002 | done | submit resolves and normcases segment_dir outside the state lock, then atomically reserves canonical directory ownership for one segment_id for processor lifetime. Distinct IDs using the same directory or .. alias are rejected before queue/callback/write; first result remains byte-identical. Postprocess suite: 41 passed; py_compile/diff passed. |
 | F-019 | I-019 | P2 | U-003 | done | Dual-camera worker now posts done exactly once from the outermost finally after pipeline/capture/OpenCV cleanup and recording-pair finalization, covering normal, device/init failure, annotate and writer exceptions; runtime-error regression asserts both resource cleanup and done notification. Dual-camera suite: 54 passed; py_compile passed. |
+| F-020 | I-020 | P2 | U-002 | done | Existing segment directories now use filesystem identity (st_dev, st_ino) computed outside the coordinator lock; normalized namespace-stripped text is only the missing/inode-less fallback. Normal and Windows extended-path aliases are rejected both concurrently and after completion, with one compare and byte-identical first result. Postprocess suite: 42 passed; py_compile passed. |
 
 ## Deferred Issues
 

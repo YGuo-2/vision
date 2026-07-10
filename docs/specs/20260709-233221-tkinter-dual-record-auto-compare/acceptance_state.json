@@ -1,7 +1,6 @@
 {
   "affected_units": [
-    "U-002",
-    "U-003"
+    "U-002"
   ],
   "agents": [
     {
@@ -334,6 +333,62 @@
       "role": "adversarial",
       "round": 4,
       "started_at": "2026-07-10 04:40:58",
+      "status": "completed",
+      "task_ids": [
+        "T-003"
+      ],
+      "unit_id": "U-003"
+    },
+    {
+      "agent_id": "round-5-R-U-002",
+      "completed_at": "2026-07-10 05:15:01",
+      "report": "U-002/T-002 ACTIONABLE_ISSUES. P2: Windows normal and extended \\\\?\\ aliases are samefile but resolve+normcase yields distinct directory-owner keys; concurrent and post-completion distinct IDs both completed and overwrote one result.json. 41 tests miss long-path alias; prior contracts hold.",
+      "result": "ACTIONABLE_ISSUES",
+      "role": "first_wave",
+      "round": 5,
+      "started_at": "2026-07-10 05:08:35",
+      "status": "completed",
+      "task_ids": [
+        "T-002"
+      ],
+      "unit_id": "U-002"
+    },
+    {
+      "agent_id": "round-5-A-U-002",
+      "completed_at": "2026-07-10 05:28:47",
+      "report": "U-002/T-002 adversarial ACTIONABLE_ISSUES. Confirmed I-020 P2 via normal, extended and localhost-share aliases with same stat identity but distinct string owner keys; both IDs completed and overwrote one result. Repair should use filesystem identity outside lock plus normalized fallback; no new issue.",
+      "result": "ACTIONABLE_ISSUES",
+      "role": "adversarial",
+      "round": 5,
+      "started_at": "2026-07-10 05:21:08",
+      "status": "completed",
+      "task_ids": [
+        "T-002"
+      ],
+      "unit_id": "U-002"
+    },
+    {
+      "agent_id": "round-5-R-U-003",
+      "completed_at": "2026-07-10 05:20:53",
+      "report": "U-003/T-003 PASS. d7247fa has one outer-finally _post_done after all dual cleanup/finalization; normal/open/init/annotate/write exits notify exactly once, controls can restart, closing guards late Tk. 54 dual tests plus lifecycle probes passed; no P0-P4.",
+      "result": "PASS",
+      "role": "first_wave",
+      "round": 5,
+      "started_at": "2026-07-10 05:08:36",
+      "status": "completed",
+      "task_ids": [
+        "T-003"
+      ],
+      "unit_id": "U-003"
+    },
+    {
+      "agent_id": "round-5-A-U-003",
+      "completed_at": "2026-07-10 05:33:21",
+      "report": "U-003/T-003 adversarial PASS. F-019 one outer-finally done covers all exits, runs after resource/finalization, survives _close_recording_pair errors, and closing guards late Tk. 54 dual tests passed; no P0-P4.",
+      "result": "PASS",
+      "role": "adversarial",
+      "round": 5,
+      "started_at": "2026-07-10 05:21:09",
       "status": "completed",
       "task_ids": [
         "T-003"
@@ -724,6 +779,26 @@
       "unit_ids": [
         "U-003"
       ]
+    },
+    {
+      "completed_at": "2026-07-10 05:36:09",
+      "created_at": "2026-07-10 05:33:37",
+      "evidence": "Existing segment directories now use filesystem identity (st_dev, st_ino) computed outside the coordinator lock; normalized namespace-stripped text is only the missing/inode-less fallback. Normal and Windows extended-path aliases are rejected both concurrently and after completion, with one compare and byte-identical first result. Postprocess suite: 42 passed; py_compile passed.",
+      "fix_id": "F-020",
+      "issue_ids": [
+        "I-020"
+      ],
+      "round": 5,
+      "severity": "P2",
+      "started_at": "2026-07-10 05:33:54",
+      "status": "done",
+      "task_ids": [
+        "T-002"
+      ],
+      "title": "Windows 长路径别名可绕过片段目录所有权",
+      "unit_ids": [
+        "U-002"
+      ]
     }
   ],
   "full_fix_rounds": 3,
@@ -1012,6 +1087,21 @@
       ],
       "title": "双摄 worker 异常退出后未恢复主界面运行状态",
       "unit_id": "U-003"
+    },
+    {
+      "agent_id": "round-5-R-U-002",
+      "created_at": "2026-07-10 05:15:19",
+      "evidence": "Windows 普通 C:\\dir 与 \\\\?\\C:\\dir 的 samefile 为 true，但 resolve+normcase 产生不同键；并发和首段完成后探针均接受两个不同 ID、执行两次比对并由后者覆盖同一 result.json，违反 NFR-002/AC-001.3。",
+      "fix_id": "F-020",
+      "issue_id": "I-020",
+      "round": 5,
+      "severity": "P2",
+      "status": "fixed",
+      "task_ids": [
+        "T-002"
+      ],
+      "title": "Windows 长路径别名可绕过片段目录所有权",
+      "unit_id": "U-002"
     }
   ],
   "max_rounds": 6,
@@ -1041,8 +1131,8 @@
       "adversarial_status": "issues",
       "last_result": "ACTIONABLE_ISSUES",
       "phase": "阶段 2：后处理协调器与结果契约",
-      "review_status": "pass",
-      "round_started": 4,
+      "review_status": "issues",
+      "round_started": 5,
       "status": "issues",
       "task_ids": [
         "T-002"
@@ -1050,12 +1140,12 @@
       "unit_id": "U-002"
     },
     {
-      "adversarial_status": "issues",
-      "last_result": "ACTIONABLE_ISSUES",
+      "adversarial_status": "pass",
+      "last_result": "PASS",
       "phase": "阶段 2：后处理协调器与结果契约",
       "review_status": "pass",
-      "round_started": 4,
-      "status": "issues",
+      "round_started": 5,
+      "status": "pass",
       "task_ids": [
         "T-003"
       ],
@@ -1074,10 +1164,10 @@
       "unit_id": "U-004"
     }
   ],
-  "round": 4,
+  "round": 5,
   "schema_version": 1,
   "status": "fixes-complete",
   "task_count": 4,
-  "updated_at": "2026-07-10 05:01:34",
+  "updated_at": "2026-07-10 05:36:09",
   "workflow": "requirements-first"
 }

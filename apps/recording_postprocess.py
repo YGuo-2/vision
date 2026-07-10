@@ -91,6 +91,7 @@ CompareFn = Callable[..., Any]
 VideoValidator = Callable[[Path], bool]
 ModelAvailable = Callable[[], bool]
 UpdateCallback = Callable[[PostprocessUpdate], None]
+SegmentDirectoryKey = tuple[str, int, int] | tuple[str, str]
 
 
 def _default_transcode(path: Path, stop_evt: threading.Event) -> Path | None:
@@ -114,6 +115,25 @@ def _default_video_validator(path: Path) -> bool:
 def _default_model_available() -> bool:
     spec = next((item for item in model_manager.MEDIAPIPE_MODELS if item.key == "pose_full"), None)
     return bool(spec is not None and model_manager.is_installed(spec))
+
+
+def _segment_directory_key(path: Path) -> SegmentDirectoryKey:
+    resolved = Path(path).resolve(strict=False)
+    try:
+        stat = resolved.stat()
+    except OSError:
+        text = str(resolved)
+        if os.name == "nt":
+            if text.startswith("\\\\?\\UNC\\"):
+                text = "\\\\" + text[8:]
+            elif text.startswith("\\\\?\\"):
+                text = text[4:]
+        return ("path", os.path.normcase(os.path.normpath(text)))
+
+    inode = int(getattr(stat, "st_ino", 0) or 0)
+    if inode:
+        return ("stat", int(stat.st_dev), inode)
+    return ("path", os.path.normcase(os.path.normpath(str(resolved))))
 
 
 def validate_template_pair(front_path: Path, side_path: Path) -> None:
@@ -172,7 +192,7 @@ class DualRecordingPostProcessor:
         self._lock = threading.RLock()
         self._persistence_lock = threading.Lock()
         self._submitted: set[str] = set()
-        self._segment_dir_owners: dict[str, str] = {}
+        self._segment_dir_owners: dict[SegmentDirectoryKey, str] = {}
         self._cancelled_segments: set[str] = set()
         self._terminal_status: dict[str, PostprocessStatus] = {}
         self._closed = False
@@ -189,9 +209,7 @@ class DualRecordingPostProcessor:
 
     def submit(self, job: DualRecordingJob) -> bool:
         try:
-            segment_dir_key = os.path.normcase(
-                str(Path(job.segment_dir).resolve(strict=False))
-            )
+            segment_dir_key = _segment_directory_key(job.segment_dir)
         except (OSError, RuntimeError):
             return False
         with self._lock:
