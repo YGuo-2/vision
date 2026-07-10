@@ -2035,10 +2035,7 @@ class App:
           「开始录制」、清除录制文本（需求 5.11）。用 _record_error_shown 守卫，
           避免每 30ms 重复弹框。
         """
-        stop_evt = getattr(self, "_stop_evt", None)
-        if getattr(self, "_closing", False) or (
-            stop_evt is not None and stop_evt.is_set()
-        ):
+        if getattr(self, "_closing", False):
             return
 
         with self._record_pair_lock:

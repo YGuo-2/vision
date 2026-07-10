@@ -1236,6 +1236,30 @@ def test_recording_status_refresh_returns_without_pair_lock_during_close(tmp_pat
     assert app.record_stop_btn.config["state"] == "disabled"
 
 
+def test_recording_status_refresh_clears_worker_finalized_main_stop_state(tmp_path):
+    app, processor, _segment_dir = _dual_submission_app(tmp_path)
+    app._closing = False
+    app._stop_evt = threading.Event()
+    app._stop_evt.set()
+    app._record_error_shown = False
+    app.recording_status_var = _Var("录制中：旧片段")
+    app.record_stop_btn = _Widget()
+    app.record_stop_btn.configure(state="normal")
+    app._sync_record_stop_enabled = lambda state: app_ui.App._sync_record_stop_enabled(
+        app, state
+    )
+
+    app_ui.App._close_recording_pair(app)
+    assert app._rec.state == "idle"
+    assert app._rec2.state == "idle"
+
+    app_ui.App._refresh_recording_status(app)
+
+    assert len(processor.jobs) == 1
+    assert app.recording_status_var.get() == ""
+    assert app.record_stop_btn.config["state"] == "disabled"
+
+
 def test_record_stop_returns_without_finalize_lock_after_stop_requested(tmp_path):
     app, processor, _segment_dir = _dual_submission_app(tmp_path)
     app._closing = False

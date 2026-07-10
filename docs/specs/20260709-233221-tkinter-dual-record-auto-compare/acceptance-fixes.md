@@ -1,7 +1,7 @@
 # Acceptance Fixes
 
 > **Source:** E:/CodeProject/vision/docs/specs/20260709-233221-tkinter-dual-record-auto-compare/acceptance_state.json
-> **Round:** 2
+> **Round:** 3
 > **Policy:** rounds 1-3 fix all actionable issues; round 4+ auto-fix P0-P2 only
 > **Original tasks:** 4 frozen tasks; do not append acceptance fixes to tasks.md
 
@@ -23,6 +23,9 @@
 | F-012 | I-012 | P3 | U-002 | done | Transcode dependency exceptions are wrapped as transcode_failed while InterruptedError remains cancellation; OSError regression confirms compare is not called; recording_postprocess suite: 35 passed. |
 | F-013 | I-013 | P3 | U-002 | done | Added dedicated persistence lock; coordinator state lock now only guards pre/post state checks, never disk I/O or callbacks. Post-write cancellation recheck suppresses stale queued/completed notifications and finalizes cancelled. Deterministic blocked-write submit/cancel races pass; postprocess suite 38 passed. |
 | F-014 | I-014 | P2 | U-003 | done | _on_record_stop and _refresh_recording_status now return before Tk or recording/finalize locks when closing or stop is set, so scheduled ticks cannot re-enable controls or exceed close budget. Held-lock lifecycle regressions pass; lifecycle/control/dual suites 100 passed. |
+| F-015 | I-015 | P3 | U-002 | done | close() now detects coordinator worker callbacks, completes cancel/sentinel setup and returns without self-join; callback remainder executes and worker later exits normally. Deterministic callback reentrancy regression passes; postprocess suite 40 passed. |
+| F-016 | I-016 | P3 | U-002 | done | Cancelled enrichment write failures now preserve the already-published cancelled result and are suppressed without failed/result_write_failed notification; initial write failures remain unchanged. Byte-for-byte preservation and exactly-one terminal regression pass; postprocess suite 40 passed. |
+| F-017 | I-017 | P3 | U-003 | done | Recording status refresh now guards only closing before pair lock/Tk access; with stop_evt set but non-closing it reads worker-finalized idle state, clears stale recording text and disables stop control. Explicit record-stop retains closing/stop guard. Tk lifecycle/control/dual suites: 101 passed. |
 
 ## Deferred Issues
 

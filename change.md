@@ -1,3 +1,22 @@
+## 2026-07-10: [fix/test] Tkinter 双摄自动比对第三轮回调验收修复
+
+### 问题描述
+
+第三轮对抗审查发现三个 P3 边界：协调器回调线程内调用公开 `close()` 会尝试自连接并抛错；片段已发布 `cancelled` 后，最终路径补写若失败会再发送一个 `failed/result_write_failed` 终态；第二轮关窗防护把普通主停止也视为不可刷新，导致 worker 已复位为 idle 后录制状态文案仍残留。
+
+### 修改内容
+
+- `DualRecordingPostProcessor.close()` 在协调器 worker 自身调用时仍完成取消和退出哨兵登记，但跳过当前线程 join，使回调余下逻辑正常执行，worker 随后按队列顺序退出。
+- 已成功发布 `cancelled` 的路径 enrichment 写盘失败时保留原 `result.json`，不再抛到通用 `result_write_failed` 通知；首次结果写盘失败的既有错误语义保持不变。
+- `_refresh_recording_status()` 只在真正 `_closing` 时提前返回；普通主停止虽已设置 stop event，仍可在 worker 收尾后读取 idle 快照、清空旧录制文案并禁用“结束录制”。`_on_record_stop()` 的 closing/stop 防阻塞守卫不变。
+- 新增回调自关闭、取消补写失败和主停止 worker 收尾三条确定性回归。
+
+### 验证方法
+
+- 自动比对完整定向回归：`204 passed`。
+- 后处理子集：`40 passed`；Tkinter 生命周期、控件与双摄子集：`101 passed`。
+- `py_compile` 与 `git diff --check` 通过，仅有 Windows 行尾提示。
+
 ## 2026-07-10: [fix/test] Tkinter 双摄自动比对第二轮并发验收修复
 
 ### 问题描述

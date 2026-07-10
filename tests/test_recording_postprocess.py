@@ -962,6 +962,109 @@ def test_cancelled_result_path_enrichment_does_not_notify_twice(
     assert callback_threads == ["dual-recording-postprocess"]
 
 
+def test_close_from_worker_callback_returns_and_allows_callback_to_finish(
+    tmp_path: Path,
+) -> None:
+    callback_finished = threading.Event()
+    cancelled = threading.Event()
+    callback_steps: list[str] = []
+    processor: DualRecordingPostProcessor
+
+    def on_update(update: PostprocessUpdate) -> None:
+        if update.status == "queued":
+            callback_steps.append("before-close")
+            processor.close(1.0)
+            callback_steps.append("after-close")
+            callback_finished.set()
+        elif update.status == "cancelled":
+            cancelled.set()
+
+    processor = DualRecordingPostProcessor(
+        on_update=on_update,
+        transcode=lambda path, _stop: path,
+        compare=lambda *_args, **_kwargs: pytest.fail("closed job must not compare"),
+        video_validator=lambda _path: True,
+        model_available=lambda: True,
+    )
+    job = _job(tmp_path, "record_callback_close")
+
+    assert processor.submit(job)
+    _wait(callback_finished)
+    _wait(cancelled)
+    processor.close(1.0)
+
+    payload = json.loads((job.segment_dir / "result.json").read_text(encoding="utf-8"))
+    assert callback_steps == ["before-close", "after-close"]
+    assert payload["status"] == "cancelled"
+    assert payload["error"]["code"] == "app_closing"
+    assert not processor._worker.is_alive()
+
+
+def test_cancelled_enrichment_write_failure_preserves_original_terminal(
+    tmp_path: Path,
+) -> None:
+    terminal = threading.Event()
+    enrichment_attempted = threading.Event()
+    terminal_updates: list[PostprocessUpdate] = []
+    original_result: list[str] = []
+    job = _job(tmp_path, "record_enrichment_write_failure", suffix=".avi")
+    processor: DualRecordingPostProcessor
+
+    def transcode(path: Path, stop_evt: threading.Event) -> Path:
+        final_path = path.with_suffix(".mp4")
+        final_path.write_bytes(b"h264")
+        path.unlink()
+        processor._publish_terminal_safely(
+            job,
+            "cancelled",
+            message="后台比对已取消",
+            error_code="cancelled",
+        )
+        stop_evt.set()
+        return final_path
+
+    def on_update(update: PostprocessUpdate) -> None:
+        if update.status in {"completed", "failed", "skipped", "cancelled"}:
+            terminal_updates.append(update)
+            terminal.set()
+
+    processor = DualRecordingPostProcessor(
+        on_update=on_update,
+        transcode=transcode,
+        compare=lambda *_args, **_kwargs: pytest.fail("cancelled job must not compare"),
+        video_validator=lambda _path: True,
+        model_available=lambda: True,
+    )
+    original_write = processor._write_json_atomic
+
+    def fail_enrichment(path: Path, payload: dict) -> None:
+        if (
+            payload["status"] == "cancelled"
+            and payload["front_video_path"].endswith("front.mp4")
+        ):
+            original_result.append(path.read_text(encoding="utf-8"))
+            enrichment_attempted.set()
+            raise OSError("disk unavailable during enrichment")
+        original_write(path, payload)
+
+    processor._write_json_atomic = fail_enrichment
+    try:
+        assert processor.submit(job)
+        _wait(terminal)
+        _wait(enrichment_attempted)
+        processor._queue.join()
+    finally:
+        processor.close(1.0)
+
+    result_path = job.segment_dir / "result.json"
+    payload = json.loads(result_path.read_text(encoding="utf-8"))
+    assert result_path.read_text(encoding="utf-8") == original_result[0]
+    assert payload["status"] == "cancelled"
+    assert payload["front_video_path"].endswith("front.avi")
+    assert [update.status for update in terminal_updates] == ["cancelled"]
+    assert terminal_updates[0].error_code == "cancelled"
+
+
 def test_cancel_all_returns_before_slow_terminal_callback_and_notifies_once(
     tmp_path: Path,
 ) -> None:

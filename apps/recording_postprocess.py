@@ -211,6 +211,8 @@ class DualRecordingPostProcessor:
             if self._worker.is_alive() and not self._sentinel_queued:
                 self._sentinel_queued = True
                 self._queue.put(_QUEUE_SENTINEL)
+        if threading.current_thread() is self._worker:
+            return
         self._worker.join(max(0.0, float(timeout)))
 
     def _run(self) -> None:
@@ -508,6 +510,8 @@ class DualRecordingPostProcessor:
             try:
                 self._write_json_atomic(job.segment_dir / "result.json", payload)
             except Exception as exc:
+                if cancelled_enrichment:
+                    return
                 raise PostprocessError(
                     "result_write_failed", f"结果文件写入失败：{exc}"
                 ) from exc

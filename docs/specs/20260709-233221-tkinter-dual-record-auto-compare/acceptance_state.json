@@ -227,6 +227,62 @@
         "T-004"
       ],
       "unit_id": "U-004"
+    },
+    {
+      "agent_id": "round-3-R-U-002",
+      "completed_at": "2026-07-10 04:00:18",
+      "report": "U-002/T-002 PASS. F-013 closes I-013: state lock only guards pre/post checks, persistence lock serializes atomic I/O, callbacks outside locks; post-write cancel suppresses stale notifications and finalizes cancelled. 38 tests plus 10 repeated race rounds passed.",
+      "result": "PASS",
+      "role": "first_wave",
+      "round": 3,
+      "started_at": "2026-07-10 03:54:11",
+      "status": "completed",
+      "task_ids": [
+        "T-002"
+      ],
+      "unit_id": "U-002"
+    },
+    {
+      "agent_id": "round-3-A-U-002",
+      "completed_at": "2026-07-10 04:11:56",
+      "report": "U-002/T-002 adversarial ACTIONABLE_ISSUES. Two P3 gaps: callback-thread close() self-joins and raises RuntimeError; cancelled enrichment write failure bypasses terminal dedupe and emits second failed/result_write_failed after cancelled. Existing 38 tests pass but miss these deterministic probes.",
+      "result": "ACTIONABLE_ISSUES",
+      "role": "adversarial",
+      "round": 3,
+      "started_at": "2026-07-10 04:05:19",
+      "status": "completed",
+      "task_ids": [
+        "T-002"
+      ],
+      "unit_id": "U-002"
+    },
+    {
+      "agent_id": "round-3-R-U-003",
+      "completed_at": "2026-07-10 04:04:59",
+      "report": "U-003/T-003 PASS. F-014 guards run before Tk and recording/finalization locks; close/stop paths return immediately while normal stop/refresh, dedupe/latest guard/native cleanup remain unchanged. 100 focused tests passed.",
+      "result": "PASS",
+      "role": "first_wave",
+      "round": 3,
+      "started_at": "2026-07-10 03:54:13",
+      "status": "completed",
+      "task_ids": [
+        "T-003"
+      ],
+      "unit_id": "U-003"
+    },
+    {
+      "agent_id": "round-3-A-U-003",
+      "completed_at": "2026-07-10 04:18:02",
+      "report": "U-003/T-003 adversarial ACTIONABLE_ISSUES. P3: F-014 made _refresh_recording_status return whenever stop_evt is set; after main stop the worker resets controllers to idle but periodic refresh can never clear stale recording text until next start. Deterministic probe contrasts stale main-stop UI with correct explicit-end cleanup.",
+      "result": "ACTIONABLE_ISSUES",
+      "role": "adversarial",
+      "round": 3,
+      "started_at": "2026-07-10 04:05:21",
+      "status": "completed",
+      "task_ids": [
+        "T-003"
+      ],
+      "unit_id": "U-003"
     }
   ],
   "completed_at": null,
@@ -512,6 +568,66 @@
       "unit_ids": [
         "U-003"
       ]
+    },
+    {
+      "completed_at": "2026-07-10 04:23:47",
+      "created_at": "2026-07-10 04:18:29",
+      "evidence": "close() now detects coordinator worker callbacks, completes cancel/sentinel setup and returns without self-join; callback remainder executes and worker later exits normally. Deterministic callback reentrancy regression passes; postprocess suite 40 passed.",
+      "fix_id": "F-015",
+      "issue_ids": [
+        "I-015"
+      ],
+      "round": 3,
+      "severity": "P3",
+      "started_at": "2026-07-10 04:18:45",
+      "status": "done",
+      "task_ids": [
+        "T-002"
+      ],
+      "title": "协调器回调内调用 close 会自连接失败",
+      "unit_ids": [
+        "U-002"
+      ]
+    },
+    {
+      "completed_at": "2026-07-10 04:23:49",
+      "created_at": "2026-07-10 04:18:29",
+      "evidence": "Cancelled enrichment write failures now preserve the already-published cancelled result and are suppressed without failed/result_write_failed notification; initial write failures remain unchanged. Byte-for-byte preservation and exactly-one terminal regression pass; postprocess suite 40 passed.",
+      "fix_id": "F-016",
+      "issue_ids": [
+        "I-016"
+      ],
+      "round": 3,
+      "severity": "P3",
+      "started_at": "2026-07-10 04:18:47",
+      "status": "done",
+      "task_ids": [
+        "T-002"
+      ],
+      "title": "cancelled 路径补全写盘失败会重复终态通知",
+      "unit_ids": [
+        "U-002"
+      ]
+    },
+    {
+      "completed_at": "2026-07-10 04:28:53",
+      "created_at": "2026-07-10 04:18:29",
+      "evidence": "Recording status refresh now guards only closing before pair lock/Tk access; with stop_evt set but non-closing it reads worker-finalized idle state, clears stale recording text and disables stop control. Explicit record-stop retains closing/stop guard. Tk lifecycle/control/dual suites: 101 passed.",
+      "fix_id": "F-017",
+      "issue_ids": [
+        "I-017"
+      ],
+      "round": 3,
+      "severity": "P3",
+      "started_at": "2026-07-10 04:18:48",
+      "status": "done",
+      "task_ids": [
+        "T-003"
+      ],
+      "title": "主停止后 stop 事件使录制状态文本无法清理",
+      "unit_ids": [
+        "U-003"
+      ]
     }
   ],
   "full_fix_rounds": 3,
@@ -725,6 +841,51 @@
       ],
       "title": "关窗后周期刷新可重新启用录制控件并阻塞 Tk",
       "unit_id": "U-003"
+    },
+    {
+      "agent_id": "round-3-A-U-002",
+      "created_at": "2026-07-10 04:12:10",
+      "evidence": "回调按契约运行在 dual-recording-postprocess 线程，close() 无条件 join self._worker；确定性回调重入探针触发 RuntimeError cannot join current thread，且 _notify 会吞掉异常并截断回调剩余逻辑。",
+      "fix_id": "F-015",
+      "issue_id": "I-015",
+      "round": 3,
+      "severity": "P3",
+      "status": "fixed",
+      "task_ids": [
+        "T-002"
+      ],
+      "title": "协调器回调内调用 close 会自连接失败",
+      "unit_id": "U-002"
+    },
+    {
+      "agent_id": "round-3-A-U-002",
+      "created_at": "2026-07-10 04:12:11",
+      "evidence": "片段已发布 cancelled 后，允许的 cancelled enrichment 若 _write_json_atomic 失败，_publish_terminal_safely 绕过终态去重直接发送 failed/result_write_failed；探针观察到 cancelled 后第二个 failed 终态通知，违反每段一次终态回调。",
+      "fix_id": "F-016",
+      "issue_id": "I-016",
+      "round": 3,
+      "severity": "P3",
+      "status": "fixed",
+      "task_ids": [
+        "T-002"
+      ],
+      "title": "cancelled 路径补全写盘失败会重复终态通知",
+      "unit_id": "U-002"
+    },
+    {
+      "agent_id": "round-3-A-U-003",
+      "created_at": "2026-07-10 04:18:15",
+      "evidence": "F-014 让 _refresh_recording_status 在 _stop_evt 已设置时无条件返回；主停止后 worker 已把双控制器复位为 idle，但周期刷新无法执行 idle 清空逻辑，确定性探针显示 recording_status 保持旧录制中文案直至下次启动，违反 NFR-003 正常行为不漂移。",
+      "fix_id": "F-017",
+      "issue_id": "I-017",
+      "round": 3,
+      "severity": "P3",
+      "status": "fixed",
+      "task_ids": [
+        "T-003"
+      ],
+      "title": "主停止后 stop 事件使录制状态文本无法清理",
+      "unit_id": "U-003"
     }
   ],
   "max_rounds": 6,
@@ -754,8 +915,8 @@
       "adversarial_status": "issues",
       "last_result": "ACTIONABLE_ISSUES",
       "phase": "阶段 2：后处理协调器与结果契约",
-      "review_status": "issues",
-      "round_started": 2,
+      "review_status": "pass",
+      "round_started": 3,
       "status": "issues",
       "task_ids": [
         "T-002"
@@ -767,7 +928,7 @@
       "last_result": "ACTIONABLE_ISSUES",
       "phase": "阶段 2：后处理协调器与结果契约",
       "review_status": "pass",
-      "round_started": 2,
+      "round_started": 3,
       "status": "issues",
       "task_ids": [
         "T-003"
@@ -787,10 +948,10 @@
       "unit_id": "U-004"
     }
   ],
-  "round": 2,
+  "round": 3,
   "schema_version": 1,
   "status": "fixes-complete",
   "task_count": 4,
-  "updated_at": "2026-07-10 03:52:10",
+  "updated_at": "2026-07-10 04:28:53",
   "workflow": "requirements-first"
 }
