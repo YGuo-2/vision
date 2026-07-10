@@ -1,0 +1,616 @@
+{
+  "affected_units": [
+    "U-001",
+    "U-002",
+    "U-003",
+    "U-004"
+  ],
+  "agents": [
+    {
+      "agent_id": "round-1-R-U-001",
+      "completed_at": "2026-07-10 02:11:55",
+      "report": "U-001 T-001 complete overall; P3: pre-cancelled MP4 or missing path raises InterruptedError before legacy pass-through checks; focused review 20 passed.",
+      "result": "ACTIONABLE_ISSUES",
+      "role": "first_wave",
+      "round": 1,
+      "started_at": "2026-07-10 02:06:46",
+      "status": "completed",
+      "task_ids": [
+        "T-001"
+      ],
+      "unit_id": "U-001"
+    },
+    {
+      "agent_id": "round-1-A-U-001",
+      "completed_at": "2026-07-10 02:27:11",
+      "report": "Adversarial confirms first-wave P3. New P2: compare_dual_streams lacks stop checks during DTW scoring; event set in first score still allows second score and returns combined result. Focused tests 20 passed but omit scoring-stage cancel.",
+      "result": "ACTIONABLE_ISSUES",
+      "role": "adversarial",
+      "round": 1,
+      "started_at": "2026-07-10 02:21:26",
+      "status": "completed",
+      "task_ids": [
+        "T-001"
+      ],
+      "unit_id": "U-001"
+    },
+    {
+      "agent_id": "round-1-R-U-002",
+      "completed_at": "2026-07-10 02:15:26",
+      "report": "U-002 core contracts mostly complete; P3 submit synchronously invokes queued callback under coordinator lock, so blocking callback prevents immediate return and violates coordinator-thread callback contract.",
+      "result": "ACTIONABLE_ISSUES",
+      "role": "first_wave",
+      "round": 1,
+      "started_at": "2026-07-10 02:06:47",
+      "status": "completed",
+      "task_ids": [
+        "T-002"
+      ],
+      "unit_id": "U-002"
+    },
+    {
+      "agent_id": "round-1-A-U-002",
+      "completed_at": "2026-07-10 02:41:09",
+      "report": "Confirms submit callback P3. New P2 no common-parent validation allows cross-segment paths to complete. New P3 cancel_all callback runs on caller and worker repeats cancelled. New P3 transcode OSError falls through as compare_failed.",
+      "result": "ACTIONABLE_ISSUES",
+      "role": "adversarial",
+      "round": 1,
+      "started_at": "2026-07-10 02:21:27",
+      "status": "completed",
+      "task_ids": [
+        "T-002"
+      ],
+      "unit_id": "U-002"
+    },
+    {
+      "agent_id": "round-1-R-U-003",
+      "completed_at": "2026-07-10 02:21:10",
+      "report": "U-003 normal paths pass 133 focused tests; P2 writer-failure/toggle race can mix new segment id with old side path; P2 close deadline starts after synchronous finalize/cancel and therefore does not bound slow writer/submit/JSON work.",
+      "result": "ACTIONABLE_ISSUES",
+      "role": "first_wave",
+      "round": 1,
+      "started_at": "2026-07-10 02:06:49",
+      "status": "completed",
+      "task_ids": [
+        "T-003"
+      ],
+      "unit_id": "U-003"
+    },
+    {
+      "agent_id": "round-1-A-U-003",
+      "completed_at": "2026-07-10 02:35:06",
+      "report": "Confirms I-003/I-004. New P2 dual worker finally does not close two MediaPipe pipelines or release captures on exceptions. New P3 close polling window still allows record toggle after processor is closed, creating untracked segment.",
+      "result": "ACTIONABLE_ISSUES",
+      "role": "adversarial",
+      "round": 1,
+      "started_at": "2026-07-10 02:21:28",
+      "status": "completed",
+      "task_ids": [
+        "T-003"
+      ],
+      "unit_id": "U-003"
+    },
+    {
+      "agent_id": "round-1-R-U-004",
+      "completed_at": "2026-07-10 02:19:33",
+      "report": "U-004 complete and strict; 177 targeted passed; 529 passed with same 6 baseline failures; templates tracked; py_compile/diff and real H.264 smoke passed; physical-camera checks honestly marked pending; no issues.",
+      "result": "PASS",
+      "role": "first_wave",
+      "round": 1,
+      "started_at": "2026-07-10 02:12:14",
+      "status": "completed",
+      "task_ids": [
+        "T-004"
+      ],
+      "unit_id": "U-004"
+    },
+    {
+      "agent_id": "round-1-A-U-004",
+      "completed_at": "2026-07-10 02:39:31",
+      "report": "Adversarial rejects first-wave PASS. P2 b931222 mixes approved feature with pre-existing rotation/layout/user changes. P3 task completion log points to baseline 2776ddb rather than actual implementation commit; test evidence cannot be reproduced from recorded hash.",
+      "result": "ACTIONABLE_ISSUES",
+      "role": "adversarial",
+      "round": 1,
+      "started_at": "2026-07-10 02:27:13",
+      "status": "completed",
+      "task_ids": [
+        "T-004"
+      ],
+      "unit_id": "U-004"
+    }
+  ],
+  "completed_at": null,
+  "created_at": "2026-07-10 02:05:51",
+  "deferred_issues": [],
+  "fixes": [
+    {
+      "completed_at": "2026-07-10 02:43:21",
+      "created_at": "2026-07-10 02:41:29",
+      "evidence": "Moved cancellation check after legacy pass-through classification; pre-cancelled None/missing AVI/MP4 return unchanged; existing AVI still cancels before ffmpeg; test_video_writer_transcode.py 11 passed.",
+      "fix_id": "F-001",
+      "issue_ids": [
+        "I-001"
+      ],
+      "round": 1,
+      "severity": "P3",
+      "started_at": "2026-07-10 02:42:34",
+      "status": "done",
+      "task_ids": [
+        "T-001"
+      ],
+      "title": "预取消破坏 MP4 和缺失路径透传语义",
+      "unit_ids": [
+        "U-001"
+      ]
+    },
+    {
+      "completed_at": "2026-07-10 02:44:41",
+      "created_at": "2026-07-10 02:41:29",
+      "evidence": "submit now only deduplicates/enqueues and returns; worker atomically writes queued before callback on dual-recording-postprocess thread; blocking callback regression verifies <0.1s submit and correct thread; postprocess suite 29 passed.",
+      "fix_id": "F-002",
+      "issue_ids": [
+        "I-002"
+      ],
+      "round": 1,
+      "severity": "P3",
+      "started_at": "2026-07-10 02:43:42",
+      "status": "done",
+      "task_ids": [
+        "T-002"
+      ],
+      "title": "submit 同步 queued 回调破坏非阻塞契约",
+      "unit_ids": [
+        "U-002"
+      ]
+    },
+    {
+      "completed_at": "2026-07-10 02:46:52",
+      "created_at": "2026-07-10 02:41:29",
+      "evidence": "Dual toggle now atomically detects errors/state divergence and finalizes old pair without new stamp or toggling peer; deterministic primary writer failure retains old segment paths/id and submits once; lifecycle+controls 41 passed.",
+      "fix_id": "F-003",
+      "issue_ids": [
+        "I-003"
+      ],
+      "round": 1,
+      "severity": "P2",
+      "started_at": "2026-07-10 02:45:11",
+      "status": "done",
+      "task_ids": [
+        "T-003"
+      ],
+      "title": "writer 失败后立即 toggle 可串用新片段 ID 与旧侧路路径",
+      "unit_ids": [
+        "U-003"
+      ]
+    },
+    {
+      "completed_at": "2026-07-10 02:51:25",
+      "created_at": "2026-07-10 02:41:29",
+      "evidence": "Close deadline now set before all potentially blocking work; daemon app-close-prepare serializes finalize/cancel/release while Tk only bounded-polls and skips processor close until prep finishes; deterministic blocked submit/cancel tests prove immediate return/deadline; lifecycle 33 passed.",
+      "fix_id": "F-004",
+      "issue_ids": [
+        "I-004"
+      ],
+      "round": 1,
+      "severity": "P2",
+      "started_at": "2026-07-10 02:47:34",
+      "status": "done",
+      "task_ids": [
+        "T-003"
+      ],
+      "title": "关窗 3 秒预算未覆盖同步终结和取消写盘",
+      "unit_ids": [
+        "U-003"
+      ]
+    },
+    {
+      "completed_at": "2026-07-10 03:02:14",
+      "created_at": "2026-07-10 02:41:29",
+      "evidence": "DTW cancellation now propagates through local-cost, DP rows, traceback, rules, front/side scoring and final return; cancellation during front score skips side score and raises InterruptedError; compare_dual_streams plus pose33_v3 golden: 31 passed.",
+      "fix_id": "F-005",
+      "issue_ids": [
+        "I-005"
+      ],
+      "round": 1,
+      "severity": "P2",
+      "started_at": "2026-07-10 02:55:05",
+      "status": "done",
+      "task_ids": [
+        "T-001"
+      ],
+      "title": "DTW 评分阶段忽略取消并继续返回综合分",
+      "unit_ids": [
+        "U-001"
+      ]
+    },
+    {
+      "completed_at": "2026-07-10 03:03:15",
+      "created_at": "2026-07-10 02:41:29",
+      "evidence": "Dual worker outer finally now closes both MediaPipe pipelines, releases both captures and destroys OpenCV windows before unified recording finalization on annotate/write exceptions; dual/lifecycle/control suites: 98 passed.",
+      "fix_id": "F-006",
+      "issue_ids": [
+        "I-006"
+      ],
+      "round": 1,
+      "severity": "P2",
+      "started_at": "2026-07-10 02:55:06",
+      "status": "done",
+      "task_ids": [
+        "T-003"
+      ],
+      "title": "双摄 worker 未在 finally 释放两路 pipeline 和异常路径 capture",
+      "unit_ids": [
+        "U-003"
+      ]
+    },
+    {
+      "completed_at": "2026-07-10 03:03:16",
+      "created_at": "2026-07-10 02:41:29",
+      "evidence": "Record toggle now returns before Tk reads when closing or stop is set, and close immediately disables all recording controls during bounded polling; dual/lifecycle/control suites: 98 passed.",
+      "fix_id": "F-007",
+      "issue_ids": [
+        "I-007"
+      ],
+      "round": 1,
+      "severity": "P3",
+      "started_at": "2026-07-10 02:55:07",
+      "status": "done",
+      "task_ids": [
+        "T-003"
+      ],
+      "title": "关窗轮询期间仍可触发新双摄录制片段",
+      "unit_ids": [
+        "U-003"
+      ]
+    },
+    {
+      "completed_at": "2026-07-10 03:11:32",
+      "created_at": "2026-07-10 02:41:29",
+      "evidence": "Rebuilt history from checkpoint evidence: 8f0c9f8 contains only seven verified pre-spec dual-camera paths and no temp artifacts; implementation 09aa101 has parent 8f0c9f8 and isolates the approved auto-compare delta plus acceptance repairs; b931222 remains on safety branch.",
+      "fix_id": "F-008",
+      "issue_ids": [
+        "I-008"
+      ],
+      "round": 1,
+      "severity": "P2",
+      "started_at": "2026-07-10 03:10:05",
+      "status": "done",
+      "task_ids": [
+        "T-004"
+      ],
+      "title": "实现提交混入批准范围外的既有用户改动",
+      "unit_ids": [
+        "U-004"
+      ]
+    },
+    {
+      "completed_at": "2026-07-10 03:11:33",
+      "created_at": "2026-07-10 02:41:29",
+      "evidence": "Because v0.2.0 has no historical log-rebind command, only generated completion metadata was repaired: tasks/progress task bodies and digest remain frozen, all four completion rows and Last Known Commit now point to implementation 09aa101ea55421208e81739a6e88ccd6572f8656; sync-check has no issues.",
+      "fix_id": "F-009",
+      "issue_ids": [
+        "I-009"
+      ],
+      "round": 1,
+      "severity": "P3",
+      "started_at": "2026-07-10 03:10:06",
+      "status": "done",
+      "task_ids": [
+        "T-004"
+      ],
+      "title": "任务完成日志记录的 Commit Hash 不含实际实现",
+      "unit_ids": [
+        "U-004"
+      ]
+    },
+    {
+      "completed_at": "2026-07-10 03:07:36",
+      "created_at": "2026-07-10 02:41:29",
+      "evidence": "Snapshot validation resolves both sources under segment_dir and rejects cross-segment front or side paths as recording_path_mismatch before transcode/compare; recording_postprocess suite: 35 passed.",
+      "fix_id": "F-010",
+      "issue_ids": [
+        "I-010"
+      ],
+      "round": 1,
+      "severity": "P2",
+      "started_at": "2026-07-10 02:55:08",
+      "status": "done",
+      "task_ids": [
+        "T-002"
+      ],
+      "title": "后处理未校验正侧录像与 segment_dir 的路径隔离",
+      "unit_ids": [
+        "U-002"
+      ]
+    },
+    {
+      "completed_at": "2026-07-10 03:07:37",
+      "created_at": "2026-07-10 02:41:29",
+      "evidence": "cancel_all now only marks cancellation and returns promptly; coordinator thread publishes exactly one terminal callback per segment while cancelled JSON may enrich converted paths without re-notifying; recording_postprocess suite: 35 passed.",
+      "fix_id": "F-011",
+      "issue_ids": [
+        "I-011"
+      ],
+      "round": 1,
+      "severity": "P3",
+      "started_at": "2026-07-10 02:55:09",
+      "status": "done",
+      "task_ids": [
+        "T-002"
+      ],
+      "title": "cancel_all 在调用线程回调且活动任务重复 cancelled 通知",
+      "unit_ids": [
+        "U-002"
+      ]
+    },
+    {
+      "completed_at": "2026-07-10 03:07:39",
+      "created_at": "2026-07-10 02:41:29",
+      "evidence": "Transcode dependency exceptions are wrapped as transcode_failed while InterruptedError remains cancellation; OSError regression confirms compare is not called; recording_postprocess suite: 35 passed.",
+      "fix_id": "F-012",
+      "issue_ids": [
+        "I-012"
+      ],
+      "round": 1,
+      "severity": "P3",
+      "started_at": "2026-07-10 02:55:10",
+      "status": "done",
+      "task_ids": [
+        "T-002"
+      ],
+      "title": "转码阶段异常被误标为 compare_failed",
+      "unit_ids": [
+        "U-002"
+      ]
+    }
+  ],
+  "full_fix_rounds": 3,
+  "issues": [
+    {
+      "agent_id": "round-1-R-U-001",
+      "created_at": "2026-07-10 02:11:56",
+      "evidence": "core/video_writer.py checks stop_evt before path type/existence; pre-set event makes existing MP4 and missing AVI raise InterruptedError, contrary to architecture.md pass-through requirement.",
+      "fix_id": "F-001",
+      "issue_id": "I-001",
+      "round": 1,
+      "severity": "P3",
+      "status": "fixed",
+      "task_ids": [
+        "T-001"
+      ],
+      "title": "预取消破坏 MP4 和缺失路径透传语义",
+      "unit_id": "U-001"
+    },
+    {
+      "agent_id": "round-1-R-U-002",
+      "created_at": "2026-07-10 02:15:27",
+      "evidence": "apps/recording_postprocess.py submit calls _notify on caller thread while holding coordinator lock; a blocking callback prevents submit from returning and delays consumer startup, contrary to NFR-001 and architecture callback-thread contract.",
+      "fix_id": "F-002",
+      "issue_id": "I-002",
+      "round": 1,
+      "severity": "P3",
+      "status": "fixed",
+      "task_ids": [
+        "T-002"
+      ],
+      "title": "submit 同步 queued 回调破坏非阻塞契约",
+      "unit_id": "U-002"
+    },
+    {
+      "agent_id": "round-1-R-U-003",
+      "created_at": "2026-07-10 02:21:11",
+      "evidence": "apps/app_ui.py toggle uses primary idle state and unconditionally toggles both controllers before periodic error refresh finalizes the failed pair; deterministic reproduction yields recording/paused and a job with new segment_id but old side_source.",
+      "fix_id": "F-003",
+      "issue_id": "I-003",
+      "round": 1,
+      "severity": "P2",
+      "status": "fixed",
+      "task_ids": [
+        "T-003"
+      ],
+      "title": "writer 失败后立即 toggle 可串用新片段 ID 与旧侧路路径",
+      "unit_id": "U-003"
+    },
+    {
+      "agent_id": "round-1-R-U-003",
+      "created_at": "2026-07-10 02:21:12",
+      "evidence": "apps/app_ui.py sets _close_deadline only after waiting for finalize lock, writer release, submit and cancel_all; cancel_all synchronously writes cancelled JSON, so slow writer/filesystem can block Tk before bounded polling starts.",
+      "fix_id": "F-004",
+      "issue_id": "I-004",
+      "round": 1,
+      "severity": "P2",
+      "status": "fixed",
+      "task_ids": [
+        "T-003"
+      ],
+      "title": "关窗 3 秒预算未覆盖同步终结和取消写盘",
+      "unit_id": "U-003"
+    },
+    {
+      "agent_id": "round-1-A-U-001",
+      "created_at": "2026-07-10 02:27:12",
+      "evidence": "core/action_compare.py has no stop_evt checks between feature extraction, front _score_view_seq, side _score_view_seq and result return; dynamic probe setting event in first score still calls second score and returns combined_percent.",
+      "fix_id": "F-005",
+      "issue_id": "I-005",
+      "round": 1,
+      "severity": "P2",
+      "status": "fixed",
+      "task_ids": [
+        "T-001"
+      ],
+      "title": "DTW 评分阶段忽略取消并继续返回综合分",
+      "unit_id": "U-001"
+    },
+    {
+      "agent_id": "round-1-A-U-003",
+      "created_at": "2026-07-10 02:35:08",
+      "evidence": "apps/app_ui.py creates two MediaPipePipeline objects, but finally only closes recording pair; annotate/write exceptions bypass normal cap.release calls. Injected inference error leaves both captures and pipelines unclosed.",
+      "fix_id": "F-006",
+      "issue_id": "I-006",
+      "round": 1,
+      "severity": "P2",
+      "status": "fixed",
+      "task_ids": [
+        "T-003"
+      ],
+      "title": "双摄 worker 未在 finally 释放两路 pipeline 和异常路径 capture",
+      "unit_id": "U-003"
+    },
+    {
+      "agent_id": "round-1-A-U-003",
+      "created_at": "2026-07-10 02:35:09",
+      "evidence": "_on_close sets _closing and closes the postprocessor but _on_record_toggle has no closing/stop guard and controls are not immediately disabled; deterministic call during polling enters recording with a new stamp whose later submit is rejected.",
+      "fix_id": "F-007",
+      "issue_id": "I-007",
+      "round": 1,
+      "severity": "P3",
+      "status": "fixed",
+      "task_ids": [
+        "T-003"
+      ],
+      "title": "关窗轮询期间仍可触发新双摄录制片段",
+      "unit_id": "U-003"
+    },
+    {
+      "agent_id": "round-1-A-U-004",
+      "created_at": "2026-07-10 02:39:33",
+      "evidence": "Commit b931222 includes pre-existing camera rotation, adaptive layout and writer-size work recorded as separate earlier change.md tasks; these are absent from baseline 2776ddb and outside the dual auto-compare approved scope, violating dirty-worktree submission boundary.",
+      "fix_id": "F-008",
+      "issue_id": "I-008",
+      "round": 1,
+      "severity": "P2",
+      "status": "fixed",
+      "task_ids": [
+        "T-004"
+      ],
+      "title": "实现提交混入批准范围外的既有用户改动",
+      "unit_id": "U-004"
+    },
+    {
+      "agent_id": "round-1-A-U-004",
+      "created_at": "2026-07-10 02:39:34",
+      "evidence": "tasks.md completion log and progress.md still identify 2776ddb, but that commit lacks the spec directory, recording_postprocess module and tests; actual combined implementation commit is b931222.",
+      "fix_id": "F-009",
+      "issue_id": "I-009",
+      "round": 1,
+      "severity": "P3",
+      "status": "fixed",
+      "task_ids": [
+        "T-004"
+      ],
+      "title": "任务完成日志记录的 Commit Hash 不含实际实现",
+      "unit_id": "U-004"
+    },
+    {
+      "agent_id": "round-1-A-U-002",
+      "created_at": "2026-07-10 02:41:10",
+      "evidence": "_validate_recording_snapshot checks errors and frame counts but not path parents; a job with front, side and result in different directories proceeds to compare and completed, compounding the reproduced U-003 cross-segment race.",
+      "fix_id": "F-010",
+      "issue_id": "I-010",
+      "round": 1,
+      "severity": "P2",
+      "status": "fixed",
+      "task_ids": [
+        "T-002"
+      ],
+      "title": "后处理未校验正侧录像与 segment_dir 的路径隔离",
+      "unit_id": "U-002"
+    },
+    {
+      "agent_id": "round-1-A-U-002",
+      "created_at": "2026-07-10 02:41:13",
+      "evidence": "cancel_all synchronously publishes and notifies cancelled on the caller thread; worker later publishes allowed cancelled->cancelled and notifies again, producing MainThread and worker callbacks and allowing slow callbacks to block close.",
+      "fix_id": "F-011",
+      "issue_id": "I-011",
+      "round": 1,
+      "severity": "P3",
+      "status": "fixed",
+      "task_ids": [
+        "T-002"
+      ],
+      "title": "cancel_all 在调用线程回调且活动任务重复 cancelled 通知",
+      "unit_id": "U-002"
+    },
+    {
+      "agent_id": "round-1-A-U-002",
+      "created_at": "2026-07-10 02:41:15",
+      "evidence": "_transcode_one only maps None to transcode_failed; an OSError from transcode reaches the broad generic worker catch and persists compare_failed, violating stable stage-specific error codes.",
+      "fix_id": "F-012",
+      "issue_id": "I-012",
+      "round": 1,
+      "severity": "P3",
+      "status": "fixed",
+      "task_ids": [
+        "T-002"
+      ],
+      "title": "转码阶段异常被误标为 compare_failed",
+      "unit_id": "U-002"
+    }
+  ],
+  "max_rounds": 6,
+  "notes": [],
+  "original_task_digest": "11b470e44954",
+  "original_task_ids": [
+    "T-001",
+    "T-002",
+    "T-003",
+    "T-004"
+  ],
+  "policy": "rounds 1-3 fix all actionable issues; round 4+ auto-fix P0-P2 only",
+  "review_units": [
+    {
+      "adversarial_status": "issues",
+      "last_result": "ACTIONABLE_ISSUES",
+      "phase": "阶段 1：核心资源与取消语义",
+      "review_status": "issues",
+      "round_started": null,
+      "status": "issues",
+      "task_ids": [
+        "T-001"
+      ],
+      "unit_id": "U-001"
+    },
+    {
+      "adversarial_status": "issues",
+      "last_result": "ACTIONABLE_ISSUES",
+      "phase": "阶段 2：后处理协调器与结果契约",
+      "review_status": "issues",
+      "round_started": null,
+      "status": "issues",
+      "task_ids": [
+        "T-002"
+      ],
+      "unit_id": "U-002"
+    },
+    {
+      "adversarial_status": "issues",
+      "last_result": "ACTIONABLE_ISSUES",
+      "phase": "阶段 2：后处理协调器与结果契约",
+      "review_status": "issues",
+      "round_started": null,
+      "status": "issues",
+      "task_ids": [
+        "T-003"
+      ],
+      "unit_id": "U-003"
+    },
+    {
+      "adversarial_status": "issues",
+      "last_result": "ACTIONABLE_ISSUES",
+      "phase": "阶段 3：回归与交付证据",
+      "review_status": "pass",
+      "round_started": null,
+      "status": "issues",
+      "task_ids": [
+        "T-004"
+      ],
+      "unit_id": "U-004"
+    }
+  ],
+  "round": 1,
+  "schema_version": 1,
+  "status": "fixes-complete",
+  "task_count": 4,
+  "updated_at": "2026-07-10 03:11:33",
+  "workflow": "requirements-first"
+}

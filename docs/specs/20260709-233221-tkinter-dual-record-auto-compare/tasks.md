@@ -113,7 +113,7 @@
 
 | 任务 ID | 完成时间 | Commit Hash | 验证证据 | 备注 |
 |:---|:---|:---|:---|:---|
-| T-001 | 2026-07-09 23:47:07 | 2776ddb | pytest tests/test_video_writer_transcode.py tests/test_compare_dual_streams.py -q: 17 passed; py_compile passed; git diff --check passed | n/a |
-| T-002 | 2026-07-09 23:57:52 | 2776ddb | pytest tests/test_recording_postprocess.py tests/test_template_metadata.py tests/test_compare_dual_streams.py -q: 26 passed; py_compile passed; git diff --check passed | n/a |
-| T-003 | 2026-07-10 01:43:27 | 2776ddb | pytest T-003 focused suite: 122 passed; py_compile passed; git diff --check passed; lifecycle and postprocess audits found no remaining P1/P2 | n/a |
-| T-004 | 2026-07-10 02:01:18 | 2776ddb | targeted regression: 177 passed; full pytest: 529 passed and the same 6 unrelated ui_backend baseline failures; real ffmpeg/ffprobe H.264 smoke passed; py_compile and git diff checks passed; change.md updated; fixed templates staged | n/a |
+| T-001 | 2026-07-09 23:47:07 | 09aa101ea55421208e81739a6e88ccd6572f8656 | pytest tests/test_video_writer_transcode.py tests/test_compare_dual_streams.py -q: 17 passed; py_compile passed; git diff --check passed | n/a |
+| T-002 | 2026-07-09 23:57:52 | 09aa101ea55421208e81739a6e88ccd6572f8656 | pytest tests/test_recording_postprocess.py tests/test_template_metadata.py tests/test_compare_dual_streams.py -q: 26 passed; py_compile passed; git diff --check passed | n/a |
+| T-003 | 2026-07-10 01:43:27 | 09aa101ea55421208e81739a6e88ccd6572f8656 | pytest T-003 focused suite: 122 passed; py_compile passed; git diff --check passed; lifecycle and postprocess audits found no remaining P1/P2 | n/a |
+| T-004 | 2026-07-10 02:01:18 | 09aa101ea55421208e81739a6e88ccd6572f8656 | targeted regression: 177 passed; full pytest: 529 passed and the same 6 unrelated ui_backend baseline failures; real ffmpeg/ffprobe H.264 smoke passed; py_compile and git diff checks passed; change.md updated; fixed templates staged | n/a |

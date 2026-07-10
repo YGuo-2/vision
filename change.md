@@ -1,3 +1,24 @@
+## 2026-07-10: [fix/test/docs] Tkinter 双摄自动比对第一轮验收修复
+
+### 问题描述
+
+首轮多 agent 验收确认了 12 项取消、资源、并发和交付证据问题：DTW 评分阶段未贯穿取消，双摄 worker 异常路径未释放两路 native 资源，关窗轮询期间仍可开始新片段，后处理缺少片段目录隔离，`cancel_all()` 回调线程和终态通知不符合契约，转码异常错误码不准确；原实现提交还混入了规范开工前的双摄旋转/布局改动，任务完成日志指向不含实现的基线提交。
+
+### 修改内容
+
+- `subsequence_dtw()` / `subsequence_dtw_with_path()` 在代价矩阵、动态规划行、回溯和返回前响应取消；取消信号贯穿规则、正面评分、侧面评分与最终结果，正面评分取消后不再计算侧面或返回部分分数。
+- 双摄 worker 在统一 `finally` 中关闭两套 MediaPipe pipeline、释放两路 capture 并清理 OpenCV 窗口；关窗立即禁用录制控件，录制 toggle 在 closing/stop 状态下于读取 Tk 状态前返回。
+- 后处理在转码前校验正侧源路径均属于 `segment_dir`；`cancel_all()` 只置位并快速返回，所有回调由协调器线程触发，每片段只通知一次取消终态，同时允许内部补写最终转码路径；普通转码异常稳定归类为 `transcode_failed`。
+- 用开工前 checkpoint 文件树重建独立提交 `8f0c9f8`，只保留既有双摄录制、旋转和自适应布局的 7 个路径；自动比对实现及首轮修复独立提交为 `09aa101`，旧混合提交 `b931222` 由安全分支保留。
+- 仅修正 `tasks.md` / `progress.md` 的生成型完成日志和 `Last Known Commit` 为 `09aa101ea55421208e81739a6e88ccd6572f8656`，未改冻结任务正文、依赖、勾选状态或 task-plan hash。
+
+### 验证方法
+
+- 自动比对定向回归（后处理、控件、双摄、生命周期、录制控制器、转码、双流、模板 metadata、`pose33_v3` golden）：`196 passed`。
+- 全量 `pytest tests -q`：`548 passed, 6 failed`；失败集合与接手基线一致，仍为 1 条 YOLO preview routing 和 5 条 `ui_backend` session，在本任务明确不修改的 Vue/Tauri/bridge 范围内。
+- `py_compile`、`git diff --check` 和规范 `sync-check` 通过；提交父子关系、固定模板和后处理模块均通过 Git 对象校验。
+- 实机待验：物理双摄连续两段、录制中主停止、骨架开启后跳过评分三条现场流程仍需接入真实摄像头执行。
+
 ## 2026-07-10: [feat/fix/test] Tkinter 双摄录制后自动后台比对
 
 ### 问题描述
