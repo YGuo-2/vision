@@ -1,3 +1,21 @@
+## 2026-07-10: [fix/test] Tkinter 双摄自动比对第二轮并发验收修复
+
+### 问题描述
+
+第二轮首波与对抗审查发现两处剩余并发边界：后处理在共享协调器锁内执行原子 JSON 写盘，慢磁盘会阻塞新的 `submit()` 和关窗 `cancel_all()`；关窗后已调度的录制状态刷新仍可能等待录制锁、按旧快照重新启用控件，而“结束录制”入口也可能等待终结锁并突破 3 秒关闭预算。
+
+### 修改内容
+
+- `DualRecordingPostProcessor` 新增独立持久化锁，协调器状态锁仅保护写盘前后的取消、终态和去重判断，不再覆盖文件 I/O 或回调；写盘后再次判定取消，取消与 queued/completed 写入竞态时抑制旧状态通知并最终原子覆盖为 `cancelled`。
+- `_refresh_recording_status()` 和 `_on_record_stop()` 在 `_closing` 或 `_stop_evt` 已置位时于读取 Tk 状态、获取录制锁或终结锁前直接返回，保证控件保持禁用且关窗轮询不被旧回调拖住。
+- 新增阻塞 JSON 写入、阻塞录制锁和阻塞终结锁的确定性并发回归，覆盖 `submit()` / `cancel_all()` 及时返回、取消终态胜出、无旧 completed 通知及关窗控件不复活。
+
+### 验证方法
+
+- 自动比对完整定向回归：`201 passed`。
+- 后处理并发子集：`38 passed`；Tkinter 生命周期、控件与双摄子集：`100 passed`。
+- `py_compile` 与 `git diff --check` 通过，仅有 Windows 行尾提示。
+
 ## 2026-07-10: [fix/test/docs] Tkinter 双摄自动比对第一轮验收修复
 
 ### 问题描述

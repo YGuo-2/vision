@@ -1199,6 +1199,81 @@ def test_close_poll_window_disables_recording_controls_and_rejects_toggle():
     assert not app._close_prepare_worker.is_alive()
 
 
+def test_recording_status_refresh_returns_without_pair_lock_during_close(tmp_path):
+    app, processor, _segment_dir = _dual_submission_app(tmp_path)
+    app._closing = True
+    app._stop_evt = threading.Event()
+    app.record_btn.configure(state="disabled")
+    app.record_stop_btn = _Widget()
+    app.record_stop_btn.configure(state="disabled")
+    app.recording_status_var = _Var("closing")
+
+    started = threading.Event()
+    errors: list[BaseException] = []
+
+    def refresh() -> None:
+        started.set()
+        try:
+            app_ui.App._refresh_recording_status(app)
+        except BaseException as exc:  # noqa: BLE001 - surface thread failures
+            errors.append(exc)
+
+    app._record_pair_lock.acquire()
+    worker = threading.Thread(target=refresh)
+    try:
+        worker.start()
+        assert started.wait(1.0)
+        worker.join(0.2)
+        assert not worker.is_alive()
+    finally:
+        app._record_pair_lock.release()
+        worker.join(1.0)
+
+    assert errors == []
+    assert processor.jobs == []
+    assert app.recording_status_var.get() == "closing"
+    assert app.record_btn.config["state"] == "disabled"
+    assert app.record_stop_btn.config["state"] == "disabled"
+
+
+def test_record_stop_returns_without_finalize_lock_after_stop_requested(tmp_path):
+    app, processor, _segment_dir = _dual_submission_app(tmp_path)
+    app._closing = False
+    app._stop_evt = threading.Event()
+    app._stop_evt.set()
+    app.record_btn.configure(state="disabled")
+    app.record_stop_btn = _Widget()
+    app.record_stop_btn.configure(state="disabled")
+
+    started = threading.Event()
+    errors: list[BaseException] = []
+
+    def stop_recording() -> None:
+        started.set()
+        try:
+            app_ui.App._on_record_stop(app)
+        except BaseException as exc:  # noqa: BLE001 - surface thread failures
+            errors.append(exc)
+
+    app._record_finalize_lock.acquire()
+    worker = threading.Thread(target=stop_recording)
+    try:
+        worker.start()
+        assert started.wait(1.0)
+        worker.join(0.2)
+        assert not worker.is_alive()
+    finally:
+        app._record_finalize_lock.release()
+        worker.join(1.0)
+
+    assert errors == []
+    assert processor.jobs == []
+    assert app._rec.state == "recording"
+    assert app._rec2.state == "recording"
+    assert app.record_btn.config["state"] == "disabled"
+    assert app.record_stop_btn.config["state"] == "disabled"
+
+
 def test_close_poll_waits_for_postprocessor_worker(monkeypatch):
     app = _closing_app()
     clock = [0.0]

@@ -1,9 +1,7 @@
 {
   "affected_units": [
-    "U-001",
     "U-002",
-    "U-003",
-    "U-004"
+    "U-003"
   ],
   "agents": [
     {
@@ -112,6 +110,118 @@
       "role": "adversarial",
       "round": 1,
       "started_at": "2026-07-10 02:27:13",
+      "status": "completed",
+      "task_ids": [
+        "T-004"
+      ],
+      "unit_id": "U-004"
+    },
+    {
+      "agent_id": "round-2-R-U-001",
+      "completed_at": "2026-07-10 03:22:05",
+      "report": "U-001/T-001 PASS. F-001 pass-through and F-005 end-to-end cancellation are strict; no scoring drift or over-fallback. Independent 42 focused tests and cancellation/equivalence probes passed.",
+      "result": "PASS",
+      "role": "first_wave",
+      "round": 2,
+      "started_at": "2026-07-10 03:14:17",
+      "status": "completed",
+      "task_ids": [
+        "T-001"
+      ],
+      "unit_id": "U-001"
+    },
+    {
+      "agent_id": "round-2-A-U-001",
+      "completed_at": "2026-07-10 03:36:41",
+      "report": "U-001/T-001 adversarial PASS. Cancellation windows, resource cleanup, keyword-only compatibility, pass-through semantics and no-cancel DTW math were challenged; 42 targeted tests passed and no actionable gap remained.",
+      "result": "PASS",
+      "role": "adversarial",
+      "round": 2,
+      "started_at": "2026-07-10 03:28:56",
+      "status": "completed",
+      "task_ids": [
+        "T-001"
+      ],
+      "unit_id": "U-001"
+    },
+    {
+      "agent_id": "round-2-R-U-002",
+      "completed_at": "2026-07-10 03:22:07",
+      "report": "U-002/T-002 mostly complete; P3: _publish holds coordinator lock during atomic JSON I/O, so deterministic blocked-write probes delayed submit and cancel_all about 0.153s, violating immediate-return contracts. Focused 43 passed but missing contention regression.",
+      "result": "ACTIONABLE_ISSUES",
+      "role": "first_wave",
+      "round": 2,
+      "started_at": "2026-07-10 03:14:18",
+      "status": "completed",
+      "task_ids": [
+        "T-002"
+      ],
+      "unit_id": "U-002"
+    },
+    {
+      "agent_id": "round-2-A-U-002",
+      "completed_at": "2026-07-10 03:37:24",
+      "report": "U-002/T-002 adversarial ACTIONABLE_ISSUES. Confirmed I-013 P3: _publish holds shared coordinator lock during atomic JSON I/O; deterministic 150ms blocked-write probes delayed submit and cancel_all to about 0.155s/0.154s. No additional findings.",
+      "result": "ACTIONABLE_ISSUES",
+      "role": "adversarial",
+      "round": 2,
+      "started_at": "2026-07-10 03:28:57",
+      "status": "completed",
+      "task_ids": [
+        "T-002"
+      ],
+      "unit_id": "U-002"
+    },
+    {
+      "agent_id": "round-2-R-U-003",
+      "completed_at": "2026-07-10 03:28:39",
+      "report": "U-003/T-003 PASS. Unified finalization/dedupe, raw/annotated routing, latest-segment guard, bounded close, control disable, no late Tk access and both capture/pipeline cleanup are strict. Independent 111 focused tests passed; no single-camera/offline/Vue drift.",
+      "result": "PASS",
+      "role": "first_wave",
+      "round": 2,
+      "started_at": "2026-07-10 03:14:20",
+      "status": "completed",
+      "task_ids": [
+        "T-003"
+      ],
+      "unit_id": "U-003"
+    },
+    {
+      "agent_id": "round-2-A-U-003",
+      "completed_at": "2026-07-10 03:45:10",
+      "report": "U-003/T-003 adversarial ACTIONABLE_ISSUES. P2: scheduled _tick may call _refresh_recording_status after closing, wait on pair lock and re-enable record-stop from stale recording state; _on_record_stop lacks closing/stop guard, allowing Tk to block past close budget. Focused existing tests miss this race.",
+      "result": "ACTIONABLE_ISSUES",
+      "role": "adversarial",
+      "round": 2,
+      "started_at": "2026-07-10 03:37:43",
+      "status": "completed",
+      "task_ids": [
+        "T-003"
+      ],
+      "unit_id": "U-003"
+    },
+    {
+      "agent_id": "round-2-R-U-004",
+      "completed_at": "2026-07-10 03:27:28",
+      "report": "U-004/T-004 PASS. History 2776ddb->8f0c9f8->09aa101->81c980b is reproducible; scope split, completion SHA, templates, change log and test evidence are strict. No Vue/Tauri/temp artifact leakage; physical-camera deferral is honest.",
+      "result": "PASS",
+      "role": "first_wave",
+      "round": 2,
+      "started_at": "2026-07-10 03:22:47",
+      "status": "completed",
+      "task_ids": [
+        "T-004"
+      ],
+      "unit_id": "U-004"
+    },
+    {
+      "agent_id": "round-2-A-U-004",
+      "completed_at": "2026-07-10 03:43:40",
+      "report": "U-004/T-004 adversarial PASS. Commit ancestry/safety branch/path sets/spec digest/template blobs/change log/test counts were challenged; no user-change loss, Vue/Tauri drift, artifact omission or misleading evidence found.",
+      "result": "PASS",
+      "role": "adversarial",
+      "round": 2,
+      "started_at": "2026-07-10 03:37:45",
       "status": "completed",
       "task_ids": [
         "T-004"
@@ -362,6 +472,46 @@
       "unit_ids": [
         "U-002"
       ]
+    },
+    {
+      "completed_at": "2026-07-10 03:52:08",
+      "created_at": "2026-07-10 03:45:34",
+      "evidence": "Added dedicated persistence lock; coordinator state lock now only guards pre/post state checks, never disk I/O or callbacks. Post-write cancellation recheck suppresses stale queued/completed notifications and finalizes cancelled. Deterministic blocked-write submit/cancel races pass; postprocess suite 38 passed.",
+      "fix_id": "F-013",
+      "issue_ids": [
+        "I-013"
+      ],
+      "round": 2,
+      "severity": "P3",
+      "started_at": "2026-07-10 03:45:50",
+      "status": "done",
+      "task_ids": [
+        "T-002"
+      ],
+      "title": "结果 JSON 写入持协调器锁会阻塞 submit 与 cancel_all",
+      "unit_ids": [
+        "U-002"
+      ]
+    },
+    {
+      "completed_at": "2026-07-10 03:52:10",
+      "created_at": "2026-07-10 03:45:34",
+      "evidence": "_on_record_stop and _refresh_recording_status now return before Tk or recording/finalize locks when closing or stop is set, so scheduled ticks cannot re-enable controls or exceed close budget. Held-lock lifecycle regressions pass; lifecycle/control/dual suites 100 passed.",
+      "fix_id": "F-014",
+      "issue_ids": [
+        "I-014"
+      ],
+      "round": 2,
+      "severity": "P2",
+      "started_at": "2026-07-10 03:45:51",
+      "status": "done",
+      "task_ids": [
+        "T-003"
+      ],
+      "title": "关窗后周期刷新可重新启用录制控件并阻塞 Tk",
+      "unit_ids": [
+        "U-003"
+      ]
     }
   ],
   "full_fix_rounds": 3,
@@ -545,6 +695,36 @@
       ],
       "title": "转码阶段异常被误标为 compare_failed",
       "unit_id": "U-002"
+    },
+    {
+      "agent_id": "round-2-R-U-002",
+      "created_at": "2026-07-10 03:22:35",
+      "evidence": "apps/recording_postprocess.py _publish 在共享状态锁内执行 _write_json_atomic；确定性阻塞写盘探针中 submit 和 cancel_all 在 150ms 内均未返回，释放写入后约 0.153s，违反 NFR-001 与非阻塞取消契约。",
+      "fix_id": "F-013",
+      "issue_id": "I-013",
+      "round": 2,
+      "severity": "P3",
+      "status": "fixed",
+      "task_ids": [
+        "T-002"
+      ],
+      "title": "结果 JSON 写入持协调器锁会阻塞 submit 与 cancel_all",
+      "unit_id": "U-002"
+    },
+    {
+      "agent_id": "round-2-A-U-003",
+      "created_at": "2026-07-10 03:45:22",
+      "evidence": "apps/app_ui.py _tick 在 closing 后仍调用无 guard 的 _refresh_recording_status；该刷新同步获取 _record_pair_lock 并可按旧 recording 快照重新启用结束录制，_on_record_stop 也无 closing/stop guard。确定性探针确认控件重启用及持锁阻塞，违反 AC-004.1/NFR-005。",
+      "fix_id": "F-014",
+      "issue_id": "I-014",
+      "round": 2,
+      "severity": "P2",
+      "status": "fixed",
+      "task_ids": [
+        "T-003"
+      ],
+      "title": "关窗后周期刷新可重新启用录制控件并阻塞 Tk",
+      "unit_id": "U-003"
     }
   ],
   "max_rounds": 6,
@@ -559,12 +739,12 @@
   "policy": "rounds 1-3 fix all actionable issues; round 4+ auto-fix P0-P2 only",
   "review_units": [
     {
-      "adversarial_status": "issues",
-      "last_result": "ACTIONABLE_ISSUES",
+      "adversarial_status": "pass",
+      "last_result": "PASS",
       "phase": "阶段 1：核心资源与取消语义",
-      "review_status": "issues",
-      "round_started": null,
-      "status": "issues",
+      "review_status": "pass",
+      "round_started": 2,
+      "status": "pass",
       "task_ids": [
         "T-001"
       ],
@@ -575,7 +755,7 @@
       "last_result": "ACTIONABLE_ISSUES",
       "phase": "阶段 2：后处理协调器与结果契约",
       "review_status": "issues",
-      "round_started": null,
+      "round_started": 2,
       "status": "issues",
       "task_ids": [
         "T-002"
@@ -586,8 +766,8 @@
       "adversarial_status": "issues",
       "last_result": "ACTIONABLE_ISSUES",
       "phase": "阶段 2：后处理协调器与结果契约",
-      "review_status": "issues",
-      "round_started": null,
+      "review_status": "pass",
+      "round_started": 2,
       "status": "issues",
       "task_ids": [
         "T-003"
@@ -595,22 +775,22 @@
       "unit_id": "U-003"
     },
     {
-      "adversarial_status": "issues",
-      "last_result": "ACTIONABLE_ISSUES",
+      "adversarial_status": "pass",
+      "last_result": "PASS",
       "phase": "阶段 3：回归与交付证据",
       "review_status": "pass",
-      "round_started": null,
-      "status": "issues",
+      "round_started": 2,
+      "status": "pass",
       "task_ids": [
         "T-004"
       ],
       "unit_id": "U-004"
     }
   ],
-  "round": 1,
+  "round": 2,
   "schema_version": 1,
   "status": "fixes-complete",
   "task_count": 4,
-  "updated_at": "2026-07-10 03:11:33",
+  "updated_at": "2026-07-10 03:52:10",
   "workflow": "requirements-first"
 }

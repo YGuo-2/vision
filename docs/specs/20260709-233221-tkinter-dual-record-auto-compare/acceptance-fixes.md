@@ -1,7 +1,7 @@
 # Acceptance Fixes
 
 > **Source:** E:/CodeProject/vision/docs/specs/20260709-233221-tkinter-dual-record-auto-compare/acceptance_state.json
-> **Round:** 1
+> **Round:** 2
 > **Policy:** rounds 1-3 fix all actionable issues; round 4+ auto-fix P0-P2 only
 > **Original tasks:** 4 frozen tasks; do not append acceptance fixes to tasks.md
 
@@ -21,6 +21,8 @@
 | F-010 | I-010 | P2 | U-002 | done | Snapshot validation resolves both sources under segment_dir and rejects cross-segment front or side paths as recording_path_mismatch before transcode/compare; recording_postprocess suite: 35 passed. |
 | F-011 | I-011 | P3 | U-002 | done | cancel_all now only marks cancellation and returns promptly; coordinator thread publishes exactly one terminal callback per segment while cancelled JSON may enrich converted paths without re-notifying; recording_postprocess suite: 35 passed. |
 | F-012 | I-012 | P3 | U-002 | done | Transcode dependency exceptions are wrapped as transcode_failed while InterruptedError remains cancellation; OSError regression confirms compare is not called; recording_postprocess suite: 35 passed. |
+| F-013 | I-013 | P3 | U-002 | done | Added dedicated persistence lock; coordinator state lock now only guards pre/post state checks, never disk I/O or callbacks. Post-write cancellation recheck suppresses stale queued/completed notifications and finalizes cancelled. Deterministic blocked-write submit/cancel races pass; postprocess suite 38 passed. |
+| F-014 | I-014 | P2 | U-003 | done | _on_record_stop and _refresh_recording_status now return before Tk or recording/finalize locks when closing or stop is set, so scheduled ticks cannot re-enable controls or exceed close budget. Held-lock lifecycle regressions pass; lifecycle/control/dual suites 100 passed. |
 
 ## Deferred Issues
 

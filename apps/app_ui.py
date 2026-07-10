@@ -1809,6 +1809,12 @@ class App:
         调用控制器 ``stop_recording()`` 复位为 idle（保持会话运行），随后把切换按钮
         文本复位为「开始录制」、禁用「结束录制」，使用户可在同一会话内重新开始录制。
         """
+        stop_evt = getattr(self, "_stop_evt", None)
+        if getattr(self, "_closing", False) or (
+            stop_evt is not None and stop_evt.is_set()
+        ):
+            return
+
         App._finalize_and_dispatch_recording_pair(self, close_session=False)
         record_btn = getattr(self, "record_btn", None)
         if record_btn is not None:
@@ -2029,6 +2035,12 @@ class App:
           「开始录制」、清除录制文本（需求 5.11）。用 _record_error_shown 守卫，
           避免每 30ms 重复弹框。
         """
+        stop_evt = getattr(self, "_stop_evt", None)
+        if getattr(self, "_closing", False) or (
+            stop_evt is not None and stop_evt.is_set()
+        ):
+            return
+
         with self._record_pair_lock:
             snap = self._rec.snapshot()
             snap2 = self._rec2.snapshot()

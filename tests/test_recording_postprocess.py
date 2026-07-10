@@ -218,6 +218,133 @@ def test_submit_returns_before_blocking_queued_callback_runs(tmp_path: Path) -> 
         processor.close(1.0)
 
 
+def test_submit_returns_while_another_result_write_is_blocked(tmp_path: Path) -> None:
+    write_started = threading.Event()
+    release_write = threading.Event()
+    submit_returned = threading.Event()
+    two_completed = threading.Event()
+    submitted: list[bool] = []
+    completed_ids: list[str] = []
+
+    def on_update(update: PostprocessUpdate) -> None:
+        if update.status != "completed":
+            return
+        completed_ids.append(update.segment_id)
+        if len(completed_ids) == 2:
+            two_completed.set()
+
+    processor = DualRecordingPostProcessor(
+        on_update=on_update,
+        transcode=lambda path, _stop: path,
+        compare=lambda *_args, **_kwargs: _result(),
+        video_validator=lambda _path: True,
+        model_available=lambda: True,
+    )
+    first = _job(tmp_path, "record_blocked_write")
+    second = _job(tmp_path, "record_submit_during_write")
+    original_write = processor._write_json_atomic
+
+    def blocking_write(path: Path, payload: dict) -> None:
+        if (
+            payload["segment_id"] == first.segment_id
+            and payload["status"] == "queued"
+        ):
+            write_started.set()
+            assert release_write.wait(2.0)
+        original_write(path, payload)
+
+    def submit_second() -> None:
+        submitted.append(processor.submit(second))
+        submit_returned.set()
+
+    processor._write_json_atomic = blocking_write
+    submit_thread = threading.Thread(target=submit_second)
+    try:
+        assert processor.submit(first)
+        _wait(write_started)
+        submit_thread.start()
+        assert submit_returned.wait(0.5), "submit was blocked by result persistence"
+        assert submitted == [True]
+        assert not release_write.is_set()
+        release_write.set()
+        _wait(two_completed)
+    finally:
+        release_write.set()
+        submit_thread.join(1.0)
+        processor.close(1.0)
+
+    assert completed_ids == [first.segment_id, second.segment_id]
+    for job in (first, second):
+        payload = json.loads(
+            (job.segment_dir / "result.json").read_text(encoding="utf-8")
+        )
+        assert payload["status"] == "completed"
+
+
+@pytest.mark.parametrize("blocked_status", ["queued", "completed"])
+def test_cancel_all_returns_during_result_write_and_wins_publication_race(
+    tmp_path: Path,
+    blocked_status: str,
+) -> None:
+    write_started = threading.Event()
+    release_write = threading.Event()
+    cancel_returned = threading.Event()
+    cancelled = threading.Event()
+    updates: list[PostprocessUpdate] = []
+
+    def on_update(update: PostprocessUpdate) -> None:
+        updates.append(update)
+        if update.status == "cancelled":
+            cancelled.set()
+
+    processor = DualRecordingPostProcessor(
+        on_update=on_update,
+        transcode=lambda path, _stop: path,
+        compare=lambda *_args, **_kwargs: _result(),
+        video_validator=lambda _path: True,
+        model_available=lambda: True,
+    )
+    job = _job(tmp_path, f"record_cancel_during_{blocked_status}_write")
+    original_write = processor._write_json_atomic
+
+    def blocking_write(path: Path, payload: dict) -> None:
+        original_write(path, payload)
+        if payload["status"] == blocked_status:
+            write_started.set()
+            assert release_write.wait(2.0)
+
+    def cancel() -> None:
+        processor.cancel_all()
+        cancel_returned.set()
+
+    processor._write_json_atomic = blocking_write
+    cancel_thread = threading.Thread(target=cancel)
+    try:
+        assert processor.submit(job)
+        _wait(write_started)
+        cancel_thread.start()
+        assert cancel_returned.wait(0.5), "cancel_all was blocked by result persistence"
+        assert not release_write.is_set()
+        release_write.set()
+        _wait(cancelled)
+        processor._queue.join()
+    finally:
+        release_write.set()
+        cancel_thread.join(1.0)
+        processor.close(1.0)
+
+    payload = json.loads((job.segment_dir / "result.json").read_text(encoding="utf-8"))
+    assert payload["status"] == "cancelled"
+    assert payload["error"]["code"] == "app_closing"
+    assert payload["result"] is None
+    assert [
+        update.status
+        for update in updates
+        if update.status in {"completed", "failed", "skipped", "cancelled"}
+    ] == ["cancelled"]
+    assert all(update.status != blocked_status for update in updates)
+
+
 def test_annotated_recording_is_transcoded_then_skipped(tmp_path: Path) -> None:
     terminal = threading.Event()
     calls: list[Path] = []

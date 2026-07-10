@@ -169,6 +169,7 @@ class DualRecordingPostProcessor:
         self._model_available = model_available
         self._queue: queue.Queue[DualRecordingJob | object] = queue.Queue()
         self._lock = threading.RLock()
+        self._persistence_lock = threading.Lock()
         self._submitted: set[str] = set()
         self._cancelled_segments: set[str] = set()
         self._terminal_status: dict[str, PostprocessStatus] = {}
@@ -491,28 +492,41 @@ class DualRecordingPostProcessor:
             "error": None if error_code is None else {"code": error_code, "message": message},
         }
         update: PostprocessUpdate | None = None
-        with self._lock:
-            existing_terminal = self._terminal_status.get(job.segment_id)
-            cancelled_enrichment = (
-                existing_terminal == "cancelled" and status == "cancelled"
-            )
-            if existing_terminal is not None and not cancelled_enrichment:
-                return
-            if (
-                job.segment_id in self._cancelled_segments
-                and status != "cancelled"
-            ):
-                raise InterruptedError("后台比对已取消")
+        with self._persistence_lock:
+            with self._lock:
+                existing_terminal = self._terminal_status.get(job.segment_id)
+                cancelled_enrichment = (
+                    existing_terminal == "cancelled" and status == "cancelled"
+                )
+                if existing_terminal is not None and not cancelled_enrichment:
+                    return
+                if (
+                    job.segment_id in self._cancelled_segments
+                    and status != "cancelled"
+                ):
+                    raise InterruptedError("后台比对已取消")
             try:
                 self._write_json_atomic(job.segment_dir / "result.json", payload)
             except Exception as exc:
                 raise PostprocessError(
                     "result_write_failed", f"结果文件写入失败：{exc}"
                 ) from exc
-            if status in _TERMINAL_STATUSES:
-                self._terminal_status[job.segment_id] = status
-            if notify and not cancelled_enrichment:
-                update = self._update_from_payload(payload, message)
+            with self._lock:
+                existing_terminal = self._terminal_status.get(job.segment_id)
+                cancelled_enrichment = (
+                    existing_terminal == "cancelled" and status == "cancelled"
+                )
+                if existing_terminal is not None and not cancelled_enrichment:
+                    return
+                if (
+                    job.segment_id in self._cancelled_segments
+                    and status != "cancelled"
+                ):
+                    raise InterruptedError("后台比对已取消")
+                if status in _TERMINAL_STATUSES:
+                    self._terminal_status[job.segment_id] = status
+                if notify and not cancelled_enrichment:
+                    update = self._update_from_payload(payload, message)
         if update is not None:
             self._notify(update)
 
