@@ -516,6 +516,7 @@ def test_dual_worker_releases_captures_and_pipelines_after_runtime_error(
         return pipeline
 
     close_pair_calls: list[bool] = []
+    done_calls: list[bool] = []
 
     def write_pair(_front, _side) -> None:
         if failure_phase == "write":
@@ -529,7 +530,7 @@ def test_dual_worker_releases_captures_and_pipelines_after_runtime_error(
         _post_dual_preview_layout=lambda _layout: None,
         _post_status=lambda _status: None,
         _post_progress=lambda _current, _total: None,
-        _post_done=lambda: None,
+        _post_done=lambda: done_calls.append(True),
         _post_frame=lambda _frame, _actions: None,
         _post_frame2=lambda _frame, _actions: None,
         _write_recording_pair=write_pair,
@@ -557,6 +558,7 @@ def test_dual_worker_releases_captures_and_pipelines_after_runtime_error(
     assert len(pipelines) == 2
     assert [pipeline.close_calls for pipeline in pipelines] == [1, 1]
     assert close_pair_calls == [True]
+    assert done_calls == [True]
 
 
 def test_main_stop_does_not_cancel_background_compare_queue():

@@ -1,3 +1,21 @@
+## 2026-07-10: [fix/test] Tkinter 双摄自动比对第四轮隔离与异常恢复修复
+
+### 问题描述
+
+第四轮对抗审查发现两项 P2：后处理只按 `segment_id` 去重，不同 ID 若复用同一规范化目录会依次完成并覆盖同一个 `result.json`；双摄 worker 的推理或 writer 异常虽能释放资源和终结片段，却会跳过 `_post_done()`，导致主界面保持运行态、Start 持续禁用。
+
+### 修改内容
+
+- `DualRecordingPostProcessor.submit()` 在锁外解析并按平台大小写规则规范化 `segment_dir`，锁内为目录原子登记唯一 `segment_id` 所有权并保留至处理器销毁；同目录、`..` 别名或大小写别名的其他 ID 在入队前直接拒绝，不产生回调、比对或结果覆盖。
+- 双摄 worker 将 `_post_done()` 收敛到最外层 `finally`，在两套 pipeline、两路 capture、OpenCV 窗口和录制片段全部收尾后恰好投递一次；覆盖正常结束、第二设备失败、模型初始化失败、推理异常和双 writer 异常。
+- 新增不同 ID 目录别名抢占与双摄运行时异常完成通知回归，验证首份 JSON 字节不变、无串段通知，且异常后主界面可恢复非运行态。
+
+### 验证方法
+
+- 自动比对完整定向回归：`205 passed`。
+- 后处理子集：`41 passed`；双摄子集：`54 passed`。
+- `py_compile` 与 `git diff --check` 通过，仅有 Windows 行尾提示。
+
 ## 2026-07-10: [fix/test] Tkinter 双摄自动比对第三轮回调验收修复
 
 ### 问题描述

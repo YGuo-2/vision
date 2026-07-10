@@ -2810,7 +2810,6 @@ class App:
             cap2 = open_camera(int(state.source2))
             if not cap2.isOpened():
                 self._post_status(f"无法打开第二摄像头：{state.source2}")
-                self._post_done()
                 return
 
             w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 1280)
@@ -2841,7 +2840,6 @@ class App:
                 pipe2 = MediaPipePipeline(models_dir=models_dir_path, cfg=cfg)
             except Exception as e:
                 self._post_status(f"初始化失败：{e}")
-                self._post_done()
                 return
 
             t0 = time.monotonic()
@@ -2913,26 +2911,28 @@ class App:
 
             self._post_status("已停止")
             self._post_progress(frame_count, 0)
-            self._post_done()
         finally:
-            for pipeline in (pipe, pipe2):
-                if pipeline is not None:
-                    try:
-                        pipeline.close()
-                    except Exception:
-                        pass
-            for capture in (cap, cap2):
-                if capture is not None:
-                    try:
-                        capture.release()
-                    except Exception:
-                        pass
             try:
-                cv2.destroyAllWindows()
-            except Exception:
-                pass
-            if recording_pair_started:
-                self._close_recording_pair()
+                for pipeline in (pipe, pipe2):
+                    if pipeline is not None:
+                        try:
+                            pipeline.close()
+                        except Exception:
+                            pass
+                for capture in (cap, cap2):
+                    if capture is not None:
+                        try:
+                            capture.release()
+                        except Exception:
+                            pass
+                try:
+                    cv2.destroyAllWindows()
+                except Exception:
+                    pass
+                if recording_pair_started:
+                    self._close_recording_pair()
+            finally:
+                self._post_done()
 
     def _worker_loop_parallel_video(
         self,

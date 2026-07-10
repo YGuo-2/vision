@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import queue
 import tempfile
 import threading
@@ -171,6 +172,7 @@ class DualRecordingPostProcessor:
         self._lock = threading.RLock()
         self._persistence_lock = threading.Lock()
         self._submitted: set[str] = set()
+        self._segment_dir_owners: dict[str, str] = {}
         self._cancelled_segments: set[str] = set()
         self._terminal_status: dict[str, PostprocessStatus] = {}
         self._closed = False
@@ -186,10 +188,19 @@ class DualRecordingPostProcessor:
         self._worker.start()
 
     def submit(self, job: DualRecordingJob) -> bool:
+        try:
+            segment_dir_key = os.path.normcase(
+                str(Path(job.segment_dir).resolve(strict=False))
+            )
+        except (OSError, RuntimeError):
+            return False
         with self._lock:
             if self._closed or job.segment_id in self._submitted:
                 return False
+            if segment_dir_key in self._segment_dir_owners:
+                return False
             self._submitted.add(job.segment_id)
+            self._segment_dir_owners[segment_dir_key] = job.segment_id
             self._queue.put(job)
         return True
 

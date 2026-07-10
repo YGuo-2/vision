@@ -283,6 +283,62 @@
         "T-003"
       ],
       "unit_id": "U-003"
+    },
+    {
+      "agent_id": "round-4-R-U-002",
+      "completed_at": "2026-07-10 04:36:36",
+      "report": "U-002/T-002 PASS. F-015 self-close, single sentinel and FIFO cancellation plus F-016 enrichment-failure preservation/exactly-once are strict; initial write errors still result_write_failed. 40 tests and multi-job callback-close probe passed.",
+      "result": "PASS",
+      "role": "first_wave",
+      "round": 4,
+      "started_at": "2026-07-10 04:31:28",
+      "status": "completed",
+      "task_ids": [
+        "T-002"
+      ],
+      "unit_id": "U-002"
+    },
+    {
+      "agent_id": "round-4-A-U-002",
+      "completed_at": "2026-07-10 04:48:07",
+      "report": "U-002/T-002 adversarial ACTIONABLE_ISSUES. P2: submit deduplicates segment_id only; distinct IDs sharing the same canonical segment_dir both complete and overwrite one result.json, losing the first terminal result. Existing 40 tests miss shared-directory aliasing; F-015/F-016 otherwise hold.",
+      "result": "ACTIONABLE_ISSUES",
+      "role": "adversarial",
+      "round": 4,
+      "started_at": "2026-07-10 04:40:57",
+      "status": "completed",
+      "task_ids": [
+        "T-002"
+      ],
+      "unit_id": "U-002"
+    },
+    {
+      "agent_id": "round-4-R-U-003",
+      "completed_at": "2026-07-10 04:40:42",
+      "report": "U-003/T-003 PASS. Main stop finalizes resources/controllers/job then non-closing refresh clears stale UI; closing refresh and explicit stop remain guarded before locks/Tk. 101 focused plus 3 race tests passed; no P0-P4 finding.",
+      "result": "PASS",
+      "role": "first_wave",
+      "round": 4,
+      "started_at": "2026-07-10 04:31:29",
+      "status": "completed",
+      "task_ids": [
+        "T-003"
+      ],
+      "unit_id": "U-003"
+    },
+    {
+      "agent_id": "round-4-A-U-003",
+      "completed_at": "2026-07-10 04:54:28",
+      "report": "U-003/T-003 adversarial ACTIONABLE_ISSUES. P2: annotate/write exception skips normal _post_done; finally releases resources and finalizes recording but does not set stop or restore running controls, leaving Start disabled and session unrestartable. Existing exception test asserts cleanup only.",
+      "result": "ACTIONABLE_ISSUES",
+      "role": "adversarial",
+      "round": 4,
+      "started_at": "2026-07-10 04:40:58",
+      "status": "completed",
+      "task_ids": [
+        "T-003"
+      ],
+      "unit_id": "U-003"
     }
   ],
   "completed_at": null,
@@ -628,6 +684,46 @@
       "unit_ids": [
         "U-003"
       ]
+    },
+    {
+      "completed_at": "2026-07-10 05:01:34",
+      "created_at": "2026-07-10 04:54:57",
+      "evidence": "submit resolves and normcases segment_dir outside the state lock, then atomically reserves canonical directory ownership for one segment_id for processor lifetime. Distinct IDs using the same directory or .. alias are rejected before queue/callback/write; first result remains byte-identical. Postprocess suite: 41 passed; py_compile/diff passed.",
+      "fix_id": "F-018",
+      "issue_ids": [
+        "I-018"
+      ],
+      "round": 4,
+      "severity": "P2",
+      "started_at": "2026-07-10 04:55:14",
+      "status": "done",
+      "task_ids": [
+        "T-002"
+      ],
+      "title": "不同片段 ID 可复用同一目录并覆盖 result.json",
+      "unit_ids": [
+        "U-002"
+      ]
+    },
+    {
+      "completed_at": "2026-07-10 04:58:25",
+      "created_at": "2026-07-10 04:54:57",
+      "evidence": "Dual-camera worker now posts done exactly once from the outermost finally after pipeline/capture/OpenCV cleanup and recording-pair finalization, covering normal, device/init failure, annotate and writer exceptions; runtime-error regression asserts both resource cleanup and done notification. Dual-camera suite: 54 passed; py_compile passed.",
+      "fix_id": "F-019",
+      "issue_ids": [
+        "I-019"
+      ],
+      "round": 4,
+      "severity": "P2",
+      "started_at": "2026-07-10 04:55:15",
+      "status": "done",
+      "task_ids": [
+        "T-003"
+      ],
+      "title": "双摄 worker 异常退出后未恢复主界面运行状态",
+      "unit_ids": [
+        "U-003"
+      ]
     }
   ],
   "full_fix_rounds": 3,
@@ -886,6 +982,36 @@
       ],
       "title": "主停止后 stop 事件使录制状态文本无法清理",
       "unit_id": "U-003"
+    },
+    {
+      "agent_id": "round-4-A-U-002",
+      "created_at": "2026-07-10 04:48:21",
+      "evidence": "submit 仅按 segment_id 去重，未为规范化 segment_dir 建立所有权；确定性探针中 IDs one/two 共享同一合法目录均 completed，后者原子覆盖前者 result.json，导致第一段终态丢失，违反 NFR-002 和连续片段结果隔离。",
+      "fix_id": "F-018",
+      "issue_id": "I-018",
+      "round": 4,
+      "severity": "P2",
+      "status": "fixed",
+      "task_ids": [
+        "T-002"
+      ],
+      "title": "不同片段 ID 可复用同一目录并覆盖 result.json",
+      "unit_id": "U-002"
+    },
+    {
+      "agent_id": "round-4-A-U-003",
+      "created_at": "2026-07-10 04:54:44",
+      "evidence": "annotate 或双 writer 抛异常时跳过正常路径 _post_done；finally 仅释放两路资源并终结片段，不设置 stop 或通知控件复位。最小探针为 done_calls=0、stop_event=False，导致 Start 保持禁用且会话不可重新启动；现有异常测试仅断言资源释放。",
+      "fix_id": "F-019",
+      "issue_id": "I-019",
+      "round": 4,
+      "severity": "P2",
+      "status": "fixed",
+      "task_ids": [
+        "T-003"
+      ],
+      "title": "双摄 worker 异常退出后未恢复主界面运行状态",
+      "unit_id": "U-003"
     }
   ],
   "max_rounds": 6,
@@ -916,7 +1042,7 @@
       "last_result": "ACTIONABLE_ISSUES",
       "phase": "阶段 2：后处理协调器与结果契约",
       "review_status": "pass",
-      "round_started": 3,
+      "round_started": 4,
       "status": "issues",
       "task_ids": [
         "T-002"
@@ -928,7 +1054,7 @@
       "last_result": "ACTIONABLE_ISSUES",
       "phase": "阶段 2：后处理协调器与结果契约",
       "review_status": "pass",
-      "round_started": 3,
+      "round_started": 4,
       "status": "issues",
       "task_ids": [
         "T-003"
@@ -948,10 +1074,10 @@
       "unit_id": "U-004"
     }
   ],
-  "round": 3,
+  "round": 4,
   "schema_version": 1,
   "status": "fixes-complete",
   "task_count": 4,
-  "updated_at": "2026-07-10 04:28:53",
+  "updated_at": "2026-07-10 05:01:34",
   "workflow": "requirements-first"
 }

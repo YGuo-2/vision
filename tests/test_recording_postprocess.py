@@ -179,6 +179,60 @@ def test_fifo_single_consumer_and_atomic_completed_results(tmp_path: Path) -> No
         assert list(job.segment_dir.glob(".result.*.tmp")) == []
 
 
+def test_submit_reserves_resolved_segment_directory_for_processor_lifetime(
+    tmp_path: Path,
+) -> None:
+    completed = threading.Event()
+    compare_ids: list[str] = []
+    updates: list[PostprocessUpdate] = []
+
+    first = _job(tmp_path, "record_directory_owner")
+    alias_dir = first.segment_dir / ".." / first.segment_dir.name
+    second = DualRecordingJob(
+        segment_id="record_directory_intruder",
+        segment_dir=alias_dir,
+        front_source=alias_dir / first.front_source.name,
+        side_source=alias_dir / first.side_source.name,
+        front_frames=first.front_frames,
+        side_frames=first.side_frames,
+        front_template=first.front_template,
+        side_template=first.side_template,
+    )
+
+    def compare(_ft, _st, front, _side, **_kwargs):
+        compare_ids.append(Path(front).parent.name)
+        return _result()
+
+    def on_update(update: PostprocessUpdate) -> None:
+        updates.append(update)
+        if update.segment_id == first.segment_id and update.status == "completed":
+            completed.set()
+
+    processor = DualRecordingPostProcessor(
+        on_update=on_update,
+        transcode=lambda path, _stop: path,
+        compare=compare,
+        video_validator=lambda _path: True,
+        model_available=lambda: True,
+    )
+    try:
+        assert processor.submit(first)
+        _wait(completed)
+        result_path = first.segment_dir / "result.json"
+        original_result = result_path.read_text(encoding="utf-8")
+
+        assert alias_dir.resolve() == first.segment_dir.resolve()
+        assert not processor.submit(second)
+        processor._queue.join()
+    finally:
+        processor.close(1.0)
+
+    assert compare_ids == [first.segment_id]
+    assert {update.segment_id for update in updates} == {first.segment_id}
+    assert result_path.read_text(encoding="utf-8") == original_result
+    assert json.loads(original_result)["segment_id"] == first.segment_id
+
+
 def test_submit_returns_before_blocking_queued_callback_runs(tmp_path: Path) -> None:
     queued_callback_started = threading.Event()
     release_callback = threading.Event()
