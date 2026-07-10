@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import cv2
@@ -43,3 +44,49 @@ def open_video_writer(preferred_path: Path, *, fps: float, size: tuple[int, int]
         last_err = f"VideoWriter open failed: path={out_path}, codec={codec}"
 
     raise RuntimeError(last_err or "VideoWriter open failed")
+
+
+def transcode_to_h264(src: Path | None) -> Path | None:
+    """Transcode an AVI recording to H.264 MP4 without risking the source."""
+    if src is None:
+        return None
+
+    src = Path(src)
+    if not src.exists() or src.suffix.lower() != ".avi":
+        return src
+
+    dst = src.with_suffix(".mp4")
+    if dst == src:
+        return src
+
+    command = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(src),
+        "-c:v",
+        "libx264",
+        "-preset",
+        "medium",
+        "-crf",
+        "20",
+        "-pix_fmt",
+        "yuv420p",
+        str(dst),
+    ]
+    try:
+        subprocess.run(command, check=True)
+    except (OSError, subprocess.CalledProcessError):
+        return src
+
+    try:
+        if not dst.is_file() or dst.stat().st_size <= 0:
+            return src
+    except OSError:
+        return src
+
+    try:
+        src.unlink()
+    except OSError:
+        return src
+    return dst

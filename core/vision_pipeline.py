@@ -148,6 +148,46 @@ def _classify_pose_actions(landmarks, w: int, h: int) -> list[str]:
     return actions
 
 
+_ACTION_POSE_UNSET = object()
+
+
+def draw_pose_frame(
+    frame_bgr: np.ndarray,
+    pose_landmarks,
+    hands,
+    *,
+    draw_face: bool,
+    draw_joint_angles: bool,
+    action_pose_landmarks=_ACTION_POSE_UNSET,
+) -> tuple[np.ndarray, list[str]]:
+    """无状态绘制：在帧副本上画 pose/hands 并返回 ``(annotated, actions)``。
+
+    不依赖 MediaPipe 模型实例，供并行预览路径在重排出口的主线程直接绘制平滑后的 landmarks
+    （避免在消费线程再构造一个加载模型的管线）。``action_pose_landmarks`` 可单独指定用于
+    动作分类的 raw landmarks，使平滑结果只影响骨架绘制；省略时保持旧行为。逻辑与
+    ``MediaPipePipeline.annotate`` 的绘制步骤一致。
+    """
+    out = frame_bgr.copy()
+    h, w = out.shape[:2]
+
+    action_pose = (
+        pose_landmarks
+        if action_pose_landmarks is _ACTION_POSE_UNSET
+        else action_pose_landmarks
+    )
+    actions = _classify_pose_actions(action_pose, w, h)
+
+    MediaPipePipeline._draw_pose(out, pose_landmarks, w, h, draw_face=draw_face)
+    if draw_joint_angles:
+        MediaPipePipeline._draw_joint_angles(out, pose_landmarks, w, h)
+
+    MediaPipePipeline._draw_hands(out, hands, w, h)
+    if any(_is_v_sign(hand, w, h) for hand in hands):
+        actions.insert(0, "V_SIGN")
+
+    return out, actions
+
+
 def _pose_model_url(variant: str) -> str:
     # 模型清单已收口到 core.model_manager，避免 URL 在多处漂移。
     from core.model_manager import MEDIAPIPE_MODELS
@@ -196,6 +236,7 @@ class PipelineConfig:
     num_hands: int = 2
     running_mode: str = "video"  # "video" (tracking) or "image" (per-frame, parallel-friendly)
     draw_pose_face: bool = False  # Disable by default to avoid visual confusion when hands are near the face.
+    draw_joint_angles: bool = False  # Overlay knee/elbow joint angles on the annotated preview (UI opt-in).
     enable_hands: bool = True  # Set False for pose-only extraction (faster), e.g. template matching.
     delegate: str = "cpu"  # Explicit opt-in only: "cpu" keeps the legacy BaseOptions path, "gpu" probes GPU delegate.
     delegate_fallback_to_cpu: bool = True
@@ -305,20 +346,32 @@ class MediaPipePipeline:
 
     def annotate(self, frame_bgr: np.ndarray, *, timestamp_ms: int | None = None) -> tuple[np.ndarray, list[str]]:
         pose_landmarks, hands = self.infer(frame_bgr, timestamp_ms=timestamp_ms)
-
-        out = frame_bgr.copy()
-        h, w = out.shape[:2]
-
-        actions = _classify_pose_actions(pose_landmarks, w, h)
-
-        self._draw_pose(out, pose_landmarks, w, h, draw_face=self.cfg.draw_pose_face)
-
-        self._draw_hands(out, hands, w, h)
-        if any(_is_v_sign(hand, w, h) for hand in hands):
-            actions.insert(0, "V_SIGN")
-
+        out, actions = self.draw(frame_bgr, pose_landmarks, hands)
         self._frame_index += 1
         return out, actions
+
+    def draw(
+        self,
+        frame_bgr: np.ndarray,
+        pose_landmarks,
+        hands,
+        *,
+        action_pose_landmarks=_ACTION_POSE_UNSET,
+    ) -> tuple[np.ndarray, list[str]]:
+        """在 ``frame_bgr`` 上绘制给定 landmarks，返回 ``(annotated, actions)``。
+
+        从 ``annotate()`` 抽出的可复用绘制步骤（不含 infer、不动 ``_frame_index``），供
+        「infer → 重排 → 预览平滑 → draw」这条单线程预览路径在重排出口调用。传入平滑后的
+        landmarks 即得平滑预览；传入 raw 则与旧 ``annotate()`` 行为逐字节一致。
+        """
+        return draw_pose_frame(
+            frame_bgr,
+            pose_landmarks,
+            hands,
+            draw_face=self.cfg.draw_pose_face,
+            draw_joint_angles=self.cfg.draw_joint_angles,
+            action_pose_landmarks=action_pose_landmarks,
+        )
 
     def infer(self, frame_bgr: np.ndarray, *, timestamp_ms: int | None = None):
         """Run landmarkers and return raw landmarks (pose_landmarks, hands_list)."""
@@ -373,6 +426,65 @@ class MediaPipePipeline:
                 continue
             x, y = int(p.x * w), int(p.y * h)
             cv2.circle(out_bgr, (x, y), 3, (0, 255, 0), -1, cv2.LINE_AA)
+
+    @staticmethod
+    def _draw_joint_angles(out_bgr: np.ndarray, landmarks, w: int, h: int) -> None:
+        """Overlay knee (hip-knee-ankle) and elbow (shoulder-elbow-wrist) angles."""
+        if landmarks is None:
+            return
+
+        # (label_anchor_idx, a, b, c): angle is at vertex b.
+        joints = [
+            (25, 23, 25, 27),  # left knee
+            (26, 24, 26, 28),  # right knee
+            (13, 11, 13, 15),  # left elbow
+            (14, 12, 14, 16),  # right elbow
+        ]
+        for vtx, ia, ib, ic in joints:
+            a, b, c = landmarks[ia], landmarks[ib], landmarks[ic]
+            if _visibility(a) < 0.3 or _visibility(b) < 0.3 or _visibility(c) < 0.3:
+                continue
+            pa, pb, pc = _pt2d(a, w, h), _pt2d(b, w, h), _pt2d(c, w, h)
+            ang = _angle_deg(pa, pb, pc)
+
+            # 加粗重画构成夹角的两条边与三个节点（覆盖在 _draw_pose 的细线之上）。
+            # 用与整副骨架（橙 0,140,255 / 绿点）明显不同的高对比色，便于区分夹角。
+            ipa = (int(pa[0]), int(pa[1]))
+            ipb = (int(pb[0]), int(pb[1]))
+            ipc = (int(pc[0]), int(pc[1]))
+            cv2.line(out_bgr, ipb, ipa, (255, 0, 255), 5, cv2.LINE_AA)  # 品红边
+            cv2.line(out_bgr, ipb, ipc, (255, 0, 255), 5, cv2.LINE_AA)
+            for pt in (ipa, ipb, ipc):
+                cv2.circle(out_bgr, pt, 6, (0, 0, 255), -1, cv2.LINE_AA)  # 红节点
+
+            # 在顶点 b 处用一段圆弧连接 b→a 与 b→c 两条边（取两向量间的内角短弧）。
+            start = math.degrees(math.atan2(pa[1] - pb[1], pa[0] - pb[0]))
+            end = math.degrees(math.atan2(pc[1] - pb[1], pc[0] - pb[0]))
+            sweep = (end - start + 180.0) % 360.0 - 180.0  # 归一化到 (-180, 180] 走短边
+            radius = max(8, int(0.018 * math.hypot(w, h)))
+            cv2.ellipse(
+                out_bgr,
+                (int(pb[0]), int(pb[1])),
+                (radius, radius),
+                0.0,
+                start,
+                start + sweep,
+                (255, 255, 0),
+                4,
+                cv2.LINE_AA,
+            )
+
+            vx, vy = int(landmarks[vtx].x * w), int(landmarks[vtx].y * h)
+            cv2.putText(
+                out_bgr,
+                f"{ang:.0f}",
+                (vx + 6, vy - 6),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0, 255, 255),
+                2,
+                cv2.LINE_AA,
+            )
 
     @staticmethod
     def _draw_hands(out_bgr: np.ndarray, hands, w: int, h: int) -> None:

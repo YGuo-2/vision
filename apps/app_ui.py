@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from queue import Empty, Queue
-from tkinter import BooleanVar, Canvas, DoubleVar, IntVar, Scrollbar, StringVar, Text, Tk, Toplevel, filedialog, messagebox, ttk
+from tkinter import BooleanVar, Canvas, DoubleVar, IntVar, Scrollbar, StringVar, TclError, Text, Tk, Toplevel, filedialog, messagebox, ttk
 
 import cv2
 import numpy as np
@@ -17,10 +17,12 @@ from PIL import Image, ImageTk
 
 from core.action_compare import compare_video_to_template, create_template_from_video
 from analysis.tech_eval import evaluate_video_assets, evaluate_video_detail, export_debug_video, to_jsonable
-from core.vision_pipeline import MediaPipePipeline, PipelineConfig
+from core.vision_pipeline import MediaPipePipeline, PipelineConfig, draw_pose_frame
 from core.paths import models_dir, outputs_dir
-from core import model_manager
+from core import model_manager, online_matcher, paths, video_writer
+from core import pose_features as pf
 from core.parallel_pose_engine import ParallelPoseEngine, default_pipeline_factory
+from core.preview_smoother import PreviewLandmarkSmoother
 from core.recording_controller import RecordingController, RecordingState
 from apps.camera_enum import CameraEntry, InputSourceState, enumerate_cameras, open_camera
 
@@ -65,6 +67,18 @@ def clamp_workers(n: int) -> int:
     if value > upper:
         return upper
     return value
+
+
+def default_workers() -> int:
+    """主预览默认并行 worker 数：按 CPU 逻辑核数自适应，尽量榨满多核吞吐。
+
+    单条 VIDEO 管线在多核机上只用到少数核（32 核机整机 ~10% 利用率）；多 worker 并行
+    IMAGE 推理可近线性扩展。留 2 个核给 UI/采集/系统；上限 8——实测 6 worker 已达
+    ~57fps，再多是拿内存（每 worker 一份模型）换不到额外 fps。想更激进可在「线程数」
+    里手调（上限 16）。
+    """
+    cpu = os.cpu_count() or 4
+    return max(2, min(8, cpu - 2))
 
 
 class CollapsibleSection:
@@ -797,6 +811,7 @@ class UiState:
     enable_hands: bool
     out_path: str | None = None
     source2: str | None = None
+    online_match_enabled: bool = True
 
 
 class SettingsWindow:
@@ -1065,12 +1080,14 @@ class App:
         self.camera_choice_var_2 = StringVar(value=NO_SECOND_CAMERA)
         self.source_hint_var = StringVar(value="当前输入源：未选择")
         self.pose_var = StringVar(value="full")
-        self.workers_var = IntVar(value=2)
+        self.workers_var = IntVar(value=default_workers())
         self.enable_hands_var = BooleanVar(value=True)
         # 录制视频保存目录（默认 outputs_dir()）。录制文件名仍由控制器按时间戳生成。
         self.record_dir_var = StringVar(value=str(outputs_dir()))
         self.status_var = StringVar(value="就绪")
         self.actions_var = StringVar(value="-")
+        self.match_var = StringVar(value="识别：待机")
+        self.online_match_var = BooleanVar(value=True)
         self.progress_var = DoubleVar(value=0.0)
         self.progress_text_var = StringVar(value="")
         # 录制状态文本与 Result_Video 完整路径（需求 5.9/5.10）。对应的 Label 控件
@@ -1084,14 +1101,26 @@ class App:
         self._camera_entries: list[CameraEntry] = []
         self._enum_busy = threading.Event()
 
+        # 摄像头预打开（点2）：选中摄像头即后台 open_camera() 预热，_start 时复用，藏掉
+        # 0.5–2.5s 驱动冷启动。锁保护 _preopen_cap/_preopen_index 的存取（主线程触发、
+        # 预打开线程写入、worker 消费三方共享）。
+        self._preopen_lock = threading.Lock()
+        self._preopen_cap: cv2.VideoCapture | None = None
+        self._preopen_index: int | None = None
+
         self._stop_evt = threading.Event()
         self._worker: threading.Thread | None = None
         self._queue: Queue[tuple[np.ndarray, str]] = Queue(maxsize=1)
         self._photo: ImageTk.PhotoImage | None = None
+        # 预览区当前尺寸缓存（主线程 Configure 回调写、worker 线程读；GIL 下 tuple 读写
+        # 原子，无需加锁）。worker 线程在 _post_frame/_post_frame2 里按此做 aspect-fit
+        # resize，GUI 主线程 _tick 只剩 ImageTk.PhotoImage + configure（点1：预览渲染解绑）。
+        self._preview_wh: tuple[int, int] = (0, 0)
         # 第二路预览队列（双摄像头双面视图，issue #58）：单摄模式恒空，preview2 恒隐藏，
         # 现有单摄路径零改动。
         self._queue2: Queue[tuple[np.ndarray, str]] = Queue(maxsize=1)
         self._photo2: ImageTk.PhotoImage | None = None
+        self._preview_wh2: tuple[int, int] = (0, 0)
         self._compare_win: CompareWindow | None = None
         self._settings_win: SettingsWindow | None = None
         self._settings_win: SettingsWindow | None = None
@@ -1099,7 +1128,7 @@ class App:
         # 录制/暂停运行时控制器（与 Tkinter 解耦的状态机）。使用模块默认的
         # writer_factory（绑定 core.video_writer.open_video_writer）。path_provider
         # 注入为读取 self.record_dir_var 的闭包：用户在「录制」分组选择的保存目录
-        # 下，按时间戳生成 record_<timestamp>.mp4。录制流程完全由该控制器管理。
+        # 下，按含微秒的时间戳生成 record_<timestamp>.mp4，避免快速重录与后台转码争用同名文件。
         self._rec = RecordingController(path_provider=self._record_path)
 
         self._build_ui()
@@ -1280,6 +1309,16 @@ class App:
         ttk.Label(info, textvariable=self.recording_status_var, wraplength=320).pack(anchor="w", pady=(4, 0))
         ttk.Label(info, text="识别结果：").pack(anchor="w", pady=(8, 0))
         ttk.Label(info, textvariable=self.actions_var, wraplength=320).pack(anchor="w")
+        online_match_row = ttk.Frame(info)
+        online_match_row.pack(fill="x", pady=(8, 0))
+        ttk.Checkbutton(
+            online_match_row,
+            text="实时动作识别",
+            variable=self.online_match_var,
+        ).pack(side="left")
+        ttk.Label(online_match_row, textvariable=self.match_var, wraplength=210).pack(
+            side="left", padx=(8, 0)
+        )
         ttk.Label(info, textvariable=self.progress_text_var, wraplength=320).pack(anchor="w", pady=(8, 0))
         self.progress_bar = ttk.Progressbar(info, orient="horizontal", mode="determinate", maximum=100.0)
         self.progress_bar.pack(fill="x", pady=(6, 0))
@@ -1290,33 +1329,87 @@ class App:
         right.grid(row=0, column=1, sticky="nsew")
         right.rowconfigure(0, weight=1)
         right.columnconfigure(0, weight=1)
-        # 第二列默认权重 0：grid 会按列权重分配额外空间，即使该列的 widget 被
-        # grid_remove() 隐藏也照样占位挤压第一列。权重随 _set_dual_preview_visible
-        # 与显示/隐藏一起切换，保证单摄模式下第一列仍占满整行（issue #58 逐字不变要求）。
-        right.columnconfigure(1, weight=0)
+        # 第二行默认权重 0：grid 会按行权重分配额外空间，即使该行的 widget 被
+        # grid_remove() 隐藏也照样占位挤压第一行。权重随 _set_dual_preview_visible
+        # 与显示/隐藏一起切换，保证单摄模式下第一行仍占满整列（issue #58 逐字不变要求）。
+        right.rowconfigure(1, weight=0)
 
         self.preview = ttk.Label(right)
         self.preview.grid(row=0, column=0, sticky="nsew")
+        self.preview.bind("<Configure>", self._on_preview_configure)
 
         # 第二路预览（双摄像头双面视图，issue #58）：默认隐藏，仅 source2 选中真实摄像头时显示。
+        # 上下堆叠（第二路在下方），横向空间充足时比左右并排更省地方。
         self._preview_right = right
         self.preview2 = ttk.Label(right)
-        self.preview2.grid(row=0, column=1, sticky="nsew")
+        self.preview2.grid(row=1, column=0, sticky="nsew")
+        self.preview2.bind("<Configure>", self._on_preview2_configure)
         self._set_dual_preview_visible(False)
+
+    def _on_preview_configure(self, event) -> None:
+        """主预览 Label 尺寸变化（主线程）：缓存供 worker 线程 _post_frame 做 resize（点1）。"""
+        self._preview_wh = (event.width, event.height)
+
+    def _on_preview2_configure(self, event) -> None:
+        """第二路预览 Label 尺寸变化（主线程），与 _on_preview_configure 同构。"""
+        self._preview_wh2 = (event.width, event.height)
 
     def _set_dual_preview_visible(self, visible: bool) -> None:
         """显示/隐藏第二预览列（双摄像头双面视图，issue #58）。
 
-        隐藏时把列 1 的 grid 权重也置 0：仅 grid_remove() 隐藏 widget 不会释放列的
-        权重分配，空列仍会挤占列 0 的可用宽度，导致单摄模式下主预览被压缩（不满足
+        隐藏时把行 1 的 grid 权重也置 0：仅 grid_remove() 隐藏 widget 不会释放行的
+        权重分配，空行仍会挤占行 0 的可用高度，导致单摄模式下主预览被压缩（不满足
         issue #58「单摄模式预览行为逐字不变」要求）。显示/隐藏必须与权重同步切换。
         """
         if visible:
             self.preview2.grid()
-            self._preview_right.columnconfigure(1, weight=1)
+            self._preview_right.rowconfigure(1, weight=1)
         else:
-            self._preview_right.columnconfigure(1, weight=0)
+            self._preview_right.rowconfigure(1, weight=0)
             self.preview2.grid_remove()
+
+    def _build_online_matcher(self) -> online_matcher.OnlineActionMatcher | None:
+        """加载实时模板库；模板缺失或不兼容时保持预览可用。"""
+        try:
+            templates = online_matcher.load_template_library(paths.templates_dir() / "online")
+            if not templates:
+                return None
+            return online_matcher.OnlineActionMatcher(templates, self._post_match)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _feed_online_matcher(matcher, pose_landmarks, timestamp_ms, frame_index) -> None:
+        """把 raw pose 特征送入在线 matcher，不让预览平滑结果回流。"""
+        if matcher is None or pose_landmarks is None:
+            return
+        feature = pf.normalize_pose_xy_v3(pose_landmarks)
+        if feature is not None:
+            matcher.push(feature, timestamp_ms, frame_index)
+
+    def _post_match(self, result: online_matcher.MatchResult) -> None:
+        """把后台 DTW 命中安全投递到 Tk 主线程。"""
+        if self._stop_evt.is_set() or result.action is None:
+            return
+        name = result.action
+        for suffix in ("_正面", "_侧面", "_左侧", "_右侧"):
+            if name.endswith(suffix):
+                name = name[: -len(suffix)]
+                break
+        text = f"识别到：{name} ({result.score:.2f})"
+
+        def _apply() -> None:
+            if self._stop_evt.is_set():
+                return
+            try:
+                self.match_var.set(text)
+            except (TclError, RuntimeError):
+                pass
+
+        try:
+            self.root.after(0, _apply)
+        except (TclError, RuntimeError):
+            pass
 
     def _open_compare(self) -> None:
         if self._compare_win and self._compare_win.is_open():
@@ -1350,12 +1443,22 @@ class App:
         """RecordingController 的 path_provider：在用户选择的录制目录下按时间戳生成文件名。
 
         目录取自 self.record_dir_var；为空时回退到 outputs_dir()。文件名沿用
-        record_<timestamp>.mp4 约定，确保同一目录内多次录制不互相覆盖。
+        record_<timestamp>.mp4 约定；时间戳包含微秒，确保快速结束并重录也不互相覆盖。
         """
         base = self.record_dir_var.get().strip()
         directory = Path(base) if base else outputs_dir()
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         return directory / f"record_{timestamp}.mp4"
+
+    def _transcode_async(self, path: Path | None) -> None:
+        """后台把 MJPG/AVI 回退产物转成 H.264，避免阻塞 GUI 或推理线程。"""
+        if path is None:
+            return
+        threading.Thread(
+            target=video_writer.transcode_to_h264,
+            args=(path,),
+            daemon=True,
+        ).start()
 
     def _choose_record_dir(self) -> None:
         """选择录制视频保存目录。"""
@@ -1389,7 +1492,7 @@ class App:
         调用控制器 ``stop_recording()`` 复位为 idle（保持会话运行），随后把切换按钮
         文本复位为「开始录制」、禁用「结束录制」，使用户可在同一会话内重新开始录制。
         """
-        self._rec.stop_recording()
+        self._transcode_async(self._rec.stop_recording())
         record_btn = getattr(self, "record_btn", None)
         if record_btn is not None:
             record_btn.configure(text=RECORD_BTN_TEXT["idle"])
@@ -1594,6 +1697,7 @@ class App:
                 if self._source_state.kind == "camera":
                     self._source_state.clear()
                     self.source_var.set("")
+                    self._release_preopen_cap()
                 self.camera_combo_2.configure(values=[NO_SECOND_CAMERA], state="disabled")
                 self.camera_choice_var_2.set(NO_SECOND_CAMERA)
                 return
@@ -1626,12 +1730,17 @@ class App:
         return None
 
     def _select_camera_by_label(self, label: str) -> None:
-        """由显示文本反查编号并记录为摄像头输入源（需求 2.3、3.3）。"""
+        """由显示文本反查编号并记录为摄像头输入源（需求 2.3、3.3）。
+
+        唯一收敛点——`_on_camera_selected` 与枚举自动选中的 `_apply_camera_entries`
+        都经此。选定后顺带后台预打开该摄像头（点2），供 `_start` 时复用。
+        """
         index = self._camera_index_for_label(label)
         if index is not None:
             self._source_state.select_camera(index)
             self.source_var.set(str(index))
             self.source_hint_var.set(self._source_state.hint_text())
+            self._kick_preopen(index)
 
     def _on_camera_selected(self, event=None) -> None:
         self._select_camera_by_label(self.camera_choice_var.get())
@@ -1643,6 +1752,61 @@ class App:
         if self._enum_busy.is_set():
             return
         self._start_enumeration()
+
+    # ---- 摄像头预打开（点2） ----
+
+    def _kick_preopen(self, index: int) -> None:
+        """释放旧预热 cap，后台线程为 index 预热新 cap。
+
+        `open_camera` 阻塞 0.5–2.5s（驱动冷启动），必须放后台线程，仿 `_start_enumeration`。
+        """
+        self._release_preopen_cap()
+        threading.Thread(target=self._preopen_camera, args=(index,), daemon=True).start()
+
+    def _preopen_camera(self, index: int) -> None:
+        """预打开线程体：open_camera 完成后双重校验（锁下）才存入 _preopen_cap/_preopen_index。
+
+        仅当 (a) 用户当前选中仍是该 index——读取非 Tkinter 的 `_source_state`（跨线程碰
+        Tkinter 变量不安全）——且 (b) 会话未运行才存入；否则（用户已切走，或会话已启动、
+        可能已自行打开同设备）直接释放刚开的 cap、不存入，防泄漏也防与 worker 争用同一设备。
+        """
+        cap = open_camera(index)
+        with self._preopen_lock:
+            running = bool(self._worker and self._worker.is_alive())
+            still_selected = (
+                self._source_state.kind == "camera" and self._source_state.value == str(index)
+            )
+            keep = still_selected and not running
+            if keep:
+                self._preopen_cap = cap
+                self._preopen_index = index
+        if not keep:
+            cap.release()
+
+    def _take_preopen_cap(self, index: int):
+        """消费预热 cap（转移所有权）：命中且仍 isOpened() 才返回，否则 None（回退 open_camera）。
+
+        命中但已失效（如设备被拔出）时就地释放并清空，不留僵尸引用。
+        """
+        with self._preopen_lock:
+            if self._preopen_index != index or self._preopen_cap is None:
+                return None
+            cap = self._preopen_cap
+            self._preopen_cap = None
+            self._preopen_index = None
+        if cap.isOpened():
+            return cap
+        cap.release()
+        return None
+
+    def _release_preopen_cap(self) -> None:
+        """释放并清空预热 cap（锁下弹出、锁外 release，避免持锁做阻塞的设备释放调用）。"""
+        with self._preopen_lock:
+            cap = self._preopen_cap
+            self._preopen_cap = None
+            self._preopen_index = None
+        if cap is not None:
+            cap.release()
 
     def _collect_state(self) -> UiState:
         # 无有效输入源：使用统一提示文案（需求 4.2）。
@@ -1673,8 +1837,13 @@ class App:
             pose_variant=self.pose_var.get().strip() or "full",
             workers=workers,
             enable_hands=bool(self.enable_hands_var.get()),
-            out_path=(self.out_var.get().strip() or None) if bool(self.save_var.get()) else None,
+            # 主实时会话的保存已由 RecordingController 接管（录制分组），out_path 在此路径不再消费。
             source2=source2,
+            online_match_enabled=(
+                bool(self.online_match_var.get())
+                if hasattr(self, "online_match_var")
+                else True
+            ),
         )
 
     def _start(self) -> None:
@@ -1714,18 +1883,27 @@ class App:
 
     def _on_close(self) -> None:
         self._stop_evt.set()
+        self._release_preopen_cap()
         self.root.after(50, self.root.destroy)
 
     def _worker_loop(self, state: UiState) -> None:
         source = state.source
         is_file = not source.isdigit()
 
+        # 摄像头 + 多 worker：让「打开摄像头」与「各 worker 加载模型」并行发生，而不是
+        # 串行等摄像头开好再建模型（缩短点击→首帧）。open 下放到分支内部，故此处提前分流。
+        if (not is_file) and (not state.source2) and state.workers > 1:
+            self._worker_loop_parallel_camera(state)
+            return
+
         if source.isdigit():
-            cap = open_camera(int(source))
+            # 点2：优先复用预打开的 cap（命中即用，藏掉冷启动），否则回退同步 open_camera。
+            cap = self._take_preopen_cap(int(source)) or open_camera(int(source))
         else:
             cap = cv2.VideoCapture(source)
 
         if not cap.isOpened():
+            cap.release()
             self._post_status(f"无法打开输入源：{source}")
             self._post_done()
             return
@@ -1746,12 +1924,14 @@ class App:
             self._worker_loop_parallel_video(state, cap, fps_for_ts, total)
             return
 
-        if (not is_file) and state.workers > 1:
-            self._worker_loop_parallel_camera(state, cap, fps_for_ts)
-            return
-
         # 录制由 RecordingController 管理：进入帧循环前登记本会话写入参数（fps/size）。
         self._rec.begin_session(fps=fps_for_ts, size=(w, h))
+        matcher = (
+            self._build_online_matcher()
+            if (not is_file and state.online_match_enabled)
+            else None
+        )
+        smoother = PreviewLandmarkSmoother() if not is_file else None
 
         try:
             try:
@@ -1783,7 +1963,19 @@ class App:
                     break
 
                 ts = pipe.next_timestamp_ms(is_file=is_file, fps_for_ts=fps_for_ts)
-                annotated, actions = pipe.annotate(frame, timestamp_ms=ts)
+                if is_file:
+                    # 文件 VIDEO 模式保留 annotate()，包括其内部 frame index 自增语义。
+                    annotated, actions = pipe.annotate(frame, timestamp_ms=ts)
+                else:
+                    pose_landmarks, hands = pipe.infer(frame, timestamp_ms=ts)
+                    self._feed_online_matcher(matcher, pose_landmarks, ts, frame_count)
+                    smoothed = smoother.feed(pose_landmarks, timestamp_ms=ts)
+                    annotated, actions = pipe.draw(
+                        frame,
+                        smoothed,
+                        hands,
+                        action_pose_landmarks=pose_landmarks,
+                    )
 
                 frame_count += 1
                 if is_file and total > 0 and (frame_count % 5 == 0 or frame_count == total):
@@ -1826,7 +2018,9 @@ class App:
             self._post_done()
         finally:
             # 覆盖正常结束 / 停止 / 异常：释放 writer 并复位录制状态。
-            self._rec.close_session()
+            if matcher is not None:
+                matcher.close()
+            self._transcode_async(self._rec.close_session())
 
     def _worker_loop_dual_camera(self, state: UiState, cap: cv2.VideoCapture) -> None:
         """双摄像头双面视图（issue #58）：两路独立 VIDEO 循环，双 Label 独立渲染。
@@ -1922,7 +2116,7 @@ class App:
             self._post_progress(frame_count, 0)
             self._post_done()
         finally:
-            self._rec.close_session()
+            self._transcode_async(self._rec.close_session())
 
     def _worker_loop_parallel_video(
         self,
@@ -2040,24 +2234,30 @@ class App:
             self._post_done()
         finally:
             # 覆盖正常结束 / 停止 / 异常：释放 writer 并复位录制状态。
-            self._rec.close_session()
+            self._transcode_async(self._rec.close_session())
 
-    def _worker_loop_parallel_camera(
-        self,
-        state: UiState,
-        cap: cv2.VideoCapture,
-        fps_for_ts: float,
-    ) -> None:
+    def _worker_loop_parallel_camera(self, state: UiState) -> None:
         """实时摄像头多核并行推理（IMAGE 模式 + 满则丢帧）。
 
         单线程 VIDEO 模式在多核机上只用到少数核心，heavy 模型实时只能跑 ~15fps；并行多
         worker 能近线性提升吞吐。代价是失去 VIDEO 模式的时序平滑（骨架更抖），且高负载时
-        丢弃新帧以约束端到端延迟。默认（线程数=1）仍走单线程 VIDEO 路径，行为不变。
+        丢弃新帧以约束端到端延迟。
+
+        启动优化：先构造并 ``start()`` 引擎——各 worker 在后台线程各自加载一份模型——再
+        打开摄像头，使「模型加载」与「摄像头冷启动」两段耗时重叠，缩短点击→首帧的等待。
         """
         workers = max(1, int(state.workers))
-        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 1280)
-        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 720)
-        self._rec.begin_session(fps=fps_for_ts, size=(w, h))
+        matcher = (
+            self._build_online_matcher()
+            if state.online_match_enabled
+            else None
+        )
+        smoother = PreviewLandmarkSmoother()
+        draw_cfg = PipelineConfig(
+            pose_variant=state.pose_variant,
+            running_mode="image",
+            enable_hands=state.enable_hands,
+        )
 
         engine = ParallelPoseEngine(
             pipeline_factory=default_pipeline_factory(
@@ -2067,16 +2267,35 @@ class App:
             ),
             workers=workers,
             drop_when_full=True,
+            defer_draw=True,
         )
 
+        cap = None
+        t_reader: threading.Thread | None = None
         try:
             try:
                 engine.start()
             except Exception as e:
-                cap.release()
                 self._post_status(f"初始化失败：{e}")
                 self._post_done()
                 return
+
+            # 各 worker 后台建模型的同时打开摄像头，两段冷启动重叠（而非串行）。点2：优先
+            # 复用预打开的 cap（命中即用），否则回退同步 open_camera。
+            cap = self._take_preopen_cap(int(state.source)) or open_camera(int(state.source))
+            if not cap.isOpened():
+                self._post_status(f"无法打开输入源：{state.source}")
+                self._post_done()
+                return
+
+            fps_for_ts = 30.0
+            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 1280)
+            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 720)
+            self._rec.begin_session(fps=fps_for_ts, size=(w, h))
+
+            capture_t0 = time.monotonic()
+            timestamp_ready = threading.Condition()
+            submitted_timestamps: dict[int, int] = {}
 
             def reader() -> None:
                 try:
@@ -2084,14 +2303,19 @@ class App:
                         ok, frame = cap.read()
                         if not ok:
                             break
-                        engine.submit(frame)
+                        timestamp_ms = int((time.monotonic() - capture_t0) * 1000.0)
+                        submitted_index = engine.submit(frame)
+                        if submitted_index is not None:
+                            with timestamp_ready:
+                                submitted_timestamps[submitted_index] = timestamp_ms
+                                timestamp_ready.notify_all()
                 finally:
                     engine.signal_input_done()
 
             t_reader = threading.Thread(target=reader, daemon=True)
             t_reader.start()
 
-            self._post_status(f"运行中…（实时多线程：{workers}，时序平滑关闭）")
+            self._post_status(f"运行中…（实时多线程：{workers}，预览平滑开启）")
             self._post_progress(0, 0)
 
             t0 = time.monotonic()
@@ -2102,7 +2326,38 @@ class App:
                     if engine.is_drained():
                         break
                     continue
-                annotated = res.annotated
+                if res.frame is None:
+                    continue
+
+                # submit() 仅给成功入队帧分配 index；另存采集时刻才能保留满队列丢帧造成的
+                # 真实时间间隙。极端调度竞态下短暂等待 reader 发布对应 timestamp。
+                deadline = time.monotonic() + 0.2
+                with timestamp_ready:
+                    while res.index not in submitted_timestamps:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0.0:
+                            break
+                        timestamp_ready.wait(timeout=remaining)
+                    timestamp_ms = submitted_timestamps.pop(
+                        res.index,
+                        int(res.index * 1000.0 / fps_for_ts),
+                    )
+
+                self._feed_online_matcher(
+                    matcher,
+                    res.pose_landmarks,
+                    timestamp_ms,
+                    res.index,
+                )
+                smoothed = smoother.feed(res.pose_landmarks, timestamp_ms=timestamp_ms)
+                annotated, actions = draw_pose_frame(
+                    res.frame,
+                    smoothed,
+                    res.hands or [],
+                    draw_face=draw_cfg.draw_pose_face,
+                    draw_joint_angles=draw_cfg.draw_joint_angles,
+                    action_pose_landmarks=res.pose_landmarks,
+                )
                 rendered += 1
                 fps = rendered / max(1e-6, (time.monotonic() - t0))
                 cv2.putText(
@@ -2118,8 +2373,8 @@ class App:
 
                 self._rec.write_frame(annotated)
 
-                if res.actions:
-                    actions_text = ", ".join(ACTION_LABELS_ZH.get(a, a) for a in res.actions)
+                if actions:
+                    actions_text = ", ".join(ACTION_LABELS_ZH.get(a, a) for a in actions)
                 else:
                     actions_text = "-"
                 self._post_frame(annotated, actions_text)
@@ -2127,7 +2382,6 @@ class App:
             self._stop_evt.set()
             engine.close()
             t_reader.join(timeout=2.0)
-            cap.release()
             cv2.destroyAllWindows()
 
             err = engine.take_error()
@@ -2139,25 +2393,51 @@ class App:
             self._post_done()
         finally:
             engine.close()
-            self._rec.close_session()
+            if cap is not None:
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+            if t_reader is not None and t_reader.is_alive():
+                t_reader.join(timeout=2.0)
+            if matcher is not None:
+                matcher.close()
+            self._transcode_async(self._rec.close_session())
 
     def _post_frame(self, frame_bgr: np.ndarray, actions: str) -> None:
+        # 点1：cvtColor(BGR→RGB) + aspect-fit resize 移到 worker 线程，GUI 主线程 _tick
+        # 只剩 ImageTk.PhotoImage+configure。cvtColor/resize 均返回新数组，不 mutate
+        # 传入的 frame_bgr（调用方 post 前已用它 write_frame，需要保持原 BGR 不变）。
+        rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        pw, ph = self._preview_wh
+        if pw > 1 and ph > 1:
+            ih, iw = rgb.shape[:2]
+            scale = min(pw / iw, ph / ih)
+            nw, nh = max(1, int(iw * scale)), max(1, int(ih * scale))
+            rgb = cv2.resize(rgb, (nw, nh), interpolation=cv2.INTER_LINEAR)
         # Keep only the latest frame.
         while True:
             try:
                 self._queue.get_nowait()
             except Empty:
                 break
-        self._queue.put((frame_bgr, actions))
+        self._queue.put((rgb, actions))
 
     def _post_frame2(self, frame_bgr: np.ndarray, actions: str) -> None:
         # 第二路预览队列（双摄像头双面视图，issue #58），与 _post_frame 同构。
+        rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        pw, ph = self._preview_wh2
+        if pw > 1 and ph > 1:
+            ih, iw = rgb.shape[:2]
+            scale = min(pw / iw, ph / ih)
+            nw, nh = max(1, int(iw * scale)), max(1, int(ih * scale))
+            rgb = cv2.resize(rgb, (nw, nh), interpolation=cv2.INTER_LINEAR)
         while True:
             try:
                 self._queue2.get_nowait()
             except Empty:
                 break
-        self._queue2.put((frame_bgr, actions))
+        self._queue2.put((rgb, actions))
 
     def _post_status(self, text: str) -> None:
         # Tkinter updates must happen on the main thread.
@@ -2193,45 +2473,29 @@ class App:
         self._refresh_recording_status()
 
         try:
-            frame_bgr, actions = self._queue.get_nowait()
+            frame_rgb, actions = self._queue.get_nowait()
         except Empty:
-            self.root.after(30, self._tick)
+            self.root.after(16, self._tick)
             return
 
         self.actions_var.set(actions)
 
-        rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        img = Image.fromarray(rgb)
-
-        # Fit-to-window preview (keep aspect ratio).
-        pw = max(1, self.preview.winfo_width())
-        ph = max(1, self.preview.winfo_height())
-        iw, ih = img.size
-        scale = min(pw / iw, ph / ih)
-        nw, nh = max(1, int(iw * scale)), max(1, int(ih * scale))
-        img = img.resize((nw, nh), Image.BILINEAR)
-
+        # 点1：cvtColor/resize 已在 worker 线程 _post_frame 完成，这里只剩 PhotoImage+configure。
+        img = Image.fromarray(frame_rgb)
         self._photo = ImageTk.PhotoImage(img)
         self.preview.configure(image=self._photo)
 
         # 第二路预览（双摄像头双面视图，issue #58）：单摄模式下 _queue2 恒空，本段恒跳过。
         try:
-            frame_bgr2, _actions2 = self._queue2.get_nowait()
+            frame_rgb2, _actions2 = self._queue2.get_nowait()
         except Empty:
-            frame_bgr2 = None
-        if frame_bgr2 is not None:
-            rgb2 = cv2.cvtColor(frame_bgr2, cv2.COLOR_BGR2RGB)
-            img2 = Image.fromarray(rgb2)
-            pw2 = max(1, self.preview2.winfo_width())
-            ph2 = max(1, self.preview2.winfo_height())
-            iw2, ih2 = img2.size
-            scale2 = min(pw2 / iw2, ph2 / ih2)
-            nw2, nh2 = max(1, int(iw2 * scale2)), max(1, int(ih2 * scale2))
-            img2 = img2.resize((nw2, nh2), Image.BILINEAR)
+            frame_rgb2 = None
+        if frame_rgb2 is not None:
+            img2 = Image.fromarray(frame_rgb2)
             self._photo2 = ImageTk.PhotoImage(img2)
             self.preview2.configure(image=self._photo2)
 
-        self.root.after(30, self._tick)
+        self.root.after(16, self._tick)
 
 
 def main() -> None:
