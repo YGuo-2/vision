@@ -25,6 +25,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -60,3 +61,35 @@ def outputs_dir() -> Path:
     d = repo_root() / "outputs"
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def _prefs_path() -> Path:
+    return repo_root() / "user_prefs.json"
+
+
+def load_record_dir() -> Path:
+    """读取用户上次选择的录制保存目录；无记录或无效时回退 ``outputs_dir()``。"""
+    try:
+        data = json.loads(_prefs_path().read_text(encoding="utf-8"))
+        saved = str(data.get("record_dir") or "")
+        if saved and Path(saved).is_dir():
+            return Path(saved)
+    except (OSError, ValueError):
+        pass
+    return outputs_dir()
+
+
+def save_record_dir(directory: Path | str) -> None:
+    """持久化录制保存目录到 ``user_prefs.json``（尽力而为，失败静默）。"""
+    path = _prefs_path()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            data = {}
+    except (OSError, ValueError):
+        data = {}
+    data["record_dir"] = str(directory)
+    try:
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError:
+        pass

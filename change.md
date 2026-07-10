@@ -1,3 +1,22 @@
+## 2026-07-10: [feat] Tkinter 录制保存目录持久化
+
+### 问题描述
+
+Tkinter「录制」分组的保存目录每次启动都回到默认 `outputs_dir()`，用户上次选择的目录不会被记住。
+
+### 修改内容
+
+- `core/paths.py`：新增 `load_record_dir()` / `save_record_dir()`，持久化到仓库根 `user_prefs.json`（单一 key `record_dir`）。读取时校验目录仍存在，缺失或坏 JSON 均回退 `outputs_dir()`；写入尽力而为，失败静默。仅用标准库 `json`，无新依赖、无配置框架。
+- `apps/app_ui.py`：`record_dir_var` / `_record_base_dir` 初始值改为 `load_record_dir()`；`_choose_record_dir` 选目录后 `save_record_dir(d)`；`_on_record_toggle` 在 idle→recording 开录生效那一刻 `save_record_dir(next_base_dir)`（覆盖用户手打路径的情况）。
+
+### 验证方法
+
+- `py_compile apps/app_ui.py core/paths.py` 通过。
+- paths 读写往返自测（临时 repo_root）：保存后读回一致、无效目录回退、坏 JSON 回退，全通过。
+- `pytest tests/test_app_ui_lifecycle.py -q`：37 passed。
+
+---
+
 ## 2026-07-10: [feat] 黑盒检测统一 heavy+pose33_v3 + 未勾选骨架时预览跳过推理
 
 ### 问题描述

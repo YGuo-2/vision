@@ -42,6 +42,7 @@ frontend/dist/
 frontend/*.log
 frontend/src-tauri/resources/vision-ui-backend/
 frontend/src-tauri/target/
+user_prefs.json
 标准样本/
 学员样本/
 标准动作要点/

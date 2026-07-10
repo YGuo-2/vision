@@ -18,7 +18,7 @@ from PIL import Image, ImageTk
 from core.action_compare import compare_video_to_template, create_template_from_video
 from analysis.tech_eval import evaluate_video_assets, evaluate_video_detail, export_debug_video, to_jsonable
 from core.vision_pipeline import MediaPipePipeline, PipelineConfig, draw_pose_frame
-from core.paths import models_dir, outputs_dir
+from core.paths import load_record_dir, models_dir, outputs_dir, save_record_dir
 from core import model_manager, online_matcher, paths, video_writer
 from core import pose_features as pf
 from core.parallel_pose_engine import ParallelPoseEngine, default_pipeline_factory
@@ -1182,11 +1182,13 @@ class App:
         self.workers_var = IntVar(value=default_workers())
         self.enable_hands_var = BooleanVar(value=True)
         self.record_skeleton_var = BooleanVar(value=False)
-        # 录制视频保存目录（默认 outputs_dir()）。录制文件名仍由控制器按时间戳生成。
-        self.record_dir_var = StringVar(value=str(outputs_dir()))
+        # 录制视频保存目录（默认上次持久化的目录，无记录时回退 outputs_dir()）。
+        # 录制文件名仍由控制器按时间戳生成。
+        _initial_record_dir = load_record_dir()
+        self.record_dir_var = StringVar(value=str(_initial_record_dir))
         # worker 的 path_provider 不得读取 Tk StringVar；主线程在初始化、选目录和开录时
         # 把值缓存为普通 Path，避免录制锁与 Tk 主线程形成互等。
-        self._record_base_dir = outputs_dir()
+        self._record_base_dir = _initial_record_dir
         self.status_var = StringVar(value="就绪")
         self.actions_var = StringVar(value="-")
         self.match_var = StringVar(value="识别：待机")
@@ -1735,6 +1737,7 @@ class App:
         )
         if d:
             self.record_dir_var.set(d)
+            save_record_dir(d)
 
     def _on_record_toggle(self) -> None:
         """Record_Toggle 点击回调：请求录制状态机切换，并据返回状态刷新按钮文本。
@@ -1777,6 +1780,8 @@ class App:
                 if prev_state == "idle":
                     # 保存根目录与时间戳都是片段级不可变数据；暂停/继续不重新发布。
                     self._record_base_dir = Path(next_base_dir)
+                    # 手打路径也在开录生效这一刻持久化，下次启动回到同一目录。
+                    save_record_dir(next_base_dir)
                     self._record_stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
                     if dual_active:
                         new_dual_segment_id = f"record_{self._record_stamp}"
