@@ -34,11 +34,14 @@ from core.vision_pipeline import MediaPipePipeline, PipelineConfig
 
 
 class _AnnotatePipeline(Protocol):
-    """引擎只依赖 ``annotate`` 与 ``close``，便于测试注入假管线。"""
+    """引擎依赖 ``annotate``/``close``；``defer_draw`` 模式下额外依赖 ``infer``。"""
 
     def annotate(
         self, frame_bgr: np.ndarray, *, timestamp_ms: int | None = None
     ) -> tuple[np.ndarray, list[str]]:
+        ...
+
+    def infer(self, frame_bgr: np.ndarray, *, timestamp_ms: int | None = None):
         ...
 
     def close(self) -> None:
@@ -50,16 +53,22 @@ class InferResult:
     """单帧推理结果（按帧序号 ``index`` 重排后交付）。"""
 
     index: int
-    annotated: np.ndarray
+    annotated: np.ndarray | None
     actions: list[str]
     delegate: dict[str, object] | None = None
+    # defer_draw=True 时携带 raw landmarks + 原始帧，供消费端在重排出口单线程 smooth+draw；
+    # 此时 ``annotated`` 为 None、``actions`` 为空（动作分类在 draw 阶段做）。
+    pose_landmarks: object | None = None
+    hands: object | None = None
+    frame: np.ndarray | None = None
 
 
 PipelineFactory = Callable[[], _AnnotatePipeline]
 
 
 def default_pipeline_factory(
-    *, models_dir: Path, pose_variant: str, enable_hands: bool, delegate: str = "cpu"
+    *, models_dir: Path, pose_variant: str, enable_hands: bool, delegate: str = "cpu",
+    draw_joint_angles: bool = False,
 ) -> PipelineFactory:
     """返回一个创建 IMAGE 模式 ``MediaPipePipeline`` 的工厂。
 
@@ -75,6 +84,7 @@ def default_pipeline_factory(
                 running_mode="image",
                 enable_hands=enable_hands,
                 delegate=delegate,
+                draw_joint_angles=draw_joint_angles,
             ),
         )
 
@@ -110,10 +120,12 @@ class ParallelPoseEngine:
         drop_when_full: bool = False,
         queue_factor: int = 2,
         max_reorder_lag: int | None = None,
+        defer_draw: bool = False,
     ) -> None:
         self._factory = pipeline_factory
         self._workers = max(1, int(workers))
         self._drop_when_full = bool(drop_when_full)
+        self._defer_draw = bool(defer_draw)
         maxsize = max(1, self._workers * max(1, int(queue_factor)))
         # 输入队列：(idx, frame)；None 作为关闭哨兵。
         self._frame_q: "Queue[tuple[int, np.ndarray] | None]" = Queue(maxsize=maxsize)
@@ -275,13 +287,25 @@ class ParallelPoseEngine:
                 if item is None:
                     break
                 idx, frame = item
-                annotated, actions = pipe.annotate(frame, timestamp_ms=None)
-                result = InferResult(
-                    index=idx,
-                    annotated=annotated,
-                    actions=list(actions),
-                    delegate=delegate_payload,
-                )
+                if self._defer_draw:
+                    pose_landmarks, hands = pipe.infer(frame, timestamp_ms=None)
+                    result = InferResult(
+                        index=idx,
+                        annotated=None,
+                        actions=[],
+                        delegate=delegate_payload,
+                        pose_landmarks=pose_landmarks,
+                        hands=hands,
+                        frame=frame,
+                    )
+                else:
+                    annotated, actions = pipe.annotate(frame, timestamp_ms=None)
+                    result = InferResult(
+                        index=idx,
+                        annotated=annotated,
+                        actions=list(actions),
+                        delegate=delegate_payload,
+                    )
                 # 可中断的有界 put：raw_q 满时不永久阻塞，响应 stop。
                 while not self._stop_evt.is_set():
                     try:

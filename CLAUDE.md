@@ -7,6 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 武术散打动作识别与评分系统。基于 MediaPipe 的实时姿态/手势识别，使用 DTW（动态时间规整）做动作模板匹配，支持双模板（正面+侧面）对比评分与规则引擎扣分。
 
 两套桌面前端并存：
+
 - **Tkinter GUI**（`apps/app_ui.py`，迁移期保留的旧入口）
 - **Vue + Vite + Tauri 桌面前端**（`frontend/`，Windows-only），通过 `apps/ui_backend.py` 的 JSON bridge 调用既有 Python 后端
 
@@ -14,47 +15,61 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 > 与 `AGENTS.md` 配合阅读：`AGENTS.md` 含项目结构、网络代理约定（端口 `7890`）、Desktop Bridge Contracts 和 YOLO 迁移硬约束的**权威版本**。本文件聚焦 Claude Code 的日常工作指引，详尽清单以 `AGENTS.md` 为准。
 
+## 默认工作范围
+
+**除非用户明确说要在 Web UI / Vue+Tauri 前端上修改，所有改动默认只动 Python 后端部分**（`apps/`、`core/`、`analysis/`、`batch/`、`tests/`）。不要主动改 `frontend/`（Vue/Vite/Tauri/TS/Rust）。
+
 ## Common Commands
 
 ### Installation
+
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 npm --prefix frontend install
 ```
+
 > 联网下载（pip 包、模型 `.task`/`.pt`、GitHub/HuggingFace）需走本地代理 `http://127.0.0.1:7890`（详见 `AGENTS.md`）。
 
 ### Run Tkinter Desktop UI (旧入口)
+
 ```powershell
 .\.venv\Scripts\python.exe apps/app_ui.py
 ```
 
 ### Run Vue + Tauri Desktop UI (Windows, 开发模式)
+
 ```powershell
 npm run dev:desktop              # 一键：自动补 Cargo PATH + tauri dev
 ```
+
 等价的手动命令（如需）：
+
 ```powershell
 $env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"
 npm --prefix frontend run tauri dev
 ```
 
 ### Run CLI (camera)
+
 ```powershell
 .\.venv\Scripts\python.exe apps/main.py --source 0
 ```
 
 ### Offline video with multi-threading
+
 ```powershell
 .\.venv\Scripts\python.exe apps/main.py --source input.mp4 --pose heavy --out out.mp4 --no-show --workers 4
 ```
 
 ### Create / match pose template
+
 ```powershell
 .\.venv\Scripts\python.exe apps/make_template.py --video action.mp4 --pose heavy --preview
 .\.venv\Scripts\python.exe apps/match_template.py --template template.npz --video test.mp4 --preview
 ```
 
 ### Batch dual-template comparison
+
 ```powershell
 .\.venv\Scripts\python.exe batch/batch_dual_compare.py --standard_dir "标准样本" --student_dir "学员样本" --pose full --out_dir "输出目录" --rules --action both
 ```
@@ -64,10 +79,13 @@ npm --prefix frontend run tauri dev
 本仓库已有 pytest 契约/回归套件（`tests/`），不再是「无测试」状态。按改动范围选择验证门。
 
 ### Python 测试
+
 ```powershell
 .\.venv\Scripts\python.exe -m pytest tests -q
 ```
+
 关键回归（MediaPipe 安全网 + YOLO 路由/授权契约）：
+
 ```powershell
 .\.venv\Scripts\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q
 .\.venv\Scripts\python.exe -m pytest tests/test_backend_routing_contract.py tests/test_yolo_backend_contract.py tests/test_yolo_landmark_mapping.py tests/test_tech_eval_contract.py tests/test_rule_availability.py -q
@@ -75,11 +93,13 @@ npm --prefix frontend run tauri dev
 ```
 
 ### 桌面栈一键验证（前端 build + behavior smoke + Tauri cargo check + py_compile + 桌面回归）
+
 ```powershell
 npm run verify:desktop
 ```
 
 ### 单独验证项
+
 ```powershell
 npm run verify:frontend        # 前端 build (vue-tsc + vite build)
 npm --prefix frontend run test # 前端 behavior smoke (frontend/scripts/frontend-smoke.mjs)
@@ -88,12 +108,14 @@ npm run build:sidecar          # 构建 Python bridge sidecar (PyInstaller)
 ```
 
 ### Windows 打包（先构建 sidecar，再生成 NSIS 安装包）
+
 ```powershell
 npm run package:windows
 # 产物：frontend/src-tauri/target/release/bundle/nsis/
 ```
 
 ### Syntax check (轻量)
+
 ```powershell
 .\.venv\Scripts\python.exe -m py_compile .\apps\main.py .\apps\app_ui.py .\apps\ui_backend.py .\core\vision_pipeline.py .\core\backend_router.py .\core\yolo_adapter.py
 ```
@@ -131,7 +153,7 @@ npm run package:windows
   - `calibrate_body_core.py`：`body_core_v1` S3 标定（baseline/conf sweep/多人闸门），产出带授权元数据的 CSV/JSONL/NPZ
   - `bench_annotate_fps.py`：MediaPipe/YOLO 端到端 FPS 与 GPU delegate / FP16 / imgsz benchmark
   - `offline_matching_profile.py`：离线 DTW / 序列提取 profile（先 profile 后优化）
-  - `spike_yolo_baseline.py` / `selfcheck_tech_eval.py` / `analyze_*.py`：实验 spike 与自检
+  - `spike_yolo_baseline.py`：YOLO 实验 spike；tech_eval 自检已迁入 `tests/test_selfcheck_tech_eval.py`
 - **batch/**: 离线批处理 CLI
   - `backend_options.py`：共享 `backend_router` 的 CLI 适配层（`--backend` / `--feature-layout` 校验与 meta 透传）
   - `batch_dual_compare.py` / `batch_export_skeleton.py` / `batch_tech_eval.py`：默认 MediaPipe `pose33_v3`；显式 `body_core_v1` 时走 YOLO 调试闭环，输出与对外评分列分离、多人标「需人工复核」。`batch_dual_compare.py --paired` 仅在默认 `pose33_v3` 路径中按学员正/侧文件名配对并调用 `compare_dual_streams`
@@ -211,12 +233,13 @@ Landmarks 11-32（排除脸部）→ 以髋部中心平移 → 按躯干长度�
 - 模块边界清晰：UI 逻辑留在 `apps/app_ui.py` / `frontend/`，bridge 适配在 `apps/ui_backend.py`，推理与评分留在 `core/` / `analysis/`。**不要把视觉算法搬进 Rust 或 TypeScript**
 - 后端路由只走 `core/backend_router.py`，不要在 CLI/UI/batch 入口层复制分叉判断
 - 前端不存大图 base64/blob URL 历史；实时预览用 Rust-owned latest-frame 通道 + 帧身份单调不回退 guard
+- **视频导出默认 H.264**：本机 OpenCV 构建不含 H.264 编码器，`open_video_writer` 会回退成 MJPG/XVID AVI。导出/离线出片后统一用系统 `ffmpeg` 转 H.264 MP4（`-c:v libx264 -preset medium -crf 20 -pix_fmt yuv420p`），转码完成删掉临时 AVI。不要把回退 AVI 当最终产物交付
 - MediaPipe 模型首次运行自动下载到 `models/`（gitignored）；YOLO 权重需手动安装到 `models/`
 - 不提交大产物（models/videos）与生成产物（`dist/`、`build/`、`frontend/dist/`、`frontend/src-tauri/target/`、`frontend/src-tauri/resources/*.exe`）
 - Conventional Commits：`feat:`、`fix:`、`refactor:`、`docs:`、`test:`、`chore:`
 
 ## 任务完成规范
 
-- **每次完成任务后，必须将修改总结写入当前 `change.md` 文件（最新记录置顶）。`change.md` 累积过长时，用 `git mv` 将其按时间段归档为 `change（<起>~<止月>）.md` 并重建空 `change.md`，把「归档与重建」本身作为新 `change.md` 的首条记录，并同步更新本规则的归档清单。历史归档：`change（start~2026.5）.md`、`change（2026.5~2026.6）.md`**
+- **每次完成任务后，必须将修改总结写入当前 `change.md` 文件（最新记录置顶）。`change.md` 累积过长时，用 `git mv` 将其按时间段归档为 `change（<起>~<止月>）.md` 并重建空 `change.md`，把「归档与重建」本身作为新 `change.md` 的首条记录，并同步更新本规则的归档清单。历史归档：`change（start~2026.5）.md`、`change（2026.5~2026.6）.md`、`change（2026.6~2026.7）.md`**
 - 记录内容应包括：修改日期、问题描述、修改内容、验证方法
 - 如果只改文档，也要记录文档同步依据和至少一次轻量验证

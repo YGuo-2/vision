@@ -1,10 +1,29 @@
+# -*- coding: utf-8 -*-
+"""tech_eval 指标自检回归（原 analysis/selfcheck_tech_eval.py 脚本迁入）。
+
+为什么需要它
+------------
+重心/收拳速度/腕角/发力等单指标函数在合成姿态上的合格/不合格判定要稳定，且 reason
+文案不得夹带数字（评分理由用定性词）。原先以 ``analysis/selfcheck_tech_eval.py`` 脚本
+形式手动运行，现收编进 pytest 套件自动把关。
+
+确定性
+------
+全部基于内置合成 ``(T,33,4)`` 姿态，不依赖 MediaPipe 推理。
+"""
+
 from __future__ import annotations
 
-import re
+import sys
+from pathlib import Path
 
 import numpy as np
 
-from analysis.tech_eval import (
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from analysis.tech_eval import (  # noqa: E402
     L_ANKLE,
     L_ELBOW,
     L_FOOT_INDEX,
@@ -29,6 +48,8 @@ from analysis.tech_eval import (
     eval_wrist_angle,
 )
 
+FPS = 30.0
+
 
 def _empty_frame() -> np.ndarray:
     lm = np.zeros((33, 4), dtype=np.float32)
@@ -42,8 +63,7 @@ def _set_xy(lm: np.ndarray, idx: int, x: float, y: float) -> None:
 
 
 def _assert_no_digits(s: str) -> None:
-    if any(ch.isdigit() for ch in s):
-        raise AssertionError(f"reason contains digits: {s!r}")
+    assert not any(ch.isdigit() for ch in s), f"reason contains digits: {s!r}"
 
 
 def _make_side_pose_frame(*, back_knee_straight: bool, front_knee_straight: bool, center_by_knee: bool) -> np.ndarray:
@@ -138,51 +158,59 @@ def _make_retract_sequence(*, fps: float, slow: bool) -> np.ndarray:
     return seq
 
 
-def main() -> None:
-    fps = 30.0
-
+def test_cog_side_forward_fails():
     side_forward = np.stack([_make_side_pose_frame(back_knee_straight=True, front_knee_straight=False, center_by_knee=False) for _ in range(25)], axis=0)
-    r = eval_cog_side(side_forward, fps=fps)
+    r = eval_cog_side(side_forward, fps=FPS)
     assert r.status == "不合格" and "偏前" in r.reason
+    assert side_forward.shape == (25, 33, 4)
 
+
+def test_cog_side_backward_fails():
     side_backward = np.stack([_make_side_pose_frame(back_knee_straight=False, front_knee_straight=True, center_by_knee=False) for _ in range(25)], axis=0)
-    r = eval_cog_side(side_backward, fps=fps)
+    r = eval_cog_side(side_backward, fps=FPS)
     assert r.status == "不合格" and "偏后" in r.reason
+    assert side_backward.shape == (25, 33, 4)
 
+
+def test_cog_side_center_passes():
     side_center = np.stack([_make_side_pose_frame(back_knee_straight=False, front_knee_straight=False, center_by_knee=True) for _ in range(25)], axis=0)
-    r = eval_cog_side(side_center, fps=fps)
+    r = eval_cog_side(side_center, fps=FPS)
     assert r.status == "合格" and "居中" in r.reason
+    assert side_center.shape == (25, 33, 4)
 
+
+def test_cog_front_forward_fails():
     front_forward = np.stack([_make_front_pose_frame(knee_straight=False, ankle_acute=True) for _ in range(25)], axis=0)
-    r = eval_cog_front(front_forward, fps=fps, stance="left")
+    r = eval_cog_front(front_forward, fps=FPS, stance="left")
     assert r.status == "不合格" and "偏前" in r.reason
+    assert front_forward.shape == (25, 33, 4)
 
-    retract_fast = eval_retract_speed_side(_make_retract_sequence(fps=fps, slow=False), fps=fps, min_punches=1)
+
+def test_retract_speed_fast_passes():
+    retract_fast = eval_retract_speed_side(_make_retract_sequence(fps=FPS, slow=False), fps=FPS, min_punches=1)
     assert retract_fast.status == "合格"
     _assert_no_digits(retract_fast.reason)
 
-    retract_slow = eval_retract_speed_side(_make_retract_sequence(fps=fps, slow=True), fps=fps, min_punches=1)
+
+def test_retract_speed_slow_fails():
+    retract_slow = eval_retract_speed_side(_make_retract_sequence(fps=FPS, slow=True), fps=FPS, min_punches=1)
     assert retract_slow.status == "不合格"
     _assert_no_digits(retract_slow.reason)
 
-    retract_insufficient = eval_retract_speed_side(_make_retract_sequence(fps=fps, slow=True), fps=fps, min_punches=4)
+
+def test_retract_speed_insufficient_undetermined():
+    retract_insufficient = eval_retract_speed_side(_make_retract_sequence(fps=FPS, slow=True), fps=FPS, min_punches=4)
     assert retract_insufficient.status == "无法判定"
     _assert_no_digits(retract_insufficient.reason)
 
-    wrist = eval_wrist_angle(_make_retract_sequence(fps=fps, slow=False), fps=fps, min_events=1)
+
+def test_wrist_angle_status_and_reason():
+    wrist = eval_wrist_angle(_make_retract_sequence(fps=FPS, slow=False), fps=FPS, min_events=1)
     assert wrist.status in ("合格", "不合格", "无法判定")
     _assert_no_digits(wrist.reason)
 
-    force = eval_force_sequence(np.zeros((0, 33, 4), dtype=np.float32), _make_retract_sequence(fps=fps, slow=False), fps=fps, stance="left")
+
+def test_force_sequence_status_and_reason():
+    force = eval_force_sequence(np.zeros((0, 33, 4), dtype=np.float32), _make_retract_sequence(fps=FPS, slow=False), fps=FPS, stance="left")
     assert force.status in ("合格", "不合格", "无法判定")
     _assert_no_digits(force.reason)
-
-    for s in (side_forward, side_backward, side_center, front_forward):
-        assert s.shape == (25, 33, 4)
-
-    print("selfcheck_tech_eval: OK")
-
-
-if __name__ == "__main__":
-    main()
-
