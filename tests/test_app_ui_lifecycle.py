@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
 from queue import Queue
 from types import SimpleNamespace
@@ -1194,6 +1195,12 @@ def _dual_submission_app(tmp_path: Path, *, write_frames: bool = True):
 
     processor = _Processor()
     app = SimpleNamespace(
+        _closing=False,
+        _stop_evt=None,
+        _exam_manual_locked=False,
+        _exam_pending_row=None,
+        _exam_discard_next=False,
+        _exam_run_id=None,
         _rec=rec,
         _rec2=rec2,
         _record_pair_lock=threading.Lock(),
@@ -1201,6 +1208,7 @@ def _dual_submission_app(tmp_path: Path, *, write_frames: bool = True):
         _pending_record_errors=[],
         _dual_active=True,
         _dual_record_skeleton=False,
+        _dual_auto_compare=True,
         _record_stamp=stamp,
         _record_base_dir=tmp_path,
         _record_postprocessor=processor,
@@ -1211,6 +1219,12 @@ def _dual_submission_app(tmp_path: Path, *, write_frames: bool = True):
         ),
         _sync_record_stop_enabled=lambda _state: None,
         record_btn=_Widget(),
+    )
+    # SimpleNamespace 需显式绑定 unbound 方法，供 _on_record_stop 调用
+    app._end_recording_segment = (
+        lambda discard=False, exam_row=None: app_ui.App._end_recording_segment(
+            app, discard=discard, exam_row=exam_row
+        )
     )
     return app, processor, segment_dir
 
@@ -1229,13 +1243,163 @@ def test_dual_record_stop_submits_exactly_once_and_allows_next_segment(tmp_path)
     assert job.side_source == segment_dir / "side.mp4"
     assert job.front_frames == job.side_frames == 1
     assert job.record_skeleton is False
+    assert job.auto_compare is True
 
     app_ui.App._close_recording_pair(app)
     assert len(processor.jobs) == 1
     assert app._dual_active is False
 
 
+def test_dual_record_stop_submits_auto_compare_disabled_when_only_recording(tmp_path):
+    app, processor, segment_dir = _dual_submission_app(tmp_path)
+    app._dual_auto_compare = False
+
+    app_ui.App._on_record_stop(app)
+
+    assert len(processor.jobs) == 1
+    job = processor.jobs[0]
+    assert job.segment_id == segment_dir.name
+    assert job.auto_compare is False
+
+
+def test_begin_recording_segment_rolls_back_when_side_not_idle(tmp_path, monkeypatch):
+    """主路 idle、侧路仍 recording 时不得只 toggle 主路导致分叉。"""
+    stamp_dir = tmp_path / "20260709" / "record_x"
+    stamp_dir.mkdir(parents=True)
+
+    class _Writer:
+        def write(self, frame) -> None:
+            pass
+
+        def release(self) -> None:
+            pass
+
+    rec = RecordingController(
+        writer_factory=lambda path, _fps, _size: (_Writer(), Path(path), "fake"),
+        path_provider=lambda: stamp_dir / "front.mp4",
+    )
+    rec2 = RecordingController(
+        writer_factory=lambda path, _fps, _size: (_Writer(), Path(path), "fake"),
+        path_provider=lambda: stamp_dir / "side.mp4",
+    )
+    rec.begin_session(fps=30.0, size=(4, 3))
+    rec2.begin_session(fps=30.0, size=(4, 3))
+    # 仅侧路进入 recording（模拟主路写失败复位 idle、侧路仍 recording）
+    rec2.request_toggle()
+    assert rec.state == "idle"
+    assert rec2.state == "recording"
+
+    app = SimpleNamespace(
+        _closing=False,
+        _stop_evt=None,
+        _dual_recording_ready=True,
+        _dual_active=True,
+        _rec=rec,
+        _rec2=rec2,
+        _record_pair_lock=threading.Lock(),
+        _record_base_dir=tmp_path,
+        record_dir_var=_Var(str(tmp_path)),
+        _exam_pending_row=None,
+        _exam_discard_next=False,
+        record_btn=_Widget(),
+        _sync_record_stop_enabled=lambda _s: None,
+    )
+    monkeypatch.setattr(app_ui, "save_record_dir", lambda _p: None)
+
+    ok = app_ui.App._begin_recording_segment(app)
+    # stop_recording 会把侧路拉回 idle；两边都 idle 后应能成功开录
+    # 若无法对齐则返回 False。此处 stop 可对齐，期望成功且两侧 recording
+    assert ok is True
+    assert rec.state == "recording"
+    assert rec2.state == "recording"
+
+
+def test_exam_preflight_rejects_skeleton_session():
+    app = SimpleNamespace(
+        _dual_active=True,
+        _dual_recording_ready=True,
+        _dual_record_skeleton=True,
+        record_skeleton_var=_Var(True),
+    )
+    ok, msg = app_ui.App._exam_preflight(app)
+    assert ok is False
+    assert "骨架" in msg
+
+
+def test_app_close_registers_open_panel_scorebook_for_flush_close(tmp_path):
+    """主窗关闭时，仍打开的考试面板成绩簿必须进入 sinks 并被 flush/close。"""
+    from apps.exam_panel import ExamPanel
+    from core.exam_roster import ExamCandidate, ExamScorebook
+
+    flushes: list[str] = []
+    closes: list[str] = []
+
+    class _Book(ExamScorebook):
+        def flush(self, *, timeout: float = 5.0) -> None:  # type: ignore[override]
+            flushes.append("flush")
+            # 不写盘，避免 openpyxl 依赖路径干扰
+            return
+
+        def close(self) -> None:  # type: ignore[override]
+            closes.append("close")
+            return
+
+    book = _Book(path=tmp_path / "scores.xlsx")
+    book.load_candidates([ExamCandidate(1, "S1", "甲")])
+    book.update_row(book.rows[0], status="processing")
+
+    app = SimpleNamespace(
+        _exam_scorebook_sinks=[],
+        _exam_panel="sentinel",
+    )
+    app._register_exam_scorebook_sink = (
+        lambda sb: app_ui.App._register_exam_scorebook_sink(app, sb)
+    )
+    app._exam_arm_occupancy = lambda *_a, **_k: None
+    app._exam_set_active = lambda *_a, **_k: None
+    app._exam_lock_manual_record = lambda *_a, **_k: None
+
+    announcer_closed: list[str] = []
+
+    panel = SimpleNamespace(
+        app=app,
+        scorebook=book,
+        session=SimpleNamespace(phase="completed"),
+        _tick_id="x",
+        win=SimpleNamespace(
+            after_cancel=lambda _i: None,
+            destroy=lambda: None,
+        ),
+        phase_var=_Var(""),
+        status_var=_Var(""),
+        on_session_stop=lambda: None,
+        _announcer=SimpleNamespace(close=lambda: announcer_closed.append("close")),
+    )
+
+    ExamPanel.prepare_for_app_close(panel)  # type: ignore[arg-type]
+
+    assert flushes == ["flush"]
+    assert announcer_closed == ["close"], "主窗关闭路径必须停 exam-announcer"
+    assert panel.scorebook is None
+    assert book in app._exam_scorebook_sinks
+    assert not hasattr(app, "_exam_panel") or getattr(app, "_exam_panel", None) is None
+
+    # 模拟主窗末段：drain 后 flush/close sinks
+    for sink in list(app._exam_scorebook_sinks):
+        sink.flush()
+        sink.close()
+    app._exam_scorebook_sinks = []
+    assert closes == ["close"]
+    assert flushes == ["flush", "flush"]
+
+
 def test_compare_update_ignores_old_segment_and_formats_latest_score():
+    exam_updates: list = []
+
+    class _ExamPanel:
+        def on_postprocess_update(self, update):
+            exam_updates.append(update.segment_id)
+
     app = SimpleNamespace(
         _closing=False,
         _latest_compare_segment_id="record_new",
@@ -1245,6 +1409,7 @@ def test_compare_update_ignores_old_segment_and_formats_latest_score():
         compare_status_var=_Var("自动比对：排队中"),
         compare_score_var=_Var("unchanged"),
         compare_error_var=_Var(""),
+        _exam_panel=_ExamPanel(),
     )
 
     old = app_ui.PostprocessUpdate(
@@ -1258,7 +1423,9 @@ def test_compare_update_ignores_old_segment_and_formats_latest_score():
     app_ui.App._post_recording_compare_update(app, old)
     assert app.root.after_calls == []
     app_ui.App._drain_recording_compare_updates(app)
+    # 主界面比对条只跟最新片段；考试面板仍须收到旧片段终态
     assert app.compare_score_var.get() == "unchanged"
+    assert exam_updates == ["record_old"]
 
     latest = app_ui.PostprocessUpdate(
         segment_id="record_new",
@@ -1275,6 +1442,7 @@ def test_compare_update_ignores_old_segment_and_formats_latest_score():
     assert app.compare_status_var.get() == "自动比对：已完成"
     assert app.compare_score_var.get() == "正面：82.3%　侧面：89.1%　综合：86%"
     assert app.compare_error_var.get() == ""
+    assert exam_updates == ["record_old", "record_new"]
 
     app._closing = True
     app_ui.App._post_recording_compare_update(app, latest)
@@ -1605,6 +1773,7 @@ def test_close_poll_window_disables_recording_controls_and_rejects_toggle():
         for name in (
             "record_btn",
             "record_stop_btn",
+            "auto_compare_check",
             "record_skeleton_check",
             "record_dir_entry",
             "record_dir_btn",

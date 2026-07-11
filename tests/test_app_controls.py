@@ -251,6 +251,7 @@ def _make_controls_stub(worker_alive: bool = False):
         rotate_combo_2=FakeWidget(state="readonly"),
         model_combo=FakeWidget(state="readonly"),
         record_skeleton_check=FakeWidget(state="normal"),
+        auto_compare_check=FakeWidget(state="normal"),
         record_btn=FakeWidget(state="disabled", text=RECORD_BTN_TEXT["idle"]),
         compare_btn=FakeWidget(state="normal"),
         start_btn=FakeWidget(state="normal", text="开始"),
@@ -281,6 +282,7 @@ def test_set_running_controls_when_running():
     # Model_Selector 禁用（需求 3.5）。
     assert stub.model_combo.cget("state") == "disabled"
     assert stub.record_skeleton_check.cget("state") == "disabled"
+    assert stub.auto_compare_check.cget("state") == "disabled"
     # Record_Toggle 启用并置「开始录制」（需求 5.2）。
     assert stub.record_btn.cget("state") == "normal"
     assert stub.record_btn.cget("text") == RECORD_BTN_TEXT["idle"] == "开始录制"
@@ -337,6 +339,7 @@ def test_set_running_controls_when_not_running():
     # Model_Selector 恢复 readonly（需求 3.6）。
     assert stub.model_combo.cget("state") == "readonly"
     assert stub.record_skeleton_check.cget("state") == "normal"
+    assert stub.auto_compare_check.cget("state") == "normal"
     # Camera_Selector 恢复 readonly（有可选列表时）。
     assert stub.camera_combo.cget("state") == "readonly"
     assert stub.camera_combo_2.cget("state") == "readonly"

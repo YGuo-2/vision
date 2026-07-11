@@ -1,3 +1,209 @@
+## 2026-07-11: [fix] 考试系统审查第五轮（关窗停播报 / 纯#零值）
+
+### 问题描述
+
+主窗 `prepare_for_app_close` 未 `_announcer.close()`，语音线程可能残留；纯 `#` 格式下数值 0 被导入为 `"0"`，与 Excel 空显示不符。
+
+### 修改内容
+
+1. `prepare_for_app_close` 与普通关面板一致调用 `_announcer.close()`。
+2. 无必选 `0` 位时数值 0 显示为空串，导入按 `empty_student_id` 拒绝（`#0` 仍为 `"0"`）。
+
+### 验证方法
+
+- `pytest tests/test_exam_roster.py tests/test_exam_session.py tests/test_app_ui_lifecycle.py::test_app_close_registers_open_panel_scorebook_for_flush_close -q` → **27 passed**。
+
+---
+
+## 2026-07-11: [fix] 考试系统审查第四轮（主窗关面板台账 / # 占位符）
+
+### 问题描述
+
+主窗 `root.destroy` 不触发考试面板 `_on_close`，当前 `panel.scorebook` 未进 sinks 导致不 flush/close；Excel `#` 被当成 `0` 强制补零，超宽时丢掉字面量前缀。
+
+### 修改内容
+
+1. **`ExamPanel.prepare_for_app_close`**：中止考试、flush 台账、登记 `_exam_scorebook_sinks`；主窗 `_on_close` 优先调用它，并把 sinks（含刚移交面板）计入关窗额外预算。
+2. **学号格式**：`0` 必选补零、`#` 可选不补零（`###000`+123→`123`）；超出占位宽度时保留字面量（`"ID-"000`+12345→`ID-12345`）。
+
+### 验证方法
+
+- `pytest tests/test_exam_*.py tests/test_presence_gate.py tests/test_app_ui_lifecycle.py tests/test_recording_controller.py -q` → **104 passed**。
+
+---
+
+## 2026-07-11: [fix] 考试系统审查第三轮（begin 不 advance / discard 关窗 / multi-sink）
+
+### 问题描述
+
+PR 复核：开录失败仍自动跳过；关主窗 `_closing` 导致 discard 被跳过并正常评分；重开面板覆盖 sink 丢延迟成绩；3s 关窗预算截断裁剪；自定义学号格式静默裸数字；Scorebook close 后 writer 永久重试。
+
+### 修改内容
+
+1. **begin_failed**：不 advance，回 `wait_enter`+ARM，可重试/skip（符合设计 §6.6）。
+2. **关窗顺序**：先 `on_session_stop`/discard，再 `_closing=True`；`_end_recording_segment(discard=True)` 在 closing 时仍执行。
+3. **multi-sink**：`_exam_scorebook_sinks` 列表登记，新面板未匹配时继续投递旧 sink。
+4. **关窗预算**：有考试裁剪/sink 时 deadline 额外 +30s/+8s；prepare 内 join clip 28s。
+5. **学号格式**：支持 `000\-000`、`"ID-"000000`；无法解析的自定义格式整表拒绝。
+6. **Scorebook.close**：有限次终刷后清 dirty 并退出 writer，文件锁定不永久重试。
+
+### 验证方法
+
+- `pytest tests/test_exam_*.py tests/test_presence_gate.py tests/test_app_ui_lifecycle.py tests/test_recording_controller.py -q` → **102 passed**。
+
+---
+
+## 2026-07-11: [fix] 考试系统审查第二轮 P1/P2（begin_failed / 暂停中止 / sink / 主停）
+
+### 问题描述
+
+PR #72 复核 head 后仍有：开录失败被 UPDATE recording 盖回、暂停后中止不停 writer、关面板丢后台成绩、主窗口停止不同步考试、裁剪线程未纳入关窗、裁剪帧假元数据、失败补考双计分、学号 `000-000` 格式。
+
+### 修改内容
+
+1. **begin_failed**：`enter_stable` 不再附带 `UPDATE_ROW(recording)`；成功开录后由面板写 recording；`update_row` 拒绝终态被弱状态覆盖。
+2. **abort**：`paused_from==recording` / finishing 也发 `DISCARD_SEGMENT` 并标记 skipped；abort 后不再走 `record_stopped`。
+3. **关面板 sink**：有 `processing` 行时把 Scorebook 交给 `App._exam_scorebook_sink`，后台比对继续回填；应用关闭时 flush/close。
+4. **主窗口停止**：`_stop` / `_on_close` 调用 `ExamPanel.on_session_stop()` 中止考试。
+5. **裁剪线程**：登记 `_exam_clip_threads`，关窗先 join 再 cancel postprocessor；关窗期考试更新仍入队。
+6. **clip 帧一致**：写出帧数不等时 re-trim 文件，禁止假元数据。
+7. **计分行**：有成功分时补考默认不计分；失败后重算仅成功行计分。
+8. **学号格式**：支持 `000-000` 等 0/# + 分隔符掩码。
+
+### 验证方法
+
+- `pytest tests/test_exam_*.py tests/test_presence_gate.py tests/test_app_ui_lifecycle.py tests/test_recording_controller.py -q` → **99 passed**。
+
+---
+
+## 2026-07-11: [fix] 考试系统审查 P1/P2 缺陷修复（成绩不丢 / 关窗 / 裁剪 / 开考闸）
+
+### 问题描述
+
+PR 审查发现 7 个 P1 + 2 个 P2：旧片段成绩被丢、Scorebook 旧快照覆盖、重考清空整场、主线程整段重编码 OOM、骨架会话能开考却检测不到人、关面板不停录、双路状态分叉、学号丢补零、ROI 校验失败仍开考。
+
+### 修改内容
+
+1. **旧片段成绩回填**：`_drain_recording_compare_updates` 主界面比对条仍只跟最新片段，但考试面板按 `segment_id` 始终接收所有更新。
+2. **Scorebook 写盘竞态**：`_write_lock` + `generation`/`written_generation`，旧快照不得覆盖更新代；flush/close 走 `_persist_latest(force=True)`。
+3. **重考不重开整场**：已有 Scorebook 时 `_start_exam` 不再 `load_candidates`；`start_exam` 从首个 `pending` 叫号，不强制 pointer=0。
+4. **裁剪内存/线程**：`prepare_exam_pair` 改为流式扫帧/写出（峰值 O(1 帧)）；考试派发在后台线程裁剪后再 submit，不堵 Tk。
+5. **骨架会话 preflight 拒绝**；关考试面板先 `abort_exam`（录制中 discard）。
+6. **双路 begin/toggle**：分叉/错误先 finalize 旧片段；双路须同态 recording，失败回滚 idle。
+7. **学号按 number_format 显示文本**（如 123+`000000`→`000123`）；ROI 保存失败则中止开考。
+
+### 验证方法
+
+- `pytest tests/test_exam_roster.py tests/test_exam_session.py tests/test_exam_clip.py tests/test_presence_gate.py tests/test_app_ui_lifecycle.py tests/test_recording_controller.py -q` → **94 passed**。
+
+---
+
+## 2026-07-11: [test] 考试流程无摄像头模拟 + 成绩 flush 加固
+
+### 问题描述
+
+需要验证考试状态机/占用闸门/名单/裁剪链路是否流畅；模拟中发现 `ExamScorebook.flush` 仅靠后台线程时可能漏落盘。
+
+### 修改内容
+
+- 新增 `scripts/sim_exam_flow.py`：3 人闭环、skip/force/重考、10 人压力、裁剪、Excel、闸门防误触共 6 场景。
+- `ExamScorebook.flush` 改为调用线程同步写盘兜底；临时 xlsx 用 ASCII 名。
+
+### 验证方法
+
+- `.\.venv\Scripts\python.exe scripts\sim_exam_flow.py` → **57 passed, SIMULATION_OK**（模拟钟约 34s/3 人、31s/10 人；墙钟 <2ms 量级，无摄像头/无 DTW）。
+
+---
+
+## 2026-07-11: [feat] 考试系统 v1 初版实现（按设计 v0.2）
+
+### 问题描述
+
+现场需要「导入名单 → 叫号 → ROI 到场 → 自动双路录制 → 空场 2s 结束 → 后台比对 → 写 Excel 成绩」闭环；设计见 `docs/exam_system_design.md` v0.2。
+
+### 修改内容
+
+- **核心**：`core/exam_roster.py`（openpyxl 导入/导出/台账/补考/异步写盘）、`core/presence_gate.py`、`core/exam_session.py`（状态机）、`core/exam_clip.py`（派发前帧截齐+动作裁剪）、`core/exam_announcer.py`（异步 TTS）。
+- **UI**：`apps/exam_panel.py`；`apps/app_ui.py` 增加「考试模式…」、`_begin/_end_recording_segment` 原语、occupancy 第三条路径（lite、阶段性、裸帧录制）、考试派发元数据与裁剪。
+- **后处理**：`DualRecordingJob` / `result.json` 可选 exam 字段；非考试帧数硬校验不变。
+- **依赖**：`requirements.txt` 增加 `openpyxl`。
+- 参数采用设计默认值（0.8s 进场 / 2s 空场 / 防串场等），实测后再调。
+
+### 验证方法
+
+- `pytest tests/test_exam_roster.py tests/test_presence_gate.py tests/test_exam_session.py tests/test_exam_clip.py -q` → **22 passed**。
+- `py_compile` 相关模块通过；exam 元数据 smoke 通过。
+- 现场待验：双摄 + heavy 正/侧模板 + 考试面板跑 2～10 人；`templates/` 须事先备好模板。
+
+---
+
+## 2026-07-11: [docs] 考试系统设计 v0.2（吸收审查 A/B/C/D）
+
+### 问题描述
+
+v0.1 设计在占用路径、帧数硬失败、走位污染 DTW、toggle 三态、S2 不可测、补考/防串场/合规等方面会被返工；审查给出 A（阻塞）/ B（产品）/ C（工程）/ D（v2）清单。
+
+### 修改内容
+
+- 升级 `docs/exam_system_design.md` → **v0.2**，主要落入：
+  - **A1** occupancy 第三条路径（lite、阶段性、裸帧录制、非考试零推理不变）
+  - **A2** 考试派发前 `min` 帧截齐，不改现网 postprocess 硬校验
+  - **A3** 派发前 motion/首尾裁剪防走位污染
+  - **A4** ROI = primary + 旋转后坐标
+  - **A5** `_begin/_end_recording_segment` 原语
+  - **A6** S2 量化门闩
+  - **B1–B6** 分数 0..1、补考最后成功、防串场参数、force/skip、转换表、合规 §14
+  - **C1–C5** 写盘占用/线程、Excel 学号与合并格、错归风险、模板须预置
+  - **D** → §18 已知局限
+- 仍无业务代码与依赖变更。
+
+### 验证方法
+
+- 通读 `docs/exam_system_design.md` 目录与 §6.6 / §8.6 / §10.2–10.3 是否覆盖清单条目。
+- 无需 pytest。
+
+---
+
+## 2026-07-11: [docs] 考试系统设计文档（供审查）
+
+### 问题描述
+
+需要现场「叫号 → ROI 到场 → 自动录制 → 空场 2s 结束 → 后台比对 → 写 Excel 成绩」的考试流程。实现前先沉淀可独立审查的设计，避免直接改代码方向跑偏。
+
+### 修改内容
+
+- 新增 `docs/exam_system_design.md`（v0.1）：产品决策、非目标、复用边界、状态机、Excel 导入/导出契约、Presence 闸门参数、播报、与双摄后处理集成、模块清单、风险、验收与实现分期。
+- 已确认决策写入文档：Tkinter、双摄、全局 heavy 模板、固定 ROI + 姿态、空场 2s。
+- **本轮无业务代码、无依赖变更、无 UI 改动**；实现以审查结论为准。
+
+### 验证方法
+
+- 确认文件存在：`docs/exam_system_design.md`。
+- 文档可独立阅读（含 mermaid 流程、表头契约、成功标准）；无需 pytest。
+
+---
+
+## 2026-07-10: [feat] 双摄录制/录制+检测一条龙开关
+
+### 问题描述
+
+Tkinter 双摄结束录制后默认总是进入「录制 + 黑盒检测」一条龙（后台转码 + heavy DTW 比对）。部分场景只想落盘录像、不触发检测，此前没有独立开关。
+
+### 修改内容
+
+- 录制分组新增勾选框「录制后自动比对（检测一条龙）」，默认开启，兼容现有一条龙行为；会话运行中与骨架开关一并锁定。
+- `UiState.auto_compare` / `_dual_auto_compare` 在双摄会话启动时捕获；片段终结后经 `_RecordingPairFinalization` 写入 `DualRecordingJob.auto_compare`。
+- `DualRecordingPostProcessor`：`auto_compare=False` 时仍顺序转码并校验录像，随后以 `skipped` / `auto_compare_disabled` 终态落 `result.json`，不读模板、不装 heavy 模型、不跑比对。骨架开启时仍优先 `annotated_recording` 跳过。
+- 开录状态文案：开启比对显示「自动比对：录制中」，关闭显示「仅录制：录制中」。
+- 回归：控件启停、collect_state 单/双摄、submit 透传、postprocess 仅录制跳过。
+
+### 验证方法
+
+- `.\.venv\Scripts\python.exe -m pytest tests/test_recording_postprocess.py tests/test_app_controls.py tests/test_app_ui_dual_camera.py tests/test_app_ui_lifecycle.py -q`：`186 passed`。
+- 实机待验：双摄勾选/取消「录制后自动比对」各录一段，确认开启出分、关闭仅转码跳过比对。
+
+---
+
 ## 2026-07-10: [perf/test] Tkinter 双摄快速首屏、裸帧过渡与 MediaPipe 门控复测
 
 ### 问题描述
