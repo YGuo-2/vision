@@ -110,8 +110,34 @@ def _cell_text(value: Any) -> str:
     return str(value).strip()
 
 
-def _student_id_from_cell(value: Any, *, row_no: int) -> str:
-    """强制按文本语义读取学号；无法安全表示则报错。"""
+def _display_text_from_number_format(value: int | float, number_format: str | None) -> str | None:
+    """尽量按 Excel 显示文本还原学号（例如 123 + 000000 → 000123）。
+
+    只处理常见整数补零格式；复杂自定义格式返回 None，由调用方回退。
+    """
+    import re
+
+    fmt = (number_format or "").strip()
+    if not fmt or fmt in {"General", "0", "@", "0.00"}:
+        return None
+    # 纯补零：000000 / 0000 等
+    if re.fullmatch(r"0+", fmt):
+        n = int(value)
+        if n < 0:
+            return None
+        return f"{n:0{len(fmt)}d}"
+    # 形如 000000;@ 或 0000;-0000 取第一段
+    first = fmt.split(";")[0].strip()
+    if re.fullmatch(r"0+", first):
+        n = int(value)
+        if n < 0:
+            return None
+        return f"{n:0{len(first)}d}"
+    return None
+
+
+def _student_id_from_cell(value: Any, *, row_no: int, number_format: str | None = None) -> str:
+    """强制按文本语义读取学号；数值单元格优先用 number_format 显示文本。"""
     if value is None:
         raise RosterError("empty_student_id", f"第 {row_no} 行学号为空")
     if isinstance(value, str):
@@ -119,8 +145,14 @@ def _student_id_from_cell(value: Any, *, row_no: int) -> str:
         if not text:
             raise RosterError("empty_student_id", f"第 {row_no} 行学号为空")
         return text
-    if isinstance(value, int) and not isinstance(value, bool):
-        return str(value)
+    if isinstance(value, bool):
+        raise RosterError(
+            "student_id_not_text",
+            f"第 {row_no} 行学号类型无效：{value!r}",
+        )
+    if isinstance(value, int):
+        display = _display_text_from_number_format(value, number_format)
+        return display if display is not None else str(value)
     if isinstance(value, float):
         # 允许整数值 float（Excel 有时如此），但拒绝非整数 / 过大科学计数
         if not value.is_integer():
@@ -133,7 +165,9 @@ def _student_id_from_cell(value: Any, *, row_no: int) -> str:
                 "student_id_not_text",
                 f"第 {row_no} 行学号过大，请将该列设为文本格式后重试",
             )
-        return str(int(value))
+        ival = int(value)
+        display = _display_text_from_number_format(ival, number_format)
+        return display if display is not None else str(ival)
     text = _cell_text(value)
     if not text:
         raise RosterError("empty_student_id", f"第 {row_no} 行学号为空")
@@ -152,7 +186,8 @@ def import_roster_xlsx(path: Path | str) -> list[ExamCandidate]:
         raise RosterError("file_missing", f"名单文件不存在：{path}")
 
     try:
-        wb = load_workbook(path, read_only=False, data_only=True)
+        # data_only=False：保留 number_format，便于学号按「显示文本」读取（如 000123）
+        wb = load_workbook(path, read_only=False, data_only=False)
     except Exception as exc:
         raise RosterError("file_unreadable", f"无法读取 Excel：{exc}") from exc
 
@@ -164,13 +199,13 @@ def import_roster_xlsx(path: Path | str) -> list[ExamCandidate]:
                 "导入表存在合并单元格，请拆分后再导入",
             )
 
-        rows_iter = ws.iter_rows(values_only=True)
+        rows_iter = ws.iter_rows()
         try:
-            header_row = next(rows_iter)
+            header_cells = next(rows_iter)
         except StopIteration as exc:
             raise RosterError("empty_sheet", "Excel 为空") from exc
 
-        headers = [_cell_text(h) for h in header_row]
+        headers = [_cell_text(c.value) for c in header_cells]
         # 去掉尾部空表头
         while headers and not headers[-1]:
             headers.pop()
@@ -181,15 +216,13 @@ def import_roster_xlsx(path: Path | str) -> list[ExamCandidate]:
 
         candidates: list[ExamCandidate] = []
         seen_orders: set[int] = set()
-        for excel_row_no, raw in enumerate(rows_iter, start=2):
-            if raw is None:
-                continue
-            values = list(raw)
-            # 补齐列
-            while len(values) < len(headers):
-                values.append(None)
+        for excel_row_no, row_cells in enumerate(rows_iter, start=2):
+            cells = list(row_cells)
+            while len(cells) < len(headers):
+                cells.append(None)  # type: ignore[arg-type]
+            values = [c.value if c is not None else None for c in cells[: len(headers)]]
             # 全空行跳过
-            if all(v is None or _cell_text(v) == "" for v in values[: len(headers)]):
+            if all(v is None or _cell_text(v) == "" for v in values):
                 continue
 
             order_raw = values[index["序号"]]
@@ -208,7 +241,13 @@ def import_roster_xlsx(path: Path | str) -> list[ExamCandidate]:
                 raise RosterError("duplicate_order", f"序号重复：{order}")
             seen_orders.add(order)
 
-            student_id = _student_id_from_cell(values[index["学号"]], row_no=excel_row_no)
+            sid_cell = cells[index["学号"]]
+            sid_fmt = getattr(sid_cell, "number_format", None) if sid_cell is not None else None
+            student_id = _student_id_from_cell(
+                values[index["学号"]],
+                row_no=excel_row_no,
+                number_format=sid_fmt,
+            )
             name = _cell_text(values[index["姓名"]])
             if not name:
                 raise RosterError("empty_name", f"第 {excel_row_no} 行姓名为空")
@@ -357,9 +396,13 @@ class ExamScorebook:
         self._write_fn = write_fn or write_scorebook_xlsx
         self._throttle_s = float(throttle_s)
         self._lock = threading.RLock()
+        # 串行化落盘，配合 generation 防止旧快照覆盖新快照
+        self._write_lock = threading.Lock()
         self._rows: list[ExamResultRow] = []
         self._by_segment: dict[str, ExamResultRow] = {}
         self._dirty = False
+        self._generation = 0
+        self._written_generation = 0
         self._last_write = 0.0
         self._write_error: str | None = None
         self._closed = False
@@ -440,13 +483,6 @@ class ExamScorebook:
         completed = [
             r
             for r in self._rows
-            if r.candidate.student_id == student_id and r.status in {"completed", "superseded"}
-            and r.combined_percent is not None
-        ]
-        # 也包含刚完成但仍是 completed 的
-        completed = [
-            r
-            for r in self._rows
             if r.candidate.student_id == student_id
             and (
                 r.status == "completed"
@@ -489,7 +525,7 @@ class ExamScorebook:
             return out
 
     def flush(self, *, timeout: float = 5.0) -> None:
-        """请求立即写盘并等待；超时则在调用线程同步落盘一次（保证可导出）。"""
+        """请求立即写盘并等待；同步落盘且不让旧快照覆盖更新代。"""
         with self._lock:
             self._dirty = True
             self._last_write = 0.0
@@ -497,28 +533,7 @@ class ExamScorebook:
         self._wake.set()
         if path is None:
             return
-        # 始终在调用线程同步落盘，避免仅依赖后台线程时的竞态漏写
-        with self._lock:
-            rows_snapshot = list(self._rows)
-            path = self.path
-            if path is None:
-                return
-        try:
-            self._write_fn(path, rows_snapshot)
-            with self._lock:
-                self._dirty = False
-                self._write_error = None
-                self._last_write = time.monotonic()
-        except PermissionError as exc:
-            with self._lock:
-                self._write_error = (
-                    f"scorebook_locked: 成绩文件被占用，请关闭 Excel 后重试（{exc}）"
-                )
-                self._dirty = True
-        except OSError as exc:
-            with self._lock:
-                self._write_error = f"scorebook_write_failed: {exc}"
-                self._dirty = True
+        self._persist_latest(force=True)
         _ = timeout  # API 兼容
 
     def close(self) -> None:
@@ -526,15 +541,59 @@ class ExamScorebook:
             self._closed = True
             self._dirty = True
         self._wake.set()
+        # 终刷一次，确保 close 前最新行已落盘
+        if self.path is not None:
+            self._persist_latest(force=True)
         worker = self._worker
         if worker is not None and worker.is_alive():
             worker.join(timeout=3.0)
 
     def _mark_dirty_unlocked(self, *, force: bool = False) -> None:
         self._dirty = True
+        self._generation += 1
         if force:
             self._last_write = 0.0
         self._wake.set()
+
+    def _persist_latest(self, *, force: bool = False) -> None:
+        """在写锁内取最新快照写盘；仅当 generation 未前进时清 dirty。"""
+        with self._write_lock:
+            with self._lock:
+                if self.path is None:
+                    return
+                if not self._dirty and self._generation == self._written_generation:
+                    return
+                if (
+                    not force
+                    and not self._closed
+                    and (time.monotonic() - self._last_write) < self._throttle_s
+                    and self._dirty
+                ):
+                    # 节流：后台循环会再试；force/flush/close 跳过
+                    return
+                rows_snapshot = list(self._rows)
+                path = self.path
+                gen = self._generation
+            try:
+                self._write_fn(path, rows_snapshot)
+                with self._lock:
+                    if gen >= self._written_generation:
+                        self._written_generation = gen
+                    # 写盘期间若又有更新，保留 dirty 让后续再刷
+                    if gen == self._generation:
+                        self._dirty = False
+                    self._write_error = None
+                    self._last_write = time.monotonic()
+            except PermissionError as exc:
+                with self._lock:
+                    self._write_error = (
+                        f"scorebook_locked: 成绩文件被占用，请关闭 Excel 后重试（{exc}）"
+                    )
+                    self._dirty = True
+            except OSError as exc:
+                with self._lock:
+                    self._write_error = f"scorebook_write_failed: {exc}"
+                    self._dirty = True
 
     def _writer_loop(self) -> None:
         while True:
@@ -543,32 +602,22 @@ class ExamScorebook:
             with self._lock:
                 if self._closed and not self._dirty:
                     return
-                if not self._dirty or self.path is None:
+                if self.path is None:
+                    if self._closed:
+                        return
+                    continue
+                if not self._dirty and self._generation == self._written_generation:
                     if self._closed:
                         return
                     continue
                 now = time.monotonic()
-                if (now - self._last_write) < self._throttle_s and not self._closed:
-                    # 节流：稍后
+                if (
+                    (now - self._last_write) < self._throttle_s
+                    and not self._closed
+                    and self._dirty
+                ):
                     continue
-                rows_snapshot = list(self._rows)
-                path = self.path
-                self._dirty = False
-                self._last_write = now
-            try:
-                self._write_fn(path, rows_snapshot)
-                with self._lock:
-                    self._write_error = None
-            except PermissionError as exc:
-                with self._lock:
-                    self._write_error = f"scorebook_locked: 成绩文件被占用，请关闭 Excel 后重试（{exc}）"
-                    self._dirty = True
-            except OSError as exc:
-                with self._lock:
-                    self._write_error = f"scorebook_write_failed: {exc}"
-                    self._dirty = True
-            if self._closed:
-                # 再尝试一次终刷
-                with self._lock:
-                    if not self._dirty:
-                        return
+            self._persist_latest(force=self._closed)
+            with self._lock:
+                if self._closed and not self._dirty:
+                    return

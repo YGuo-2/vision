@@ -210,21 +210,30 @@ class ExamPanel:
         except RosterError as exc:
             messagebox.showerror("导入失败", exc.message, parent=self.win)
             return
+        # 新名单 = 新场次：关闭旧台账，避免与旧成绩混用
+        if self.scorebook is not None:
+            try:
+                self.scorebook.flush()
+                self.scorebook.close()
+            except Exception:
+                pass
+            self.scorebook = None
+            self.run_dir = None
         self.session.load_roster(cands)
         self._row_by_id = {r.row_id: r for r in self.session.rows}
         self._refresh_tree()
         self.phase_var.set(f"阶段：{self.session.phase}")
         self.status_var.set(f"已导入 {len(cands)} 人")
 
-    def _save_roi(self) -> None:
+    def _save_roi(self) -> bool:
         try:
             r = tuple(float(v.get()) for v in self.roi_vars)
         except Exception:
             messagebox.showerror("ROI", "ROI 数值无效", parent=self.win)
-            return
+            return False
         if not (0.0 <= r[0] < r[2] <= 1.0 and 0.0 <= r[1] < r[3] <= 1.0):
             messagebox.showerror("ROI", "须满足 0≤x0<x1≤1 且 0≤y0<y1≤1", parent=self.win)
-            return
+            return False
         self.roi = r  # type: ignore[assignment]
         rotate = 0
         try:
@@ -240,6 +249,7 @@ class ExamPanel:
         self.roi_var.set(self._roi_text())
         self.app._exam_set_roi(self.roi)  # type: ignore[attr-defined]
         self.status_var.set("ROI 已保存")
+        return True
 
     def _start_exam(self) -> None:
         ok, msg = self.app._exam_preflight()  # type: ignore[attr-defined]
@@ -249,23 +259,29 @@ class ExamPanel:
         if self.session.phase != "ready":
             messagebox.showerror("无法开考", f"当前阶段 {self.session.phase}，请先导入名单", parent=self.win)
             return
-        self._save_roi()
-        run_id = time.strftime("%Y%m%d_%H%M%S")
-        base = Path(getattr(self.app, "_record_base_dir", outputs_dir()))
-        try:
-            base = Path(self.app.record_dir_var.get().strip() or str(outputs_dir()))
-        except Exception:
-            base = outputs_dir()
-        self.run_dir = base / f"exam_{run_id}"
-        self.run_dir.mkdir(parents=True, exist_ok=True)
-        score_path = self.run_dir / "成绩汇总.xlsx"
-        if self.scorebook is not None:
-            self.scorebook.close()
-        self.scorebook = ExamScorebook(path=score_path)
-        self.scorebook.load_candidates([r.candidate for r in self.session.rows])
-        # 同步 row 对象到 scorebook
-        self.session.rows = self.scorebook.rows
-        self._row_by_id = {r.row_id: r for r in self.session.rows}
+        if not self._save_roi():
+            return
+        # 已有台账（例如整场完成后追加重考）时复用，禁止 load_candidates 清空成绩
+        if self.scorebook is None:
+            run_id = time.strftime("%Y%m%d_%H%M%S")
+            base = Path(getattr(self.app, "_record_base_dir", outputs_dir()))
+            try:
+                base = Path(self.app.record_dir_var.get().strip() or str(outputs_dir()))
+            except Exception:
+                base = outputs_dir()
+            self.run_dir = base / f"exam_{run_id}"
+            self.run_dir.mkdir(parents=True, exist_ok=True)
+            score_path = self.run_dir / "成绩汇总.xlsx"
+            self.scorebook = ExamScorebook(path=score_path)
+            self.scorebook.load_candidates([r.candidate for r in self.session.rows])
+            # 同步 row 对象到 scorebook
+            self.session.rows = self.scorebook.rows
+            self._row_by_id = {r.row_id: r for r in self.session.rows}
+        else:
+            run_id = self.session.run_id or time.strftime("%Y%m%d_%H%M%S")
+            # 保持 session 与 scorebook 同一批 row 对象
+            self.session.rows = self.scorebook.rows
+            self._row_by_id = {r.row_id: r for r in self.session.rows}
         self.app._exam_set_active(True, run_id=run_id, run_dir=self.run_dir)  # type: ignore[attr-defined]
         self._dispatch(self.session.handle("start_exam", now=time.monotonic(), run_id=run_id))
         self._refresh_tree()
@@ -494,6 +510,22 @@ class ExamPanel:
             self.win.after_cancel(self._tick_id)
         except Exception:
             pass
+        # 关窗必须先中止：录制中则 discard，避免后台继续写/比对却无回填目标
+        try:
+            if self.session.phase not in {"idle", "ready", "completed", "aborted"}:
+                self._dispatch(
+                    self.session.handle("abort_exam", now=time.monotonic())
+                )
+        except Exception:
+            traceback.print_exc()
+            # 兜底：尽量停录
+            try:
+                if self.session.phase == "recording" or getattr(
+                    self.app, "_rec", None
+                ) is not None:
+                    self.app._end_recording_segment(discard=True)  # type: ignore[attr-defined]
+            except Exception:
+                pass
         self.app._exam_arm_occupancy(False)  # type: ignore[attr-defined]
         self.app._exam_set_active(False)  # type: ignore[attr-defined]
         self.app._exam_lock_manual_record(False)  # type: ignore[attr-defined]
@@ -501,6 +533,7 @@ class ExamPanel:
         if self.scorebook is not None:
             self.scorebook.flush()
             self.scorebook.close()
+            self.scorebook = None
         try:
             delattr(self.app, "_exam_panel")
         except Exception:

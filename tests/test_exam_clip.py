@@ -75,3 +75,4 @@ def test_prepare_exam_pair_aligns_and_writes(tmp_path: Path) -> None:
     assert result.front_path.is_file()
     assert result.side_path.is_file()
     assert any("frame_align" in w for w in result.warnings)
+    assert result.meta.get("streamed") is True

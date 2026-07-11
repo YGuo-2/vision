@@ -1867,17 +1867,15 @@ class App:
         if not bool(getattr(self, "_dual_recording_ready", True)):
             return
 
-        with self._record_pair_lock:
-            prev_state = self._rec.state
-        if prev_state == "idle":
-            self._begin_recording_segment()
-            return
-
-        # 暂停 / 继续：仍用 toggle（考试路径禁止走这里）
         finalize_failed_pair = False
         with self._record_pair_lock:
             dual_active = bool(getattr(self, "_dual_active", False))
-            if dual_active:
+            prev_state = self._rec.state
+            # 必须在「主路 idle → 开新录」之前检测分叉/错误：主路写失败回 idle、
+            # 侧路仍 recording 时若直接 begin，会换 stamp 并把未 finalize 的旧片段弄丢。
+            if dual_active and hasattr(self._rec, "snapshot") and hasattr(
+                self._rec2, "snapshot"
+            ):
                 snap = self._rec.snapshot()
                 snap2 = self._rec2.snapshot()
                 finalize_failed_pair = bool(
@@ -1885,13 +1883,41 @@ class App:
                     or snap2.last_error
                     or snap.state != snap2.state
                 )
-            if finalize_failed_pair:
-                new_state: RecordingState = "idle"
-            else:
-                new_state = self._rec.request_toggle()
-                self._rec2.request_toggle()
+
         if finalize_failed_pair:
             App._finalize_and_dispatch_recording_pair(self, close_session=False)
+            new_state: RecordingState = "idle"
+            record_btn = getattr(self, "record_btn", None)
+            if record_btn is not None:
+                record_btn.configure(text=RECORD_BTN_TEXT[new_state])
+            sync_record_stop = getattr(self, "_sync_record_stop_enabled", None)
+            if sync_record_stop is not None:
+                sync_record_stop(new_state)
+            return
+
+        if prev_state == "idle":
+            App._begin_recording_segment(self)
+            return
+
+        # 暂停 / 继续：仍用 toggle（考试路径禁止走这里）
+        with self._record_pair_lock:
+            dual_active = bool(getattr(self, "_dual_active", False))
+            new_state = self._rec.request_toggle()
+            new_state2 = self._rec2.request_toggle()
+            if dual_active and new_state != new_state2:
+                try:
+                    self._rec.stop_recording()
+                except Exception:
+                    pass
+                try:
+                    self._rec2.stop_recording()
+                except Exception:
+                    pass
+                new_state = "idle"
+                finalize_failed_pair = True
+        if finalize_failed_pair:
+            App._finalize_and_dispatch_recording_pair(self, close_session=False)
+            new_state = "idle"
         record_btn = getattr(self, "record_btn", None)
         if record_btn is not None:
             record_btn.configure(text=RECORD_BTN_TEXT[new_state])
@@ -1903,6 +1929,7 @@ class App:
         """从 idle 开录一段（考试与手动共用）。成功返回 True。
 
         前置：双摄 claim 后已 begin_session；本方法只 publish stamp + toggle idle→recording。
+        双路必须同时 idle→recording；任一路失败则两路都复位 idle，避免主/侧状态分叉。
         """
         stop_evt = getattr(self, "_stop_evt", None)
         if getattr(self, "_closing", False) or (
@@ -1920,9 +1947,30 @@ class App:
 
         new_dual_segment_id: str | None = None
         with self._record_pair_lock:
-            if self._rec.state != "idle":
-                return False
             dual_active = bool(getattr(self, "_dual_active", False))
+            main_state = self._rec.state
+            side_state = self._rec2.state
+            # 双摄时两侧都须 idle；分叉时先 stop 对齐
+            if dual_active and (main_state != "idle" or side_state != "idle"):
+                try:
+                    self._rec.stop_recording()
+                except Exception:
+                    pass
+                try:
+                    self._rec2.stop_recording()
+                except Exception:
+                    pass
+                main_state = self._rec.state
+                side_state = self._rec2.state
+                if main_state != "idle" or side_state != "idle":
+                    return False
+            elif (not dual_active) and main_state != "idle":
+                try:
+                    self._rec.stop_recording()
+                except Exception:
+                    pass
+                if self._rec.state != "idle":
+                    return False
             self._record_base_dir = Path(next_base_dir)
             save_record_dir(next_base_dir)
             self._record_stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
@@ -1930,9 +1978,24 @@ class App:
                 new_dual_segment_id = f"record_{self._record_stamp}"
             self._exam_pending_row = exam_row
             self._exam_discard_next = False
+            # 始终双路 toggle（与历史行为一致；单摄时侧路 session 未激活则为 no-op idle）
             new_state = self._rec.request_toggle()
-            self._rec2.request_toggle()
-            if new_state != "recording":
+            new_state2 = self._rec2.request_toggle()
+            if dual_active and (new_state != "recording" or new_state2 != "recording"):
+                # 回滚：避免主 recording / 侧 paused 之类分叉
+                if new_state in {"recording", "paused"}:
+                    try:
+                        self._rec.stop_recording()
+                    except Exception:
+                        pass
+                if new_state2 in {"recording", "paused"}:
+                    try:
+                        self._rec2.stop_recording()
+                    except Exception:
+                        pass
+                self._exam_pending_row = None
+                return False
+            if (not dual_active) and new_state != "recording":
                 self._exam_pending_row = None
                 return False
 
@@ -2000,7 +2063,7 @@ class App:
             stop_evt is not None and stop_evt.is_set()
         ):
             return
-        self._end_recording_segment(discard=False)
+        App._end_recording_segment(self, discard=False)
 
     def _open_exam_panel(self) -> None:
         existing = getattr(self, "_exam_panel", None)
@@ -2078,6 +2141,20 @@ class App:
             return False, "请先选择双摄像头并点击「开始」进入双摄会话。"
         if not bool(getattr(self, "_dual_recording_ready", False)):
             return False, "双摄尚未就绪，请稍候再试。"
+        # 骨架会话 worker 会跳过 occupancy，首位会永久卡在 wait_enter
+        skeleton_on = bool(getattr(self, "_dual_record_skeleton", False))
+        try:
+            skeleton_var = getattr(self, "record_skeleton_var", None)
+            if skeleton_var is not None and bool(skeleton_var.get()):
+                skeleton_on = True
+        except Exception:
+            pass
+        if skeleton_on:
+            return (
+                False,
+                "考试模式不支持「录制骨架」会话（占用检测会被跳过）。"
+                "请取消骨架录制后重新「开始」双摄，再开考。",
+            )
         front_t, side_t = default_template_paths()
         try:
             validate_template_pair(front_t, side_t)
@@ -2245,32 +2322,21 @@ class App:
         side_source = finalization.side_path or (finalization.segment_dir / "side.mp4")
         front_frames = int(finalization.front_frames)
         side_frames = int(finalization.side_frames)
-        exam_warnings: list[str] = []
         exam_row = getattr(self, "_exam_pending_row", None)
         exam_run_id = getattr(self, "_exam_run_id", None)
         auto_compare = bool(finalization.auto_compare)
         if exam_row is not None:
             auto_compare = True
-            # 派发前截齐 + 动作裁剪（不改现网 postprocess 硬校验语义）
-            try:
-                from core.exam_clip import prepare_exam_pair
 
-                clip = prepare_exam_pair(
-                    Path(front_source),
-                    Path(side_source),
-                    front_frames=front_frames,
-                    side_frames=side_frames,
-                    out_dir=Path(finalization.segment_dir),
-                )
-                front_source = clip.front_path
-                side_source = clip.side_path
-                front_frames = clip.front_frames
-                side_frames = clip.side_frames
-                exam_warnings.extend(clip.warnings)
-            except Exception as exc:
-                exam_warnings.append(f"exam_clip_failed: {exc}")
+        previous_latest = getattr(self, "_latest_compare_segment_id", None)
+        # submit() 会同步发布 queued，消费者也可能立即发布终态。先建立 guard，
+        # 避免 worker finally 提交时 Tk tick 把该任务的首批更新当成旧片段丢弃。
+        self._latest_compare_segment_id = segment_id
+        # 防双提交：考试路径可能异步裁剪后再 submit，必须先占位
+        if submitted is not None:
+            submitted.add(segment_id)
 
-        job = DualRecordingJob(
+        job_kwargs = dict(
             segment_id=segment_id,
             segment_dir=finalization.segment_dir,
             front_source=Path(front_source),
@@ -2294,17 +2360,79 @@ class App:
             if exam_row is not None
             else None,
             attempt_index=getattr(exam_row, "attempt_index", None) if exam_row is not None else None,
-            exam_warnings=tuple(exam_warnings),
+            exam_warnings=(),
         )
-        previous_latest = getattr(self, "_latest_compare_segment_id", None)
-        # submit() 会同步发布 queued，消费者也可能立即发布终态。先建立 guard，
-        # 避免 worker finally 提交时 Tk tick 把该任务的首批更新当成旧片段丢弃。
-        self._latest_compare_segment_id = segment_id
-        if processor.submit(job):
+
+        if exam_row is not None:
+            # 裁剪+重编码移出 Tk 主线程，避免冻结 UI / 阻塞下一位叫号
+            def _exam_clip_then_submit(
+                kw: dict = job_kwargs,
+                src_f: Path = Path(front_source),
+                src_s: Path = Path(side_source),
+                ff: int = front_frames,
+                sf: int = side_frames,
+                out_dir: Path = Path(finalization.segment_dir),
+                prev_latest: str | None = previous_latest,
+                seg_id: str = segment_id,
+            ) -> None:
+                warnings: list[str] = []
+                front_p, side_p = src_f, src_s
+                f_frames, s_frames = ff, sf
+                try:
+                    from core.exam_clip import prepare_exam_pair
+
+                    clip = prepare_exam_pair(
+                        src_f,
+                        src_s,
+                        front_frames=ff,
+                        side_frames=sf,
+                        out_dir=out_dir,
+                    )
+                    front_p = clip.front_path
+                    side_p = clip.side_path
+                    f_frames = clip.front_frames
+                    s_frames = clip.side_frames
+                    warnings.extend(clip.warnings)
+                except Exception as exc:
+                    warnings.append(f"exam_clip_failed: {exc}")
+                job = DualRecordingJob(
+                    **{
+                        **kw,
+                        "front_source": Path(front_p),
+                        "side_source": Path(side_p),
+                        "front_frames": int(f_frames),
+                        "side_frames": int(s_frames),
+                        "exam_warnings": tuple(warnings),
+                    }
+                )
+                if not processor.submit(job):
+                    if getattr(self, "_latest_compare_segment_id", None) == seg_id:
+                        self._latest_compare_segment_id = prev_latest
+                    try:
+                        self._post_recording_compare_update(
+                            PostprocessUpdate(
+                                segment_id=seg_id,
+                                status="failed",
+                                message="后处理队列提交失败",
+                                error_code="submit_failed",
+                            )
+                        )
+                    except Exception:
+                        pass
+
+            threading.Thread(
+                target=_exam_clip_then_submit,
+                name=f"exam-clip-{segment_id}",
+                daemon=True,
+            ).start()
+            return
+
+        job = DualRecordingJob(**job_kwargs)
+        if not processor.submit(job):
             if submitted is not None:
-                submitted.add(segment_id)
-        elif getattr(self, "_latest_compare_segment_id", None) == segment_id:
-            self._latest_compare_segment_id = previous_latest
+                submitted.discard(segment_id)
+            if getattr(self, "_latest_compare_segment_id", None) == segment_id:
+                self._latest_compare_segment_id = previous_latest
 
     def _post_recording_compare_update(self, update: PostprocessUpdate) -> None:
         """后处理线程只把不可变状态写入队列，不直接调用任何 Tk API。"""
@@ -2313,7 +2441,11 @@ class App:
         self._compare_update_queue.put(update)
 
     def _drain_recording_compare_updates(self) -> None:
-        """在 Tk 主线程消费后台状态；只让最新已提交片段更新界面。"""
+        """在 Tk 主线程消费后台状态。
+
+        主界面比对条只显示最新片段；考试台账必须按 segment_id 回填每一位，
+        不得因「非最新」而丢弃前面考生的 completed/failed。
+        """
         update_queue = getattr(self, "_compare_update_queue", None)
         if update_queue is None:
             return
@@ -2324,38 +2456,41 @@ class App:
                 return
             if getattr(self, "_closing", False):
                 continue
-            if update.segment_id != getattr(self, "_latest_compare_segment_id", None):
-                continue
-            status_labels = {
-                "queued": "排队中",
-                "transcoding": "正在转码",
-                "validating": "正在校验",
-                "comparing": "正在比对",
-                "completed": "已完成",
-                "failed": "失败",
-                "skipped": "已跳过",
-                "cancelled": "已取消",
-            }
-            self.compare_segment_var.set(f"片段：{update.segment_id}")
-            self.compare_status_var.set(
-                f"自动比对：{status_labels.get(update.status, update.status)}"
+            is_latest = update.segment_id == getattr(
+                self, "_latest_compare_segment_id", None
             )
-            if update.status == "completed":
-                front = float(update.front_score or 0.0) * 100.0
-                side = float(update.side_score or 0.0) * 100.0
-                combined = int(update.combined_percent or 0)
-                self.compare_score_var.set(
-                    f"正面：{front:.1f}%　侧面：{side:.1f}%　综合：{combined}%"
+            if is_latest:
+                status_labels = {
+                    "queued": "排队中",
+                    "transcoding": "正在转码",
+                    "validating": "正在校验",
+                    "comparing": "正在比对",
+                    "completed": "已完成",
+                    "failed": "失败",
+                    "skipped": "已跳过",
+                    "cancelled": "已取消",
+                }
+                self.compare_segment_var.set(f"片段：{update.segment_id}")
+                self.compare_status_var.set(
+                    f"自动比对：{status_labels.get(update.status, update.status)}"
                 )
-                self.compare_error_var.set("")
-            elif update.status in {"failed", "skipped", "cancelled"}:
-                self.compare_score_var.set("正面：-　侧面：-　综合：-")
-                detail = update.message
-                if update.error_code:
-                    detail = f"{update.error_code}：{detail}"
-                self.compare_error_var.set(detail)
-            else:
-                self.compare_error_var.set("")
+                if update.status == "completed":
+                    front = float(update.front_score or 0.0) * 100.0
+                    side = float(update.side_score or 0.0) * 100.0
+                    combined = int(update.combined_percent or 0)
+                    self.compare_score_var.set(
+                        f"正面：{front:.1f}%　侧面：{side:.1f}%　综合：{combined}%"
+                    )
+                    self.compare_error_var.set("")
+                elif update.status in {"failed", "skipped", "cancelled"}:
+                    self.compare_score_var.set("正面：-　侧面：-　综合：-")
+                    detail = update.message
+                    if update.error_code:
+                        detail = f"{update.error_code}：{detail}"
+                    self.compare_error_var.set(detail)
+                else:
+                    self.compare_error_var.set("")
+            # 考试面板：所有片段的终态/过程态都要送达 Scorebook
             panel = getattr(self, "_exam_panel", None)
             if panel is not None:
                 try:

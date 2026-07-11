@@ -1,3 +1,25 @@
+## 2026-07-11: [fix] 考试系统审查 P1/P2 缺陷修复（成绩不丢 / 关窗 / 裁剪 / 开考闸）
+
+### 问题描述
+
+PR 审查发现 7 个 P1 + 2 个 P2：旧片段成绩被丢、Scorebook 旧快照覆盖、重考清空整场、主线程整段重编码 OOM、骨架会话能开考却检测不到人、关面板不停录、双路状态分叉、学号丢补零、ROI 校验失败仍开考。
+
+### 修改内容
+
+1. **旧片段成绩回填**：`_drain_recording_compare_updates` 主界面比对条仍只跟最新片段，但考试面板按 `segment_id` 始终接收所有更新。
+2. **Scorebook 写盘竞态**：`_write_lock` + `generation`/`written_generation`，旧快照不得覆盖更新代；flush/close 走 `_persist_latest(force=True)`。
+3. **重考不重开整场**：已有 Scorebook 时 `_start_exam` 不再 `load_candidates`；`start_exam` 从首个 `pending` 叫号，不强制 pointer=0。
+4. **裁剪内存/线程**：`prepare_exam_pair` 改为流式扫帧/写出（峰值 O(1 帧)）；考试派发在后台线程裁剪后再 submit，不堵 Tk。
+5. **骨架会话 preflight 拒绝**；关考试面板先 `abort_exam`（录制中 discard）。
+6. **双路 begin/toggle**：分叉/错误先 finalize 旧片段；双路须同态 recording，失败回滚 idle。
+7. **学号按 number_format 显示文本**（如 123+`000000`→`000123`）；ROI 保存失败则中止开考。
+
+### 验证方法
+
+- `pytest tests/test_exam_roster.py tests/test_exam_session.py tests/test_exam_clip.py tests/test_presence_gate.py tests/test_app_ui_lifecycle.py tests/test_recording_controller.py -q` → **94 passed**。
+
+---
+
 ## 2026-07-11: [test] 考试流程无摄像头模拟 + 成绩 flush 加固
 
 ### 问题描述

@@ -94,6 +94,36 @@ def test_pause_resume_wait_enter() -> None:
     assert "ARM_OCCUPANCY" in _kinds(cmds)
 
 
+def test_retest_after_complete_does_not_reset_pointer_to_zero() -> None:
+    """整场完成后追加重考再 start，应从 pending 重考行叫号，不回到 0 号。"""
+    s = ExamSession(ExamSessionConfig(inter_student_gap_s=0.0, post_call_guard_s=0.0))
+    s.load_roster(_cands(2))
+    s.handle("start_exam", now=0.0)
+    # 跳过两人至 completed
+    s.handle("tick", now=0.0)
+    s.handle("skip_current", now=1.0)
+    s.handle("tick", now=1.0)
+    s.handle("tick", now=1.0)
+    s.handle("skip_current", now=2.0)
+    assert s.phase == "completed"
+    assert s.rows[0].status == "skipped"
+    assert s.rows[1].status == "skipped"
+
+    # 给第一人追加重考
+    row = s.append_retest_row(s.rows[0].candidate)
+    assert s.phase == "ready"
+    assert row.status == "pending"
+    assert row.attempt_index == 2
+
+    cmds = s.handle("start_exam", now=3.0, run_id="r2")
+    assert s.phase == "calling"
+    assert s.pointer == 2  # 队尾重考行
+    assert s.current is not None
+    assert s.current.attempt_index == 2
+    assert s.rows[0].status == "skipped"  # 历史不丢
+    assert any("名1" in (c.payload.get("text") or "") for c in cmds if c.kind == "ANNOUNCE")
+
+
 def test_complete_exports() -> None:
     s = ExamSession(ExamSessionConfig(inter_student_gap_s=0.0, post_call_guard_s=0.0))
     s.load_roster(_cands(1))

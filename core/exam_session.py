@@ -111,11 +111,27 @@ class ExamSession:
 
     # --- events ---
 
+    def _first_pending_index(self) -> int | None:
+        """下一个可叫号行：优先已有 pointer 上的 pending，否则扫描首个 pending。"""
+        if 0 <= self.pointer < len(self.rows) and self.rows[self.pointer].status == "pending":
+            return self.pointer
+        for i, row in enumerate(self.rows):
+            if row.status == "pending":
+                return i
+        return None
+
     def _on_start_exam(self, *, now: float, run_id: str = "", **_: Any) -> list[ExamCommand]:
         if self.phase != "ready" or not self.rows:
             return []
-        self.run_id = run_id or local_timestamp().replace(":", "")
-        self.pointer = 0
+        start_at = self._first_pending_index()
+        if start_at is None:
+            return []
+        if run_id:
+            self.run_id = run_id
+        elif not self.run_id:
+            self.run_id = local_timestamp().replace(":", "")
+        # 不得无条件 pointer=0：整场结束后追加重考时 pointer 已指向队尾 pending 行
+        self.pointer = start_at
         self.locked = True
         cmds = [ExamCommand("UI_LOCK_MANUAL_RECORD"), *self._start_call(now)]
         return cmds
@@ -133,14 +149,16 @@ class ExamSession:
         self.phase = "calling"
         self.call_guard_deadline = now + self.config.post_call_guard_s
         self.inter_gap_deadline = None
-        row.status = "pending"
+        # 仅刷新叫号时间；已 completed 的行不应被 _start_call 碰到
+        if row.status not in {"completed", "superseded", "skipped"}:
+            row.status = "pending"
         row.called_at = local_timestamp()
         text = f"请{row.candidate.order}号 {row.candidate.name} 上场考试"
         return [
             ExamCommand("DISARM_OCCUPANCY"),
             ExamCommand("ANNOUNCE", {"text": text}),
             ExamCommand("SCHEDULE_CALL_GUARD", {"deadline": self.call_guard_deadline}),
-            ExamCommand("UPDATE_ROW", {"row_id": row.row_id, "status": "pending"}),
+            ExamCommand("UPDATE_ROW", {"row_id": row.row_id, "status": row.status}),
         ]
 
     def _on_call_guard_elapsed(self, **_: Any) -> list[ExamCommand]:

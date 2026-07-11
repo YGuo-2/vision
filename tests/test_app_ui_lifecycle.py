@@ -1194,6 +1194,12 @@ def _dual_submission_app(tmp_path: Path, *, write_frames: bool = True):
 
     processor = _Processor()
     app = SimpleNamespace(
+        _closing=False,
+        _stop_evt=None,
+        _exam_manual_locked=False,
+        _exam_pending_row=None,
+        _exam_discard_next=False,
+        _exam_run_id=None,
         _rec=rec,
         _rec2=rec2,
         _record_pair_lock=threading.Lock(),
@@ -1212,6 +1218,12 @@ def _dual_submission_app(tmp_path: Path, *, write_frames: bool = True):
         ),
         _sync_record_stop_enabled=lambda _state: None,
         record_btn=_Widget(),
+    )
+    # SimpleNamespace 需显式绑定 unbound 方法，供 _on_record_stop 调用
+    app._end_recording_segment = (
+        lambda discard=False, exam_row=None: app_ui.App._end_recording_segment(
+            app, discard=discard, exam_row=exam_row
+        )
     )
     return app, processor, segment_dir
 
@@ -1249,7 +1261,77 @@ def test_dual_record_stop_submits_auto_compare_disabled_when_only_recording(tmp_
     assert job.auto_compare is False
 
 
+def test_begin_recording_segment_rolls_back_when_side_not_idle(tmp_path, monkeypatch):
+    """主路 idle、侧路仍 recording 时不得只 toggle 主路导致分叉。"""
+    stamp_dir = tmp_path / "20260709" / "record_x"
+    stamp_dir.mkdir(parents=True)
+
+    class _Writer:
+        def write(self, frame) -> None:
+            pass
+
+        def release(self) -> None:
+            pass
+
+    rec = RecordingController(
+        writer_factory=lambda path, _fps, _size: (_Writer(), Path(path), "fake"),
+        path_provider=lambda: stamp_dir / "front.mp4",
+    )
+    rec2 = RecordingController(
+        writer_factory=lambda path, _fps, _size: (_Writer(), Path(path), "fake"),
+        path_provider=lambda: stamp_dir / "side.mp4",
+    )
+    rec.begin_session(fps=30.0, size=(4, 3))
+    rec2.begin_session(fps=30.0, size=(4, 3))
+    # 仅侧路进入 recording（模拟主路写失败复位 idle、侧路仍 recording）
+    rec2.request_toggle()
+    assert rec.state == "idle"
+    assert rec2.state == "recording"
+
+    app = SimpleNamespace(
+        _closing=False,
+        _stop_evt=None,
+        _dual_recording_ready=True,
+        _dual_active=True,
+        _rec=rec,
+        _rec2=rec2,
+        _record_pair_lock=threading.Lock(),
+        _record_base_dir=tmp_path,
+        record_dir_var=_Var(str(tmp_path)),
+        _exam_pending_row=None,
+        _exam_discard_next=False,
+        record_btn=_Widget(),
+        _sync_record_stop_enabled=lambda _s: None,
+    )
+    monkeypatch.setattr(app_ui, "save_record_dir", lambda _p: None)
+
+    ok = app_ui.App._begin_recording_segment(app)
+    # stop_recording 会把侧路拉回 idle；两边都 idle 后应能成功开录
+    # 若无法对齐则返回 False。此处 stop 可对齐，期望成功且两侧 recording
+    assert ok is True
+    assert rec.state == "recording"
+    assert rec2.state == "recording"
+
+
+def test_exam_preflight_rejects_skeleton_session():
+    app = SimpleNamespace(
+        _dual_active=True,
+        _dual_recording_ready=True,
+        _dual_record_skeleton=True,
+        record_skeleton_var=_Var(True),
+    )
+    ok, msg = app_ui.App._exam_preflight(app)
+    assert ok is False
+    assert "骨架" in msg
+
+
 def test_compare_update_ignores_old_segment_and_formats_latest_score():
+    exam_updates: list = []
+
+    class _ExamPanel:
+        def on_postprocess_update(self, update):
+            exam_updates.append(update.segment_id)
+
     app = SimpleNamespace(
         _closing=False,
         _latest_compare_segment_id="record_new",
@@ -1259,6 +1341,7 @@ def test_compare_update_ignores_old_segment_and_formats_latest_score():
         compare_status_var=_Var("自动比对：排队中"),
         compare_score_var=_Var("unchanged"),
         compare_error_var=_Var(""),
+        _exam_panel=_ExamPanel(),
     )
 
     old = app_ui.PostprocessUpdate(
@@ -1272,7 +1355,9 @@ def test_compare_update_ignores_old_segment_and_formats_latest_score():
     app_ui.App._post_recording_compare_update(app, old)
     assert app.root.after_calls == []
     app_ui.App._drain_recording_compare_updates(app)
+    # 主界面比对条只跟最新片段；考试面板仍须收到旧片段终态
     assert app.compare_score_var.get() == "unchanged"
+    assert exam_updates == ["record_old"]
 
     latest = app_ui.PostprocessUpdate(
         segment_id="record_new",
@@ -1289,6 +1374,7 @@ def test_compare_update_ignores_old_segment_and_formats_latest_score():
     assert app.compare_status_var.get() == "自动比对：已完成"
     assert app.compare_score_var.get() == "正面：82.3%　侧面：89.1%　综合：86%"
     assert app.compare_error_var.get() == ""
+    assert exam_updates == ["record_old", "record_new"]
 
     app._closing = True
     app_ui.App._post_recording_compare_update(app, latest)

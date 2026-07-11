@@ -136,3 +136,83 @@ def test_scoring_policy_last_completed_wins() -> None:
     assert r1.status == "superseded"
     assert r1.is_scoring_row is False
     assert r2.is_scoring_row is True
+
+
+def test_student_id_zero_padded_number_format(tmp_path: Path) -> None:
+    """数值 123 + 格式 000000 应按显示文本导入为 000123。"""
+    from openpyxl import Workbook
+
+    path = tmp_path / "pad.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["序号", "学号", "姓名"])
+    ws.append([1, 123, "甲"])
+    ws.cell(row=2, column=2).number_format = "000000"
+    wb.save(path)
+    wb.close()
+    cands = import_roster_xlsx(path)
+    assert cands[0].student_id == "000123"
+
+
+def test_scorebook_flush_does_not_overwrite_with_stale_snapshot(tmp_path: Path) -> None:
+    """旧快照写盘不得覆盖更新代（已完成成绩不丢）。"""
+    import threading
+    import time
+
+    path = tmp_path / "scores.xlsx"
+    write_gate = threading.Event()
+    release_gate = threading.Event()
+    writes: list[int] = []
+
+    def slow_write(p: Path, rows: list) -> None:
+        n = len(rows)
+        writes.append(n)
+        # 第一趟写故意卡住，模拟旧快照仍在落盘
+        if len(writes) == 1:
+            write_gate.set()
+            release_gate.wait(timeout=5.0)
+        write_scorebook_xlsx(p, rows)
+
+    book = ExamScorebook(path=path, write_fn=slow_write, throttle_s=0.0)
+    c1 = ExamCandidate(1, "A", "甲")
+    c2 = ExamCandidate(2, "B", "乙")
+    book.load_candidates([c1, c2])
+    r1, r2 = book.rows
+
+    # 后台 flush 拿 1 行完成快照
+    book.update_row(
+        r1,
+        status="completed",
+        front_score=0.8,
+        side_score=0.8,
+        combined_score=0.8,
+        combined_percent=80,
+    )
+    t = threading.Thread(target=lambda: book.flush(), daemon=True)
+    t.start()
+    assert write_gate.wait(timeout=3.0)
+
+    # 期间第二行完成并再 flush
+    book.update_row(
+        r2,
+        status="completed",
+        front_score=0.9,
+        side_score=0.9,
+        combined_score=0.9,
+        combined_percent=90,
+    )
+    release_gate.set()
+    t.join(timeout=5.0)
+    book.flush()
+    book.close()
+
+    from openpyxl import load_workbook
+
+    wb = load_workbook(path)
+    ws = wb.active
+    data_rows = list(ws.iter_rows(min_row=2, values_only=True))
+    wb.close()
+    assert len(data_rows) == 2
+    # 两行综合分都应在文件中
+    percents = {int(r[4]) for r in data_rows if r[4] not in (None, "")}
+    assert percents == {80, 90}

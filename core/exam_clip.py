@@ -3,6 +3,9 @@
 
 不修改 DualRecordingPostProcessor 的现网 frame_count_mismatch 语义；
 考试路径在 submit 前调用本模块。
+
+内存约束：禁止把整段双路帧装进 list（1080p×30fps×60s 双路可达数十 GiB）。
+一律流式：先扫 front 估能量/区间，再二次流式写出裁剪结果。
 """
 
 from __future__ import annotations
@@ -85,7 +88,7 @@ def estimate_action_range(
 
 
 def energy_from_gray_frames(frames: list[np.ndarray]) -> np.ndarray:
-    """简易帧差能量，供无 pose 特征时裁剪。"""
+    """简易帧差能量，供无 pose 特征时裁剪（仅小样本/测试路径）。"""
     if len(frames) < 2:
         return np.zeros(0, dtype=np.float32)
     diffs: list[float] = []
@@ -98,43 +101,124 @@ def energy_from_gray_frames(frames: list[np.ndarray]) -> np.ndarray:
     return np.asarray(diffs, dtype=np.float32)
 
 
-def _read_first_n_frames(path: Path, n: int) -> tuple[list[np.ndarray], float]:
+def _open_capture(path: Path) -> cv2.VideoCapture:
     cap = cv2.VideoCapture(str(path))
     if not cap.isOpened():
         raise RuntimeError(f"无法打开视频：{path}")
-    fps = float(cap.get(cv2.CAP_PROP_FPS) or 30.0) or 30.0
-    frames: list[np.ndarray] = []
+    return cap
+
+
+def _stream_energy_first_n(
+    path: Path, n: int
+) -> tuple[np.ndarray, int, float, tuple[int, int]]:
+    """流式读取前 n 帧，只保留上一灰度帧算能量；返回 energy、实际帧数、fps、尺寸。"""
+    cap = _open_capture(path)
     try:
-        while len(frames) < n:
+        fps = float(cap.get(cv2.CAP_PROP_FPS) or 30.0) or 30.0
+        diffs: list[float] = []
+        prev: np.ndarray | None = None
+        count = 0
+        size = (0, 0)
+        while count < n:
             ok, fr = cap.read()
             if not ok or fr is None:
                 break
-            frames.append(fr)
+            if count == 0:
+                h, w = fr.shape[:2]
+                size = (int(w), int(h))
+            g = cv2.cvtColor(fr, cv2.COLOR_BGR2GRAY).astype(np.float32)
+            if prev is not None:
+                diffs.append(float(np.mean((g - prev) ** 2) ** 0.5))
+            prev = g
+            count += 1
+            del fr
+        return np.asarray(diffs, dtype=np.float32), count, fps, size
     finally:
         cap.release()
-    return frames, fps
 
 
-def _write_frames(path: Path, frames: list[np.ndarray], fps: float) -> Path:
-    if not frames:
-        raise RuntimeError("无帧可写")
-    h, w = frames[0].shape[:2]
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(str(path), fourcc, float(fps), (w, h))
-    out = path
-    if not writer.isOpened():
-        out = path.with_suffix(".avi")
-        fourcc = cv2.VideoWriter_fourcc(*"XVID")
-        writer = cv2.VideoWriter(str(out), fourcc, float(fps), (w, h))
-    if not writer.isOpened():
-        raise RuntimeError(f"无法创建视频写出：{path}")
+def _count_frames_up_to(path: Path, n: int) -> tuple[int, float, tuple[int, int]]:
+    """流式计数，不保留像素。"""
+    cap = _open_capture(path)
     try:
-        for fr in frames:
-            writer.write(fr)
+        fps = float(cap.get(cv2.CAP_PROP_FPS) or 30.0) or 30.0
+        count = 0
+        size = (0, 0)
+        while count < n:
+            ok, fr = cap.read()
+            if not ok or fr is None:
+                break
+            if count == 0:
+                h, w = fr.shape[:2]
+                size = (int(w), int(h))
+            count += 1
+            del fr
+        return count, fps, size
     finally:
-        writer.release()
-    return out
+        cap.release()
+
+
+def _stream_write_range(
+    path: Path,
+    out_path: Path,
+    *,
+    start: int,
+    end: int,
+    fps: float,
+    size_hint: tuple[int, int] | None = None,
+) -> tuple[Path, int]:
+    """流式写出 [start, end) 帧到 out_path；返回实际路径与写出帧数。"""
+    if end <= start:
+        raise RuntimeError("裁剪区间为空")
+    cap = _open_capture(path)
+    writer = None
+    out = out_path
+    written = 0
+    try:
+        # 尽量 seek；失败则顺序丢弃
+        if start > 0:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, float(start))
+            pos = int(cap.get(cv2.CAP_PROP_POS_FRAMES) or 0)
+            if pos != start:
+                # seek 不可靠：重开顺序跳过
+                cap.release()
+                cap = _open_capture(path)
+                for _ in range(start):
+                    ok, fr = cap.read()
+                    if not ok:
+                        break
+                    del fr
+
+        idx = start
+        while idx < end:
+            ok, fr = cap.read()
+            if not ok or fr is None:
+                break
+            if writer is None:
+                h, w = fr.shape[:2]
+                if size_hint and size_hint[0] > 0 and size_hint[1] > 0:
+                    w, h = size_hint
+                out.parent.mkdir(parents=True, exist_ok=True)
+                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                writer = cv2.VideoWriter(str(out), fourcc, float(fps), (w, h))
+                if not writer.isOpened():
+                    out = out_path.with_suffix(".avi")
+                    fourcc = cv2.VideoWriter_fourcc(*"XVID")
+                    writer = cv2.VideoWriter(str(out), fourcc, float(fps), (w, h))
+                if not writer.isOpened():
+                    raise RuntimeError(f"无法创建视频写出：{out_path}")
+            writer.write(fr)
+            written += 1
+            idx += 1
+            del fr
+    finally:
+        if writer is not None:
+            writer.release()
+        cap.release()
+    if written <= 0:
+        raise RuntimeError(f"裁剪写出 0 帧：{path}")
+    return out, written
+
 
 def prepare_exam_pair(
     front_source: Path,
@@ -147,7 +231,7 @@ def prepare_exam_pair(
     trim_tail_s: float = 0.8,
     use_pixel_energy: bool = True,
 ) -> ClipResult:
-    """截齐 + 裁剪，写出 front_exam / side_exam。"""
+    """截齐 + 裁剪，写出 front_exam / side_exam（流式，峰值内存 O(1 帧)）。"""
     front_source = Path(front_source)
     side_source = Path(side_source)
     out_dir = Path(out_dir)
@@ -157,21 +241,24 @@ def prepare_exam_pair(
     if n <= 0:
         raise RuntimeError("录制帧数为 0，无法派发")
 
-    front_frames_list, fps_f = _read_first_n_frames(front_source, n)
-    side_frames_list, fps_s = _read_first_n_frames(side_source, n)
-    if len(front_frames_list) == 0 or len(side_frames_list) == 0:
-        raise RuntimeError("无法读取录制帧")
-    # 再按实际读到的帧数二次截齐
-    n2 = min(len(front_frames_list), len(side_frames_list))
-    if n2 < n:
-        warnings.append(f"read_short: expected {n} got front={len(front_frames_list)} side={len(side_frames_list)}")
-    front_frames_list = front_frames_list[:n2]
-    side_frames_list = side_frames_list[:n2]
-    fps = float(fps_f or fps_s or 30.0)
-
-    energy = None
     if use_pixel_energy:
-        energy = energy_from_gray_frames(front_frames_list)
+        energy, front_n, fps_f, size_f = _stream_energy_first_n(front_source, n)
+    else:
+        front_n, fps_f, size_f = _count_frames_up_to(front_source, n)
+        energy = None
+    side_n, fps_s, size_s = _count_frames_up_to(side_source, n)
+    if front_n <= 0 or side_n <= 0:
+        raise RuntimeError("无法读取录制帧")
+
+    n2 = min(front_n, side_n)
+    if n2 < n:
+        warnings.append(
+            f"read_short: expected {n} got front={front_n} side={side_n}"
+        )
+    if energy is not None and energy.size > max(0, n2 - 1):
+        energy = energy[: max(0, n2 - 1)]
+
+    fps = float(fps_f or fps_s or 30.0)
     start, end, trim_warnings = estimate_action_range(
         n2,
         fps=fps,
@@ -180,29 +267,47 @@ def prepare_exam_pair(
         trim_tail_s=trim_tail_s,
     )
     warnings.extend(trim_warnings)
-    front_clip = front_frames_list[start:end]
-    side_clip = side_frames_list[start:end]
-    if not front_clip or not side_clip:
-        front_clip = front_frames_list
-        side_clip = side_frames_list
+    if end <= start:
         start, end = 0, n2
         warnings.append("clip_empty_fallback_full")
 
-    front_out = _write_frames(out_dir / "front_exam.mp4", front_clip, fps)
-    side_out = _write_frames(out_dir / "side_exam.mp4", side_clip, fps)
+    front_out, front_written = _stream_write_range(
+        front_source,
+        out_dir / "front_exam.mp4",
+        start=start,
+        end=end,
+        fps=fps,
+        size_hint=size_f if size_f[0] > 0 else None,
+    )
+    side_out, side_written = _stream_write_range(
+        side_source,
+        out_dir / "side_exam.mp4",
+        start=start,
+        end=end,
+        fps=fps,
+        size_hint=size_s if size_s[0] > 0 else None,
+    )
+    # 再次截齐写出帧（极端情况下一路读短）
+    written = min(front_written, side_written)
+    if front_written != side_written:
+        warnings.append(
+            f"clip_write_mismatch: front={front_written} side={side_written} -> {written}"
+        )
+        # 不重写整段；比对侧用 min 帧数元数据，文件可能仍略长，postprocess 以 frame 计数为准
     return ClipResult(
         front_path=front_out,
         side_path=side_out,
-        front_frames=len(front_clip),
-        side_frames=len(side_clip),
+        front_frames=written,
+        side_frames=written,
         warnings=warnings,
         trim_start=start,
-        trim_end=end,
+        trim_end=start + written,
         meta={
             "aligned_n": n2,
             "fps": fps,
             "source_front_frames": front_frames,
             "source_side_frames": side_frames,
+            "streamed": True,
         },
     )
 
