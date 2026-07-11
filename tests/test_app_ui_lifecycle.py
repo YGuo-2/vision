@@ -1201,6 +1201,7 @@ def _dual_submission_app(tmp_path: Path, *, write_frames: bool = True):
         _pending_record_errors=[],
         _dual_active=True,
         _dual_record_skeleton=False,
+        _dual_auto_compare=True,
         _record_stamp=stamp,
         _record_base_dir=tmp_path,
         _record_postprocessor=processor,
@@ -1229,10 +1230,23 @@ def test_dual_record_stop_submits_exactly_once_and_allows_next_segment(tmp_path)
     assert job.side_source == segment_dir / "side.mp4"
     assert job.front_frames == job.side_frames == 1
     assert job.record_skeleton is False
+    assert job.auto_compare is True
 
     app_ui.App._close_recording_pair(app)
     assert len(processor.jobs) == 1
     assert app._dual_active is False
+
+
+def test_dual_record_stop_submits_auto_compare_disabled_when_only_recording(tmp_path):
+    app, processor, segment_dir = _dual_submission_app(tmp_path)
+    app._dual_auto_compare = False
+
+    app_ui.App._on_record_stop(app)
+
+    assert len(processor.jobs) == 1
+    job = processor.jobs[0]
+    assert job.segment_id == segment_dir.name
+    assert job.auto_compare is False
 
 
 def test_compare_update_ignores_old_segment_and_formats_latest_score():
@@ -1605,6 +1619,7 @@ def test_close_poll_window_disables_recording_controls_and_rejects_toggle():
         for name in (
             "record_btn",
             "record_stop_btn",
+            "auto_compare_check",
             "record_skeleton_check",
             "record_dir_entry",
             "record_dir_btn",

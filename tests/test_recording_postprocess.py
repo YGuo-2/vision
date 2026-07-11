@@ -26,6 +26,7 @@ def _job(
     segment_id: str,
     *,
     skeleton: bool = False,
+    auto_compare: bool = True,
     front_frames: int = 12,
     side_frames: int = 12,
     suffix: str = ".mp4",
@@ -47,6 +48,7 @@ def _job(
         front_template=front_template,
         side_template=side_template,
         record_skeleton=skeleton,
+        auto_compare=auto_compare,
     )
 
 
@@ -145,6 +147,7 @@ def test_fifo_single_consumer_and_atomic_completed_results(tmp_path: Path) -> No
             "created_at",
             "completed_at",
             "record_skeleton",
+            "auto_compare",
             "front_video_path",
             "side_video_path",
             "front_template_path",
@@ -158,6 +161,7 @@ def test_fifo_single_consumer_and_atomic_completed_results(tmp_path: Path) -> No
         assert payload["created_at"] == job.created_at
         assert payload["completed_at"]
         assert payload["record_skeleton"] is False
+        assert payload["auto_compare"] is True
         assert payload["front_video_path"] == str(job.front_source)
         assert payload["side_video_path"] == str(job.side_source)
         assert payload["front_template_path"] == str(job.front_template)
@@ -636,6 +640,38 @@ def test_annotated_recording_is_transcoded_then_skipped(tmp_path: Path) -> None:
     payload = json.loads((job.segment_dir / "result.json").read_text(encoding="utf-8"))
     assert payload["status"] == "skipped"
     assert payload["error"]["code"] == "annotated_recording"
+    assert payload["result"] is None
+
+
+def test_auto_compare_disabled_is_transcoded_then_skipped(tmp_path: Path) -> None:
+    terminal = threading.Event()
+    calls: list[Path] = []
+
+    def on_update(update: PostprocessUpdate) -> None:
+        if update.status == "skipped":
+            terminal.set()
+
+    processor = DualRecordingPostProcessor(
+        on_update=on_update,
+        transcode=lambda path, _stop: calls.append(path) or path,
+        compare=lambda *_args, **_kwargs: pytest.fail(
+            "record-only mode must not be compared"
+        ),
+        video_validator=lambda _path: True,
+        model_available=lambda: pytest.fail("record-only job must not require a model"),
+    )
+    job = _job(tmp_path, "record_only", auto_compare=False)
+    try:
+        assert processor.submit(job)
+        _wait(terminal)
+    finally:
+        processor.close(1.0)
+
+    assert calls == [job.front_source, job.side_source]
+    payload = json.loads((job.segment_dir / "result.json").read_text(encoding="utf-8"))
+    assert payload["status"] == "skipped"
+    assert payload["auto_compare"] is False
+    assert payload["error"]["code"] == "auto_compare_disabled"
     assert payload["result"] is None
 
 

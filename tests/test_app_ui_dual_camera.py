@@ -87,6 +87,7 @@ def _app_stub(
     rotate: str = "0°",
     rotate2: str = "0°",
     record_skeleton: bool = False,
+    auto_compare: bool = True,
 ):
     app = object.__new__(app_ui.App)
     app.source_var = _Var(source)
@@ -99,6 +100,7 @@ def _app_stub(
     app.rotate_var = _Var(rotate)
     app.rotate_var_2 = _Var(rotate2)
     app.record_skeleton_var = _Var(record_skeleton)
+    app.auto_compare_var = _Var(auto_compare)
     app._source_state = app_ui.InputSourceState()
     if source.isdigit():
         app._source_state.select_camera(int(source))
@@ -322,6 +324,18 @@ def test_collect_state_captures_dual_record_skeleton_choice():
     assert state.record_skeleton is True
 
 
+def test_collect_state_captures_dual_auto_compare_choice():
+    app = _app_stub(
+        source="0",
+        second_label="摄像头 1",
+        auto_compare=False,
+    )
+
+    state = app_ui.App._collect_state(app)
+
+    assert state.auto_compare is False
+
+
 def test_app_initializes_dual_record_skeleton_toggle_disabled():
     init = _app_method_node("__init__")
     assignments = [
@@ -346,6 +360,30 @@ def test_app_initializes_dual_record_skeleton_toggle_disabled():
     )
 
 
+def test_app_initializes_auto_compare_toggle_enabled():
+    init = _app_method_node("__init__")
+    assignments = [
+        node
+        for node in ast.walk(init)
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Attribute)
+            and target.attr == "auto_compare_var"
+            for target in node.targets
+        )
+    ]
+
+    assert len(assignments) == 1
+    value = assignments[0].value
+    assert isinstance(value, ast.Call)
+    assert any(
+        keyword.arg == "value"
+        and isinstance(keyword.value, ast.Constant)
+        and keyword.value.value is True
+        for keyword in value.keywords
+    )
+
+
 def test_collect_state_ignores_record_skeleton_for_single_camera():
     app = _app_stub(
         source="0",
@@ -356,6 +394,18 @@ def test_collect_state_ignores_record_skeleton_for_single_camera():
     state = app_ui.App._collect_state(app)
 
     assert state.record_skeleton is False
+
+
+def test_collect_state_keeps_auto_compare_true_for_single_camera():
+    app = _app_stub(
+        source="0",
+        second_label=app_ui.NO_SECOND_CAMERA,
+        auto_compare=False,
+    )
+
+    state = app_ui.App._collect_state(app)
+
+    assert state.auto_compare is True
 
 
 def test_collect_state_leaves_source2_none_for_single_camera_mode():

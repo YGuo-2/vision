@@ -37,6 +37,7 @@ from apps.recording_postprocess import (
     DualRecordingPostProcessor,
     PostprocessUpdate,
     default_template_paths,
+    validate_template_pair,
 )
 
 
@@ -914,6 +915,8 @@ class UiState:
     rotate: int = 0
     rotate2: int = 0
     record_skeleton: bool = False
+    # 双摄录制结束后是否自动进入黑盒比对（检测一条龙）；False 为仅录制。
+    auto_compare: bool = True
     session_generation: int = 0
     start_click: float = 0.0
 
@@ -953,6 +956,7 @@ class _RecordingPairFinalization:
     stamp: str | None
     segment_dir: Path | None
     record_skeleton: bool
+    auto_compare: bool
     segment_started: bool
     front_path: Path | None
     side_path: Path | None
@@ -1245,6 +1249,8 @@ class App:
         self.workers_var = IntVar(value=default_workers())
         self.enable_hands_var = BooleanVar(value=True)
         self.record_skeleton_var = BooleanVar(value=False)
+        # 双摄默认「录制+检测一条龙」；取消勾选后仅录制落盘/转码，不自动比对。
+        self.auto_compare_var = BooleanVar(value=True)
         # 录制视频保存目录（默认上次持久化的目录，无记录时回退 outputs_dir()）。
         # 录制文件名仍由控制器按时间戳生成。
         _initial_record_dir = load_record_dir()
@@ -1305,6 +1311,18 @@ class App:
         self._record_postprocessor = DualRecordingPostProcessor(
             on_update=self._post_recording_compare_update
         )
+        # 考试模式（见 docs/exam_system_design.md）
+        self._exam_lock = threading.Lock()
+        self._exam_active = False
+        self._exam_occupancy_armed = False
+        self._exam_roi: tuple[float, float, float, float] = (0.2, 0.1, 0.8, 0.95)
+        self._exam_run_id: str | None = None
+        self._exam_run_dir: Path | None = None
+        self._exam_pending_row = None
+        self._exam_discard_next = False
+        self._exam_manual_locked = False
+        self._exam_occupancy_queue: Queue[tuple[bool, float]] = Queue(maxsize=8)
+        self._exam_occupancy_stride = 3
 
         self._stop_evt = threading.Event()
         self._worker: threading.Thread | None = None
@@ -1354,6 +1372,7 @@ class App:
         self._pending_record_errors: list[str] = []
         self._dual_active = False
         self._dual_record_skeleton = False
+        self._dual_auto_compare = True
         # 一段录制共用的时间戳（idle→recording 时刷新）：两路 front/side 一致 → 可配对，
         # 连续多段各段不同 → 相互隔离。None 表示尚未开始任何录制。
         self._record_stamp: str | None = None
@@ -1505,12 +1524,18 @@ class App:
             record_group, text="结束录制", command=self._on_record_stop, state="disabled"
         )
         self.record_stop_btn.pack(fill="x", pady=(6, 0))
+        self.auto_compare_check = ttk.Checkbutton(
+            record_group,
+            text="录制后自动比对（检测一条龙）",
+            variable=self.auto_compare_var,
+        )
+        self.auto_compare_check.pack(anchor="w", pady=(8, 0))
         self.record_skeleton_check = ttk.Checkbutton(
             record_group,
             text="双摄录像写入骨架（开启后不自动比对）",
             variable=self.record_skeleton_var,
         )
-        self.record_skeleton_check.pack(anchor="w", pady=(8, 0))
+        self.record_skeleton_check.pack(anchor="w", pady=(4, 0))
 
         # 录制视频保存目录选择行：默认 outputs_dir()，可改到任意目录。
         ttk.Label(record_group, text="保存目录：").pack(anchor="w", pady=(8, 0))
@@ -1524,6 +1549,10 @@ class App:
         # 5) Compare_Control：动作分析（模板比对 + 直拳技术评估，绑定 self.compare_btn）。
         self.compare_btn = ttk.Button(primary, text="动作分析…", command=self._open_compare)
         self.compare_btn.pack(fill="x", pady=(10, 0))
+
+        # 考试模式：叫号 / ROI 占用 / 自动录制比对（设计见 docs/exam_system_design.md）
+        self.exam_btn = ttk.Button(primary, text="考试模式…", command=self._open_exam_panel)
+        self.exam_btn.pack(fill="x", pady=(6, 0))
 
         # ===== 可见分隔线：在 Primary_Controls 与 Secondary_Options 之间插入显式
         # 水平分隔，强化主/次分区（需求 1.2）。布局测试可通过该属性定位。=====
@@ -1826,9 +1855,10 @@ class App:
         """Record_Toggle 点击回调：请求录制状态机切换，并据返回状态刷新按钮文本。
 
         idle→开始录制、recording→暂停录制、paused→继续录制（见 RECORD_BTN_TEXT）。
-        Record_Toggle 控件由任务 9.2 在 _build_ui 中创建并绑定到 self.record_btn；
-        此处对其存在性做保护，使方法在控件尚未创建时仍可安全调用。
+        考试模式下手动录制锁定，直接返回。
         """
+        if bool(getattr(self, "_exam_manual_locked", False)):
+            return
         stop_evt = getattr(self, "_stop_evt", None)
         if getattr(self, "_closing", False) or (
             stop_evt is not None and stop_evt.is_set()
@@ -1837,17 +1867,15 @@ class App:
         if not bool(getattr(self, "_dual_recording_ready", True)):
             return
 
-        # 只在 Tk 主线程读取保存目录，随后 path_provider 仅访问普通 Path 缓存。
-        record_dir_var = getattr(self, "record_dir_var", None)
-        next_base_dir = getattr(self, "_record_base_dir", outputs_dir())
-        if record_dir_var is not None:
-            base = record_dir_var.get().strip()
-            next_base_dir = Path(base) if base else outputs_dir()
-
-        new_dual_segment_id: str | None = None
-        finalize_failed_pair = False
         with self._record_pair_lock:
             prev_state = self._rec.state
+        if prev_state == "idle":
+            self._begin_recording_segment()
+            return
+
+        # 暂停 / 继续：仍用 toggle（考试路径禁止走这里）
+        finalize_failed_pair = False
+        with self._record_pair_lock:
             dual_active = bool(getattr(self, "_dual_active", False))
             if dual_active:
                 snap = self._rec.snapshot()
@@ -1860,56 +1888,233 @@ class App:
             if finalize_failed_pair:
                 new_state: RecordingState = "idle"
             else:
-                # 必须先发布新时间戳再暴露 recording 状态；否则 worker 可能让 front 使用旧戳、
-                # side 使用新戳，导致同一段落入两个目录。
-                if prev_state == "idle":
-                    # 保存根目录与时间戳都是片段级不可变数据；暂停/继续不重新发布。
-                    self._record_base_dir = Path(next_base_dir)
-                    # 手打路径也在开录生效这一刻持久化，下次启动回到同一目录。
-                    save_record_dir(next_base_dir)
-                    self._record_stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-                    if dual_active:
-                        new_dual_segment_id = f"record_{self._record_stamp}"
                 new_state = self._rec.request_toggle()
-                # 第二路录制跟随主录制（双摄时已 begin_session；单摄/文件时恒 idle no-op）。
                 self._rec2.request_toggle()
         if finalize_failed_pair:
             App._finalize_and_dispatch_recording_pair(self, close_session=False)
+        record_btn = getattr(self, "record_btn", None)
+        if record_btn is not None:
+            record_btn.configure(text=RECORD_BTN_TEXT[new_state])
+        sync_record_stop = getattr(self, "_sync_record_stop_enabled", None)
+        if sync_record_stop is not None:
+            sync_record_stop(new_state)
+
+    def _begin_recording_segment(self, exam_row=None) -> bool:
+        """从 idle 开录一段（考试与手动共用）。成功返回 True。
+
+        前置：双摄 claim 后已 begin_session；本方法只 publish stamp + toggle idle→recording。
+        """
+        stop_evt = getattr(self, "_stop_evt", None)
+        if getattr(self, "_closing", False) or (
+            stop_evt is not None and stop_evt.is_set()
+        ):
+            return False
+        if not bool(getattr(self, "_dual_recording_ready", True)):
+            return False
+
+        record_dir_var = getattr(self, "record_dir_var", None)
+        next_base_dir = getattr(self, "_record_base_dir", outputs_dir())
+        if record_dir_var is not None:
+            base = record_dir_var.get().strip()
+            next_base_dir = Path(base) if base else outputs_dir()
+
+        new_dual_segment_id: str | None = None
+        with self._record_pair_lock:
+            if self._rec.state != "idle":
+                return False
+            dual_active = bool(getattr(self, "_dual_active", False))
+            self._record_base_dir = Path(next_base_dir)
+            save_record_dir(next_base_dir)
+            self._record_stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            if dual_active:
+                new_dual_segment_id = f"record_{self._record_stamp}"
+            self._exam_pending_row = exam_row
+            self._exam_discard_next = False
+            new_state = self._rec.request_toggle()
+            self._rec2.request_toggle()
+            if new_state != "recording":
+                self._exam_pending_row = None
+                return False
+
         if new_dual_segment_id is not None:
+            auto_compare = bool(getattr(self, "_dual_auto_compare", True))
+            if exam_row is not None:
+                auto_compare = True
+            status_text = (
+                "自动比对：录制中" if auto_compare else "仅录制：录制中"
+            )
             for name, value in (
                 ("compare_segment_var", f"片段：{new_dual_segment_id}"),
-                ("compare_status_var", "自动比对：录制中"),
+                ("compare_status_var", status_text),
                 ("compare_score_var", "正面：-　侧面：-　综合：-"),
                 ("compare_error_var", ""),
             ):
                 var = getattr(self, name, None)
                 if var is not None:
                     var.set(value)
+            if exam_row is not None and hasattr(self, "_exam_panel"):
+                panel = getattr(self, "_exam_panel", None)
+                stamp = self._record_stamp
+                if panel is not None and stamp:
+                    base = Path(getattr(self, "_record_base_dir", outputs_dir()))
+                    segment_dir = base / stamp[:8] / f"record_{stamp}"
+                    try:
+                        panel.bind_segment(
+                            exam_row.row_id,
+                            f"record_{stamp}",
+                            str(segment_dir),
+                        )
+                    except Exception:
+                        pass
+
         record_btn = getattr(self, "record_btn", None)
-        if record_btn is not None:
-            record_btn.configure(text=RECORD_BTN_TEXT[new_state])
-        # 「结束录制」仅在存在录制片段（recording/paused）时可用。
-        sync_record_stop = getattr(self, "_sync_record_stop_enabled", None)
-        if sync_record_stop is not None:
-            sync_record_stop(new_state)
+        if record_btn is not None and not getattr(self, "_exam_manual_locked", False):
+            record_btn.configure(text=RECORD_BTN_TEXT["recording"])
+        self._sync_record_stop_enabled("recording")
+        return True
 
-    def _on_record_stop(self) -> None:
-        """「结束录制」点击回调：结束当前录制片段并落盘，但不结束识别会话。
-
-        调用控制器 ``stop_recording()`` 复位为 idle（保持会话运行），随后把切换按钮
-        文本复位为「开始录制」、禁用「结束录制」，使用户可在同一会话内重新开始录制。
-        """
+    def _end_recording_segment(self, *, discard: bool = False, exam_row=None) -> None:
+        """结束当前录制片段；discard=True 时不入比对队列。"""
         stop_evt = getattr(self, "_stop_evt", None)
         if getattr(self, "_closing", False) or (
             stop_evt is not None and stop_evt.is_set()
         ):
             return
-
+        if exam_row is not None:
+            self._exam_pending_row = exam_row
+        self._exam_discard_next = bool(discard)
         App._finalize_and_dispatch_recording_pair(self, close_session=False)
+        self._exam_discard_next = False
+        self._exam_pending_row = None
         record_btn = getattr(self, "record_btn", None)
-        if record_btn is not None:
+        if record_btn is not None and not getattr(self, "_exam_manual_locked", False):
             record_btn.configure(text=RECORD_BTN_TEXT["idle"])
         self._sync_record_stop_enabled("idle")
+
+    def _on_record_stop(self) -> None:
+        """「结束录制」点击回调：结束当前录制片段并落盘，但不结束识别会话。"""
+        if bool(getattr(self, "_exam_manual_locked", False)):
+            return
+        stop_evt = getattr(self, "_stop_evt", None)
+        if getattr(self, "_closing", False) or (
+            stop_evt is not None and stop_evt.is_set()
+        ):
+            return
+        self._end_recording_segment(discard=False)
+
+    def _open_exam_panel(self) -> None:
+        existing = getattr(self, "_exam_panel", None)
+        if existing is not None:
+            try:
+                existing.win.lift()
+                return
+            except Exception:
+                pass
+        from apps.exam_panel import ExamPanel
+
+        ExamPanel(self)
+
+    def _exam_primary_rotate(self) -> int:
+        try:
+            return _parse_rotate(self.rotate_var.get())
+        except Exception:
+            return 0
+
+    def _exam_set_roi(self, roi: tuple[float, float, float, float]) -> None:
+        with self._exam_lock:
+            self._exam_roi = tuple(float(x) for x in roi)  # type: ignore[assignment]
+
+    def _exam_set_active(
+        self, active: bool, *, run_id: str | None = None, run_dir: Path | None = None
+    ) -> None:
+        with self._exam_lock:
+            self._exam_active = bool(active)
+            if active:
+                self._exam_run_id = run_id
+                self._exam_run_dir = run_dir
+                self._dual_auto_compare = True
+            else:
+                self._exam_run_id = None
+                self._exam_run_dir = None
+                self._exam_occupancy_armed = False
+
+    def _exam_arm_occupancy(self, armed: bool) -> None:
+        with self._exam_lock:
+            self._exam_occupancy_armed = bool(armed)
+
+    def _exam_lock_manual_record(self, locked: bool) -> None:
+        self._exam_manual_locked = bool(locked)
+        state = "disabled" if locked else "normal"
+        for name in ("record_btn", "record_stop_btn", "record_skeleton_check", "auto_compare_check"):
+            w = getattr(self, name, None)
+            if w is None:
+                continue
+            try:
+                if locked:
+                    w.configure(state="disabled")
+                else:
+                    # 恢复由会话态控制
+                    if name == "record_skeleton_check" or name == "auto_compare_check":
+                        if not getattr(self, "_worker", None) or (
+                            self._worker is not None and not self._worker.is_alive()
+                        ):
+                            w.configure(state="normal")
+                    elif name == "record_btn":
+                        if getattr(self, "_dual_recording_ready", False) or (
+                            self._worker is not None and self._worker.is_alive()
+                        ):
+                            w.configure(state="normal")
+            except Exception:
+                pass
+        if locked:
+            try:
+                self.record_skeleton_var.set(False)
+                self.auto_compare_var.set(True)
+            except Exception:
+                pass
+
+    def _exam_preflight(self) -> tuple[bool, str]:
+        if not bool(getattr(self, "_dual_active", False)):
+            return False, "请先选择双摄像头并点击「开始」进入双摄会话。"
+        if not bool(getattr(self, "_dual_recording_ready", False)):
+            return False, "双摄尚未就绪，请稍候再试。"
+        front_t, side_t = default_template_paths()
+        try:
+            validate_template_pair(front_t, side_t)
+        except Exception as exc:
+            return (
+                False,
+                f"正/侧 heavy 模板不可用（请先生成 templates/standard_front_heavy.npz 与 standard_side_heavy.npz）：{exc}",
+            )
+        heavy = next(
+            (m for m in model_manager.MEDIAPIPE_MODELS if m.key == "pose_heavy"),
+            None,
+        )
+        lite = next(
+            (m for m in model_manager.MEDIAPIPE_MODELS if m.key == "pose_lite"),
+            None,
+        )
+        if heavy is None or not model_manager.is_installed(heavy):
+            return False, "缺少 pose_landmarker_heavy.task，请在模型管理中安装。"
+        if lite is None or not model_manager.is_installed(lite):
+            return False, "缺少 pose_landmarker_lite.task（占用检测需要）。"
+        return True, ""
+
+    def _drain_exam_occupancy(self) -> None:
+        q = getattr(self, "_exam_occupancy_queue", None)
+        if q is None:
+            return
+        panel = getattr(self, "_exam_panel", None)
+        while True:
+            try:
+                present, now = q.get_nowait()
+            except Empty:
+                return
+            if panel is not None:
+                try:
+                    panel.on_occupancy(bool(present), float(now))
+                except Exception:
+                    pass
 
     def _write_recording_pair(self, frame: np.ndarray, frame2: np.ndarray) -> None:
         """把双摄同一轮的两帧写入放在同一片段边界内。"""
@@ -1963,6 +2168,7 @@ class App:
             dual_active = bool(getattr(self, "_dual_active", False))
             stamp = getattr(self, "_record_stamp", None)
             record_skeleton = bool(getattr(self, "_dual_record_skeleton", False))
+            auto_compare = bool(getattr(self, "_dual_auto_compare", True))
             segment_dir = None
             if dual_active and stamp:
                 base = Path(getattr(self, "_record_base_dir", outputs_dir()))
@@ -1988,6 +2194,7 @@ class App:
                 stamp=stamp,
                 segment_dir=segment_dir,
                 record_skeleton=record_skeleton,
+                auto_compare=auto_compare,
                 segment_started=(
                     snap.state in {"recording", "paused"}
                     or snap2.state in {"recording", "paused"}
@@ -2029,19 +2236,65 @@ class App:
         if submitted is not None and segment_id in submitted:
             return
 
+        # 考试放弃片段：落盘但不入比对队列
+        if bool(getattr(self, "_exam_discard_next", False)):
+            return
+
         front_template, side_template = default_template_paths()
+        front_source = finalization.front_path or (finalization.segment_dir / "front.mp4")
+        side_source = finalization.side_path or (finalization.segment_dir / "side.mp4")
+        front_frames = int(finalization.front_frames)
+        side_frames = int(finalization.side_frames)
+        exam_warnings: list[str] = []
+        exam_row = getattr(self, "_exam_pending_row", None)
+        exam_run_id = getattr(self, "_exam_run_id", None)
+        auto_compare = bool(finalization.auto_compare)
+        if exam_row is not None:
+            auto_compare = True
+            # 派发前截齐 + 动作裁剪（不改现网 postprocess 硬校验语义）
+            try:
+                from core.exam_clip import prepare_exam_pair
+
+                clip = prepare_exam_pair(
+                    Path(front_source),
+                    Path(side_source),
+                    front_frames=front_frames,
+                    side_frames=side_frames,
+                    out_dir=Path(finalization.segment_dir),
+                )
+                front_source = clip.front_path
+                side_source = clip.side_path
+                front_frames = clip.front_frames
+                side_frames = clip.side_frames
+                exam_warnings.extend(clip.warnings)
+            except Exception as exc:
+                exam_warnings.append(f"exam_clip_failed: {exc}")
+
         job = DualRecordingJob(
             segment_id=segment_id,
             segment_dir=finalization.segment_dir,
-            front_source=finalization.front_path or (finalization.segment_dir / "front.mp4"),
-            side_source=finalization.side_path or (finalization.segment_dir / "side.mp4"),
-            front_frames=finalization.front_frames,
-            side_frames=finalization.side_frames,
+            front_source=Path(front_source),
+            side_source=Path(side_source),
+            front_frames=front_frames,
+            side_frames=side_frames,
             front_template=front_template,
             side_template=side_template,
             record_skeleton=finalization.record_skeleton,
+            auto_compare=auto_compare,
             front_error=finalization.front_error,
             side_error=finalization.side_error,
+            exam_run_id=str(exam_run_id) if exam_row is not None and exam_run_id else None,
+            student_id=getattr(getattr(exam_row, "candidate", None), "student_id", None)
+            if exam_row is not None
+            else None,
+            student_name=getattr(getattr(exam_row, "candidate", None), "name", None)
+            if exam_row is not None
+            else None,
+            student_order=getattr(getattr(exam_row, "candidate", None), "order", None)
+            if exam_row is not None
+            else None,
+            attempt_index=getattr(exam_row, "attempt_index", None) if exam_row is not None else None,
+            exam_warnings=tuple(exam_warnings),
         )
         previous_latest = getattr(self, "_latest_compare_segment_id", None)
         # submit() 会同步发布 queued，消费者也可能立即发布终态。先建立 guard，
@@ -2103,6 +2356,12 @@ class App:
                 self.compare_error_var.set(detail)
             else:
                 self.compare_error_var.set("")
+            panel = getattr(self, "_exam_panel", None)
+            if panel is not None:
+                try:
+                    panel.on_postprocess_update(update)
+                except Exception:
+                    pass
 
     def _sync_record_stop_enabled(self, state: RecordingState) -> None:
         """根据录制状态联动「结束录制」按钮的可用性：recording/paused 启用，idle 禁用。"""
@@ -2231,12 +2490,13 @@ class App:
                 except Exception:
                     pass
 
-        record_skeleton_check = getattr(self, "record_skeleton_check", None)
-        if record_skeleton_check is not None:
-            try:
-                record_skeleton_check.configure(state="disabled" if running else "normal")
-            except Exception:
-                pass
+        for check_name in ("record_skeleton_check", "auto_compare_check"):
+            check = getattr(self, check_name, None)
+            if check is not None:
+                try:
+                    check.configure(state="disabled" if running else "normal")
+                except Exception:
+                    pass
 
         # 刷新控件：复用既有联动（枚举中 / 运行中禁用）。
         self._set_refresh_enabled()
@@ -2760,6 +3020,11 @@ class App:
                 if source2 is not None and hasattr(self, "record_skeleton_var")
                 else False
             ),
+            auto_compare=(
+                bool(self.auto_compare_var.get())
+                if source2 is not None and hasattr(self, "auto_compare_var")
+                else True
+            ),
         )
 
     @staticmethod
@@ -2924,6 +3189,7 @@ class App:
         for name in (
             "record_btn",
             "record_stop_btn",
+            "auto_compare_check",
             "record_skeleton_check",
             "record_dir_entry",
             "record_dir_btn",
@@ -3226,6 +3492,7 @@ class App:
         outcome = "failed"
         error_type: str | None = None
         final_status: str | None = None
+        occupancy_pipe = None
 
         def post_raw_pair(pair) -> bool:
             frame = _apply_rotation(pair[0].frame, state.rotate)
@@ -3349,6 +3616,9 @@ class App:
             with self._record_pair_lock:
                 self._dual_active = True
                 self._dual_record_skeleton = bool(state.record_skeleton)
+                self._dual_auto_compare = bool(
+                    getattr(state, "auto_compare", True)
+                )
                 recording_pair_started = True
                 self._rec.begin_session(
                     fps=30.0, size=_rotated_size(w, h, state.rotate)
@@ -3396,6 +3666,61 @@ class App:
                     annotated, actions = frame.copy(), []
                     annotated2, actions2 = frame2.copy(), []
                     stage = "raw"
+
+                # 考试占用：第三条路径（裸帧录制 + lite pose），仅 armed 时跑
+                with self._exam_lock:
+                    occ_armed = bool(self._exam_occupancy_armed)
+                    exam_roi = self._exam_roi
+                    occ_stride = int(self._exam_occupancy_stride or 3)
+                if occ_armed and not state.record_skeleton:
+                    try:
+                        if occupancy_pipe is None:
+                            occupancy_pipe = MediaPipePipeline(
+                                models_dir=models_dir(),
+                                cfg=PipelineConfig(
+                                    pose_variant="lite",
+                                    running_mode="video",
+                                    enable_hands=False,
+                                ),
+                            )
+                        if frame_count % max(1, occ_stride) == 0:
+                            from core.presence_gate import hip_midpoint_in_roi
+
+                            ots = occupancy_pipe.next_timestamp_ms(
+                                is_file=False, fps_for_ts=30.0
+                            )
+                            pose_lms, _ = occupancy_pipe.infer(
+                                frame, timestamp_ms=ots
+                            )
+                            present = hip_midpoint_in_roi(pose_lms, exam_roi)
+                            q = getattr(self, "_exam_occupancy_queue", None)
+                            if q is not None:
+                                try:
+                                    while q.full():
+                                        try:
+                                            q.get_nowait()
+                                        except Empty:
+                                            break
+                                    q.put_nowait((bool(present), time.monotonic()))
+                                except Exception:
+                                    pass
+                        # 预览叠 ROI
+                        h0, w0 = annotated.shape[:2]
+                        x0 = int(exam_roi[0] * w0)
+                        y0 = int(exam_roi[1] * h0)
+                        x1 = int(exam_roi[2] * w0)
+                        y1 = int(exam_roi[3] * h0)
+                        cv2.rectangle(
+                            annotated, (x0, y0), (x1, y1), (0, 255, 255), 2
+                        )
+                    except Exception:
+                        pass
+                elif occupancy_pipe is not None and not occ_armed:
+                    try:
+                        occupancy_pipe.close()
+                    except Exception:
+                        pass
+                    occupancy_pipe = None
 
                 frame_count += 1
                 fps = frame_count / max(1e-6, (time.monotonic() - t0))
@@ -3472,7 +3797,7 @@ class App:
             self._post_status(final_status)
         finally:
             stop_raw_pump()
-            for pipeline in (pipe, pipe2):
+            for pipeline in (pipe, pipe2, occupancy_pipe):
                 if pipeline is not None:
                     try:
                         pipeline.close()
@@ -4086,6 +4411,7 @@ class App:
 
     def _tick(self) -> None:
         self._drain_recording_compare_updates()
+        self._drain_exam_occupancy()
         self._drain_dual_preview_layout()
         self._drain_camera_enum_results()
         # 录制状态刷新必须每 tick 执行，与帧队列是否有新帧无关（需求 5.9/5.10/5.11）。

@@ -55,14 +55,22 @@ class DualRecordingJob:
     front_template: Path
     side_template: Path
     record_skeleton: bool = False
+    # True：录制后自动比对（检测一条龙）；False：仅录制/转码，跳过 DTW 比对。
+    auto_compare: bool = True
     front_error: str | None = None
     side_error: str | None = None
     created_at: str = ""
+    # 考试模式可选元数据（非考试保持 None，旧路径不变）
+    exam_run_id: str | None = None
+    student_id: str | None = None
+    student_name: str | None = None
+    student_order: int | None = None
+    attempt_index: int | None = None
+    exam_warnings: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.created_at:
             object.__setattr__(self, "created_at", utc_timestamp())
-
 
 @dataclass(frozen=True)
 class PostprocessUpdate:
@@ -388,6 +396,17 @@ class DualRecordingPostProcessor:
                 warnings=context.warnings,
             )
             return
+        if not job.auto_compare:
+            self._publish_terminal(
+                job,
+                "skipped",
+                message="仅录制模式，已保存视频未自动比对",
+                error_code="auto_compare_disabled",
+                front_video=context.front_video,
+                side_video=context.side_video,
+                warnings=context.warnings,
+            )
+            return
 
         validate_template_pair(job.front_template, job.side_template)
         if not self._model_available():
@@ -527,6 +546,28 @@ class DualRecordingPostProcessor:
         error_code: str | None = None,
         notify: bool = True,
     ) -> None:
+        exam_meta = None
+        if any(
+            getattr(job, key, None) is not None
+            for key in (
+                "exam_run_id",
+                "student_id",
+                "student_name",
+                "student_order",
+                "attempt_index",
+            )
+        ) or getattr(job, "exam_warnings", ()):
+            exam_meta = {
+                "exam_run_id": job.exam_run_id,
+                "student_id": job.student_id,
+                "student_name": job.student_name,
+                "student_order": job.student_order,
+                "attempt_index": job.attempt_index,
+            }
+        merged_warnings = list(warnings or [])
+        for w in getattr(job, "exam_warnings", ()) or ():
+            if w not in merged_warnings:
+                merged_warnings.append(str(w))
         payload = {
             "schema_version": 1,
             "status": status,
@@ -534,13 +575,15 @@ class DualRecordingPostProcessor:
             "created_at": job.created_at,
             "completed_at": utc_timestamp() if status in _TERMINAL_STATUSES else None,
             "record_skeleton": bool(job.record_skeleton),
+            "auto_compare": bool(job.auto_compare),
             "front_video_path": str(front_video or job.front_source),
             "side_video_path": str(side_video or job.side_source),
             "front_template_path": str(job.front_template),
             "side_template_path": str(job.side_template),
-            "warnings": list(warnings or []),
+            "warnings": merged_warnings,
             "result": result,
             "error": None if error_code is None else {"code": error_code, "message": message},
+            "exam": exam_meta,
         }
         update: PostprocessUpdate | None = None
         with self._persistence_lock:

@@ -1,3 +1,109 @@
+## 2026-07-11: [test] 考试流程无摄像头模拟 + 成绩 flush 加固
+
+### 问题描述
+
+需要验证考试状态机/占用闸门/名单/裁剪链路是否流畅；模拟中发现 `ExamScorebook.flush` 仅靠后台线程时可能漏落盘。
+
+### 修改内容
+
+- 新增 `scripts/sim_exam_flow.py`：3 人闭环、skip/force/重考、10 人压力、裁剪、Excel、闸门防误触共 6 场景。
+- `ExamScorebook.flush` 改为调用线程同步写盘兜底；临时 xlsx 用 ASCII 名。
+
+### 验证方法
+
+- `.\.venv\Scripts\python.exe scripts\sim_exam_flow.py` → **57 passed, SIMULATION_OK**（模拟钟约 34s/3 人、31s/10 人；墙钟 <2ms 量级，无摄像头/无 DTW）。
+
+---
+
+## 2026-07-11: [feat] 考试系统 v1 初版实现（按设计 v0.2）
+
+### 问题描述
+
+现场需要「导入名单 → 叫号 → ROI 到场 → 自动双路录制 → 空场 2s 结束 → 后台比对 → 写 Excel 成绩」闭环；设计见 `docs/exam_system_design.md` v0.2。
+
+### 修改内容
+
+- **核心**：`core/exam_roster.py`（openpyxl 导入/导出/台账/补考/异步写盘）、`core/presence_gate.py`、`core/exam_session.py`（状态机）、`core/exam_clip.py`（派发前帧截齐+动作裁剪）、`core/exam_announcer.py`（异步 TTS）。
+- **UI**：`apps/exam_panel.py`；`apps/app_ui.py` 增加「考试模式…」、`_begin/_end_recording_segment` 原语、occupancy 第三条路径（lite、阶段性、裸帧录制）、考试派发元数据与裁剪。
+- **后处理**：`DualRecordingJob` / `result.json` 可选 exam 字段；非考试帧数硬校验不变。
+- **依赖**：`requirements.txt` 增加 `openpyxl`。
+- 参数采用设计默认值（0.8s 进场 / 2s 空场 / 防串场等），实测后再调。
+
+### 验证方法
+
+- `pytest tests/test_exam_roster.py tests/test_presence_gate.py tests/test_exam_session.py tests/test_exam_clip.py -q` → **22 passed**。
+- `py_compile` 相关模块通过；exam 元数据 smoke 通过。
+- 现场待验：双摄 + heavy 正/侧模板 + 考试面板跑 2～10 人；`templates/` 须事先备好模板。
+
+---
+
+## 2026-07-11: [docs] 考试系统设计 v0.2（吸收审查 A/B/C/D）
+
+### 问题描述
+
+v0.1 设计在占用路径、帧数硬失败、走位污染 DTW、toggle 三态、S2 不可测、补考/防串场/合规等方面会被返工；审查给出 A（阻塞）/ B（产品）/ C（工程）/ D（v2）清单。
+
+### 修改内容
+
+- 升级 `docs/exam_system_design.md` → **v0.2**，主要落入：
+  - **A1** occupancy 第三条路径（lite、阶段性、裸帧录制、非考试零推理不变）
+  - **A2** 考试派发前 `min` 帧截齐，不改现网 postprocess 硬校验
+  - **A3** 派发前 motion/首尾裁剪防走位污染
+  - **A4** ROI = primary + 旋转后坐标
+  - **A5** `_begin/_end_recording_segment` 原语
+  - **A6** S2 量化门闩
+  - **B1–B6** 分数 0..1、补考最后成功、防串场参数、force/skip、转换表、合规 §14
+  - **C1–C5** 写盘占用/线程、Excel 学号与合并格、错归风险、模板须预置
+  - **D** → §18 已知局限
+- 仍无业务代码与依赖变更。
+
+### 验证方法
+
+- 通读 `docs/exam_system_design.md` 目录与 §6.6 / §8.6 / §10.2–10.3 是否覆盖清单条目。
+- 无需 pytest。
+
+---
+
+## 2026-07-11: [docs] 考试系统设计文档（供审查）
+
+### 问题描述
+
+需要现场「叫号 → ROI 到场 → 自动录制 → 空场 2s 结束 → 后台比对 → 写 Excel 成绩」的考试流程。实现前先沉淀可独立审查的设计，避免直接改代码方向跑偏。
+
+### 修改内容
+
+- 新增 `docs/exam_system_design.md`（v0.1）：产品决策、非目标、复用边界、状态机、Excel 导入/导出契约、Presence 闸门参数、播报、与双摄后处理集成、模块清单、风险、验收与实现分期。
+- 已确认决策写入文档：Tkinter、双摄、全局 heavy 模板、固定 ROI + 姿态、空场 2s。
+- **本轮无业务代码、无依赖变更、无 UI 改动**；实现以审查结论为准。
+
+### 验证方法
+
+- 确认文件存在：`docs/exam_system_design.md`。
+- 文档可独立阅读（含 mermaid 流程、表头契约、成功标准）；无需 pytest。
+
+---
+
+## 2026-07-10: [feat] 双摄录制/录制+检测一条龙开关
+
+### 问题描述
+
+Tkinter 双摄结束录制后默认总是进入「录制 + 黑盒检测」一条龙（后台转码 + heavy DTW 比对）。部分场景只想落盘录像、不触发检测，此前没有独立开关。
+
+### 修改内容
+
+- 录制分组新增勾选框「录制后自动比对（检测一条龙）」，默认开启，兼容现有一条龙行为；会话运行中与骨架开关一并锁定。
+- `UiState.auto_compare` / `_dual_auto_compare` 在双摄会话启动时捕获；片段终结后经 `_RecordingPairFinalization` 写入 `DualRecordingJob.auto_compare`。
+- `DualRecordingPostProcessor`：`auto_compare=False` 时仍顺序转码并校验录像，随后以 `skipped` / `auto_compare_disabled` 终态落 `result.json`，不读模板、不装 heavy 模型、不跑比对。骨架开启时仍优先 `annotated_recording` 跳过。
+- 开录状态文案：开启比对显示「自动比对：录制中」，关闭显示「仅录制：录制中」。
+- 回归：控件启停、collect_state 单/双摄、submit 透传、postprocess 仅录制跳过。
+
+### 验证方法
+
+- `.\.venv\Scripts\python.exe -m pytest tests/test_recording_postprocess.py tests/test_app_controls.py tests/test_app_ui_dual_camera.py tests/test_app_ui_lifecycle.py -q`：`186 passed`。
+- 实机待验：双摄勾选/取消「录制后自动比对」各录一段，确认开启出分、关闭仅转码跳过比对。
+
+---
+
 ## 2026-07-10: [perf/test] Tkinter 双摄快速首屏、裸帧过渡与 MediaPipe 门控复测
 
 ### 问题描述
