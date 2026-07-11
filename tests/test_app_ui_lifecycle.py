@@ -66,15 +66,21 @@ class _WarmCapture(_Cap):
         self._condition = threading.Condition()
         self._frame = np.full((2, 3, 3), value, dtype=np.uint8)
         self._sent = False
+        self._interrupted = False
 
     def read(self):
         with self._condition:
             if not self._sent:
                 self._sent = True
                 return True, self._frame.copy()
-            while self.release_calls == 0:
+            while self.release_calls == 0 and not self._interrupted:
                 self._condition.wait()
             return False, None
+
+    def interrupt(self) -> None:
+        with self._condition:
+            self._interrupted = True
+            self._condition.notify_all()
 
     def release(self) -> None:
         with self._condition:
@@ -99,6 +105,7 @@ def _preopen_app(index: int = 0):
     app._preopen_lock = threading.Lock()
     app._preopen_cap = None
     app._preopen_index = None
+    app._preopen_pending_index = None
     app._preopen_generation = 0
     app._camera_open_locks_guard = threading.Lock()
     app._camera_open_locks = {}
@@ -159,7 +166,8 @@ def test_preopen_late_generation_cannot_replace_newer_cap(monkeypatch):
     monkeypatch.setattr(app_ui.threading, "Thread", _PendingThread)
 
     app_ui.App._kick_preopen(app, 0)
-    app_ui.App._kick_preopen(app, 0)
+    app._source_state.select_camera(1)
+    app_ui.App._kick_preopen(app, 1)
     assert pending[0][1][1] < pending[1][1][1]
 
     newest = _Cap()
@@ -172,10 +180,51 @@ def test_preopen_late_generation_cannot_replace_newer_cap(monkeypatch):
     pending[0][0](*pending[0][1])
 
     assert app._preopen_cap is newest
-    assert app._preopen_index == 0
+    assert app._preopen_index == 1
     assert newest.release_calls == 0
     # 旧 generation 在拿到 per-index open lock 后先退出，不再触碰驱动。
     assert late.release_calls == 0
+
+
+def test_preopen_same_index_is_idempotent_while_pending(monkeypatch):
+    app = _preopen_app()
+    pending = []
+
+    class _PendingThread:
+        def __init__(self, *, target, args, daemon) -> None:
+            pending.append((target, args, daemon))
+
+        def start(self) -> None:
+            pass
+
+    monkeypatch.setattr(app_ui.threading, "Thread", _PendingThread)
+
+    app_ui.App._kick_preopen(app, 0)
+    app_ui.App._kick_preopen(app, 0)
+
+    assert len(pending) == 1
+
+
+def test_preopen_same_index_is_idempotent_when_ready(monkeypatch):
+    app = _preopen_app()
+    cached = _Cap()
+    app._preopen_cap = cached
+    app._preopen_index = 0
+    starts: list[object] = []
+
+    class _UnexpectedThread:
+        def __init__(self, **kwargs) -> None:
+            starts.append(kwargs)
+
+        def start(self) -> None:
+            pass
+
+    monkeypatch.setattr(app_ui.threading, "Thread", _UnexpectedThread)
+
+    app_ui.App._kick_preopen(app, 0)
+
+    assert starts == []
+    assert app._preopen_cap is cached
 
 
 def test_camera_enumeration_result_is_applied_only_from_main_thread_queue(monkeypatch):
@@ -240,7 +289,7 @@ def test_preopen_rejects_unopened_cap_without_overwriting_valid_cap(monkeypatch)
     assert failed.release_calls == 1
 
 
-def test_same_camera_kick_keeps_valid_cap_when_reopen_fails(monkeypatch):
+def test_same_camera_kick_keeps_valid_cap_without_reopening(monkeypatch):
     app = _preopen_app()
     valid = _Cap()
     app._preopen_cap = valid
@@ -258,14 +307,7 @@ def test_same_camera_kick_keeps_valid_cap_when_reopen_fails(monkeypatch):
     app_ui.App._kick_preopen(app, 0)
     assert app._preopen_cap is valid
     assert valid.release_calls == 0
-
-    failed = _Cap(opened=False)
-    monkeypatch.setattr(app_ui, "open_camera", lambda _index: failed)
-    pending[0][0](*pending[0][1])
-
-    assert app._preopen_cap is valid
-    assert valid.release_calls == 0
-    assert failed.release_calls == 1
+    assert pending == []
 
 
 def test_preopen_valid_replacement_releases_previous_handle(monkeypatch):
@@ -517,6 +559,9 @@ def test_generation_aware_post_done_ignores_stale_and_deduplicates_current():
         _dual_recording_ready=True,
         _dual_preview_lock=threading.Lock(),
         _dual_preview_queue=Queue(maxsize=1),
+        _dual_metrics_lock=threading.Lock(),
+        _dual_first_render_events={4: object()},
+        _dual_startup_metrics={4: object()},
         status_var=_Var("就绪"),
     )
 
@@ -532,6 +577,8 @@ def test_generation_aware_post_done_ignores_stale_and_deduplicates_current():
     assert app._current_session_generation == 0
     assert app._dual_done_generation == 4
     assert app._dual_recording_ready is False
+    assert app._dual_first_render_events == {}
+    assert app._dual_startup_metrics == {}
     assert app.status_var.get() == "初始化失败：boom"
 
 

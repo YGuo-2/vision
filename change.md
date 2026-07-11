@@ -13,12 +13,16 @@ Tkinter 双摄点击“开始”后，第二摄像头仍需现场打开且两路
 - 修正双摄异常测试语义：骨架推理异常使用 `record_skeleton=True` 并验证两条 pipeline；无骨架写盘异常使用 `record_skeleton=False` 并验证零 pipeline。
 - `analysis/bench_annotate_fps.py` 新增 `--mediapipe-only`，并输出实际 `active_delegate`、fallback 原因、峰值 RSS 和 RSS 增量。
 - 隔离 venv 使用 6 段真实视频对比 MediaPipe `0.10.31` / `0.10.35`。`0.10.35` 未达到 10% 性能门槛，CPU FPS 中位数约低 1.6%-1.7%，峰值 RSS 高约 15%-19%；12 次 GPU 请求全部因 Windows build 禁用 GPU 而回退 CPU。因此保持 `mediapipe==0.10.31`、CPU 默认且不增加 GPU UI，结果置顶写入 `docs/mediapipe_gpu_delegate_report.md`。
+- Spec acceptance 第一轮修复资源边界：禁止在 native `read()` 活跃时由其他线程强制 `release()`，仅使用 capture 显式 `interrupt()` 协作退出；无法取消的旧 open/read 进入退役隔离，同 index 在其收敛前禁止重复 open；release 异常保留资源并重试，不再静默标记完成。
+- Legacy 单摄预开对相同 index 的 ready/in-flight 请求改为幂等；pool 的同 index 互斥锁获取支持 stop_event 取消，避免停止后留下排队 open。
+- 启动计时日志只在 `running/failed/stopped` 终态输出，claim 失败不再被早先的 `starting` 覆盖；会话完成后清理对应 metrics，避免长期增长。
+- 报告补充当前锁定 `0.10.31` 的六视频 active-GPU 门控：pose-only `1.0020x`、pose+hands `1.0126x`，均远低于 `1.30x` / `1.20x`。
 
 ### 验证方法
 
-- 双摄预热、UI、生命周期、控件和录制定向回归：`164 passed`。
+- 双摄预热、UI、生命周期、控件和录制定向回归：`170 passed`。
 - delegate、benchmark 和 pose33_v3 golden 门控：`35 passed`。
-- 最终 Tkinter / MediaPipe / valid-mask 定向回归：`192 passed`。
+- 最终 Tkinter / MediaPipe / valid-mask 定向回归：`195 passed`。
 - `py_compile apps/app_ui.py apps/camera_warmup.py core/vision_pipeline.py analysis/bench_annotate_fps.py` 通过。
 - `git diff --check` 通过，仅有 Windows CRLF 提示。
 - 真实双摄骨架关/开各 20 次、点击到两路实际 Tk 渲染 P95 `<=0.5s` 仍需连接物理双摄人工验收；程序已输出结构化启动计时点用于采集。

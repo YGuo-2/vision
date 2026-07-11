@@ -46,7 +46,9 @@ class ControlledCapture:
         self._frames = deque(_frame(value) for value in initial_values)
         self._error: BaseException | None = None
         self._released = False
+        self._interrupted = False
         self.release_calls = 0
+        self.interrupt_calls = 0
         self.read_calls = 0
 
     def isOpened(self) -> bool:
@@ -56,13 +58,26 @@ class ControlledCapture:
     def read(self):
         with self._condition:
             self.read_calls += 1
-            while not self._frames and self._error is None and not self._released:
+            while (
+                not self._frames
+                and self._error is None
+                and not self._released
+                and not self._interrupted
+            ):
                 self._condition.wait()
             if self._error is not None:
                 raise self._error
             if self._released:
                 return False, None
+            if self._interrupted:
+                return False, None
             return True, self._frames.popleft()
+
+    def interrupt(self) -> None:
+        with self._condition:
+            self.interrupt_calls += 1
+            self._interrupted = True
+            self._condition.notify_all()
 
     def push(self, value: int) -> None:
         with self._condition:
@@ -189,9 +204,6 @@ def test_wait_pair_timeout_cancels_and_releases_both_roles() -> None:
     with pytest.raises(CameraWarmupTimeout):
         pool.wait_pair(0, 1, timeout=0.05, stop_event=threading.Event())
 
-    assert all(cap.release_calls == 0 for cap in captures.values())
-    for cap in captures.values():
-        cap.push(1)
     _eventually(lambda: all(cap.release_calls == 1 for cap in captures.values()))
     assert pool.snapshot_pair(0, 1) is None
     pool.close()
@@ -209,22 +221,18 @@ def test_wait_pair_stop_event_cancels_and_releases_both_roles() -> None:
     with pytest.raises(CameraWarmupStopped):
         pool.wait_pair(0, 1, timeout=1.0, stop_event=stop_event)
 
-    assert all(cap.release_calls == 0 for cap in captures.values())
-    for cap in captures.values():
-        cap.push(1)
     _eventually(lambda: all(cap.release_calls == 1 for cap in captures.values()))
     assert pool.snapshot_pair(0, 1) is None
     pool.close()
 
 
-def test_timeout_then_close_force_releases_retired_blocked_readers_once() -> None:
+def test_timeout_then_close_interrupts_retired_blocked_readers_once() -> None:
     captures = {0: ControlledCapture(), 1: ControlledCapture()}
     pool = CameraWarmupPool(captures.__getitem__, join_timeout=0.02)
 
     with pytest.raises(CameraWarmupTimeout):
         pool.wait_pair(0, 1, timeout=0.02, stop_event=threading.Event())
 
-    assert all(cap.release_calls == 0 for cap in captures.values())
     pool.close()
     _eventually(lambda: all(cap.release_calls == 1 for cap in captures.values()))
     _eventually(
@@ -234,6 +242,92 @@ def test_timeout_then_close_force_releases_retired_blocked_readers_once() -> Non
         )
     )
     assert all(cap.release_calls == 1 for cap in captures.values())
+
+
+def test_release_never_runs_concurrently_with_active_read() -> None:
+    read_entered = threading.Event()
+    allow_read_exit = threading.Event()
+
+    class StrictOwnerCapture(ControlledCapture):
+        def __init__(self) -> None:
+            super().__init__()
+            self.in_read = False
+            self.release_during_read = False
+
+        def read(self):
+            self.in_read = True
+            read_entered.set()
+            allow_read_exit.wait(1.0)
+            self.in_read = False
+            return False, None
+
+        def interrupt(self) -> None:
+            super().interrupt()
+            allow_read_exit.set()
+
+        def release(self) -> None:
+            self.release_during_read = self.in_read
+            super().release()
+
+    captures = {0: StrictOwnerCapture(), 1: StrictOwnerCapture()}
+    pool = CameraWarmupPool(captures.__getitem__, join_timeout=0.01)
+    try:
+        with pytest.raises(CameraWarmupTimeout):
+            pool.wait_pair(0, 1, timeout=0.01, stop_event=threading.Event())
+        assert read_entered.wait(1.0)
+        _eventually(lambda: all(cap.release_calls == 1 for cap in captures.values()))
+        assert not any(cap.release_during_read for cap in captures.values())
+    finally:
+        allow_read_exit.set()
+        pool.close()
+
+
+def test_blocked_open_is_quarantined_and_retry_does_not_duplicate_open() -> None:
+    allow_open = threading.Event()
+    calls: list[int] = []
+    captures = {0: ControlledCapture(1), 1: ControlledCapture(2)}
+
+    def factory(index: int):
+        calls.append(index)
+        allow_open.wait(1.0)
+        return captures[index]
+
+    pool = CameraWarmupPool(factory, join_timeout=0.01)
+    try:
+        with pytest.raises(CameraWarmupTimeout):
+            pool.wait_pair(0, 1, timeout=0.01, stop_event=threading.Event())
+        assert sorted(calls) == [0, 1]
+        with pytest.raises(CameraWarmupError, match="still shutting down"):
+            pool.wait_pair(0, 1, timeout=0.01, stop_event=threading.Event())
+        assert sorted(calls) == [0, 1]
+    finally:
+        allow_open.set()
+        _eventually(lambda: all(cap.release_calls == 1 for cap in captures.values()))
+        pool.close()
+
+
+def test_release_failure_is_retained_and_retried() -> None:
+    class RetryReleaseCapture(ControlledCapture):
+        def __init__(self) -> None:
+            super().__init__()
+            self.release_attempts = 0
+
+        def release(self) -> None:
+            self.release_attempts += 1
+            if self.release_attempts == 1:
+                raise RuntimeError("driver release failed")
+            super().release()
+
+    capture = RetryReleaseCapture()
+    pool = CameraWarmupPool(lambda _index: capture, join_timeout=0.01)
+    try:
+        pool.warm(PRIMARY, 0)
+        _eventually(lambda: capture.read_calls >= 1)
+        pool.cancel(PRIMARY)
+        _eventually(lambda: capture.release_attempts >= 2)
+        assert capture.release_calls == 1
+    finally:
+        pool.close()
 
 
 def test_claim_pair_stops_readers_and_transfers_both_captures() -> None:

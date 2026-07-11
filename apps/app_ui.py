@@ -139,10 +139,8 @@ class _ExclusiveCameraCapture:
         with self._release_lock:
             if self._released:
                 return
-            self._released = True
-        try:
             self._capture.release()
-        finally:
+            self._released = True
             self._index_lock.release()
 
 
@@ -1282,6 +1280,7 @@ class App:
         self._preopen_lock = threading.Lock()
         self._preopen_cap: cv2.VideoCapture | None = None
         self._preopen_index: int | None = None
+        self._preopen_pending_index: int | None = None
         # 每次预打开请求、消费或释放都递增 generation。后台 open 完成时只有仍匹配
         # 当前 generation 的任务才可提交结果，防止较晚返回的旧任务覆盖新 cap。
         self._preopen_generation = 0
@@ -2501,10 +2500,23 @@ class App:
         with self._camera_open_lock(index):
             return open_camera(index)
 
-    def _open_camera_exclusive(self, index: int):
+    def _open_camera_exclusive(
+        self,
+        index: int,
+        *,
+        stop_event: threading.Event | None = None,
+    ):
         """打开 pool capture，并把同编号互斥延续到 capture.release()。"""
         index_lock = self._camera_open_lock(index)
-        index_lock.acquire()
+        if stop_event is None:
+            index_lock.acquire()
+        else:
+            while not index_lock.acquire(timeout=_CAMERA_CANCEL_JOIN_TIMEOUT_S):
+                if stop_event.is_set():
+                    raise CameraWarmupStopped("camera open was stopped")
+            if stop_event.is_set():
+                index_lock.release()
+                raise CameraWarmupStopped("camera open was stopped")
         try:
             capture = open_camera(index)
         except BaseException:
@@ -2536,6 +2548,13 @@ class App:
         `open_camera` 阻塞 0.5–2.5s（驱动冷启动），必须放后台线程，仿 `_start_enumeration`。
         """
         with self._preopen_lock:
+            if (
+                self._preopen_index == index
+                and self._preopen_cap is not None
+            ):
+                return
+            if self._preopen_pending_index == index:
+                return
             self._preopen_generation += 1
             generation = self._preopen_generation
             # 同一摄像头的重复预热在新 cap 成功后再原子替换；新 open
@@ -2545,6 +2564,7 @@ class App:
             if not same_index:
                 self._preopen_cap = None
                 self._preopen_index = None
+            self._preopen_pending_index = index
         if old_cap is not None:
             old_cap.release()
         worker = threading.Thread(
@@ -2555,6 +2575,9 @@ class App:
         try:
             worker.start()
         except Exception:
+            with self._preopen_lock:
+                if generation == self._preopen_generation:
+                    self._preopen_pending_index = None
             raise
 
     def _preopen_camera(self, index: int, generation: int) -> None:
@@ -2575,6 +2598,9 @@ class App:
             try:
                 cap = open_camera(index)
             except Exception:
+                with self._preopen_lock:
+                    if generation == self._preopen_generation:
+                        self._preopen_pending_index = None
                 return
 
             try:
@@ -2599,6 +2625,8 @@ class App:
                     replaced_cap = self._preopen_cap
                     self._preopen_cap = cap
                     self._preopen_index = index
+                if generation == self._preopen_generation:
+                    self._preopen_pending_index = None
             if replaced_cap is not None and replaced_cap is not cap:
                 replaced_cap.release()
             if not keep and cap is not None:
@@ -2616,6 +2644,7 @@ class App:
             cached_index = self._preopen_index
             self._preopen_cap = None
             self._preopen_index = None
+            self._preopen_pending_index = None
         if cap is None:
             return None
         if cached_index != index:
@@ -2637,6 +2666,7 @@ class App:
             cap = self._preopen_cap
             self._preopen_cap = None
             self._preopen_index = None
+            self._preopen_pending_index = None
         if cap is not None:
             cap.release()
 
@@ -3288,6 +3318,7 @@ class App:
                     fps=30.0, size=_rotated_size(w2, h2, state.rotate2)
                 )
             self._set_dual_startup_outcome(generation, "running")
+            self._emit_dual_startup_metrics(generation)
             self._post_dual_recording_ready(generation)
 
             phase = "runtime"
@@ -3777,7 +3808,9 @@ class App:
                 if metrics.record_skeleton
                 else metrics.first_pair_rendered is not None
             )
-            if not force and not ready_to_emit:
+            if not force and (
+                not ready_to_emit or metrics.outcome == "starting"
+            ):
                 return
             metrics.emitted = True
             fields = {
@@ -3986,6 +4019,9 @@ class App:
                 if metrics_lock is not None:
                     with metrics_lock:
                         getattr(self, "_dual_first_render_events", {}).pop(
+                            session_generation, None
+                        )
+                        getattr(self, "_dual_startup_metrics", {}).pop(
                             session_generation, None
                         )
             self.start_btn.configure(state="normal")

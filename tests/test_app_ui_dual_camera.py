@@ -535,7 +535,7 @@ def test_annotated_stage_drops_queued_and_late_raw_packets():
     assert app._dual_preview_queue.get_nowait().stage == "annotated"
 
 
-def test_tick_renders_dual_packet_atomically_and_emits_metrics_once(
+def test_tick_renders_dual_packet_atomically_and_emits_terminal_metrics_once(
     monkeypatch, capsys
 ):
     app = _dual_preview_stub()
@@ -553,14 +553,46 @@ def test_tick_renders_dual_packet_atomically_and_emits_metrics_once(
     assert app._dual_startup_metrics[1].first_pair_rendered is not None
     assert app._dual_first_render_events[1].is_set()
     assert len(app.root.after_calls) == 1
-    first_output = capsys.readouterr().out
-    assert first_output.count("[dual-startup]") == 1
-    assert '"outcome": "starting"' in first_output
+    assert capsys.readouterr().out == ""
+
+    app_ui.App._set_dual_startup_outcome(app, 1, "running")
+    app_ui.App._emit_dual_startup_metrics(app, 1)
+    terminal_output = capsys.readouterr().out
+    assert terminal_output.count("[dual-startup]") == 1
+    assert '"outcome": "running"' in terminal_output
 
     app_ui.App._post_dual_frame_pair(
         app, frame, "front2", frame, "side2", session_generation=1, stage="raw"
     )
     app_ui.App._tick(app)
+    assert capsys.readouterr().out == ""
+
+
+def test_raw_render_then_claim_failure_emits_failed_terminal_metrics_once(capsys):
+    app = _dual_preview_stub()
+    metrics = app._dual_startup_metrics[1]
+    metrics.first_pair_rendered = metrics.start_click + 0.01
+
+    app_ui.App._emit_dual_startup_metrics(app, 1)
+    assert capsys.readouterr().out == ""
+
+    app_ui.App._finish_dual_startup_metrics(
+        app,
+        1,
+        outcome="failed",
+        error_type="CameraWarmupError",
+    )
+    output = capsys.readouterr().out
+    assert output.count("[dual-startup]") == 1
+    assert '"outcome": "failed"' in output
+    assert '"error_type": "CameraWarmupError"' in output
+
+    app_ui.App._finish_dual_startup_metrics(
+        app,
+        1,
+        outcome="failed",
+        error_type="CameraWarmupError",
+    )
     assert capsys.readouterr().out == ""
 
 

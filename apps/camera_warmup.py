@@ -8,6 +8,7 @@ normal processing worker with :meth:`CameraWarmupPool.claim_pair`.
 """
 from __future__ import annotations
 
+import inspect
 import threading
 import time
 from dataclasses import dataclass, field
@@ -81,6 +82,9 @@ class CameraWarmupPool:
         join_timeout: float = 1.0,
     ) -> None:
         self._capture_factory = capture_factory or open_camera
+        self._factory_accepts_stop_event = self._supports_stop_event(
+            self._capture_factory
+        )
         self._clock = clock
         self._stop_poll_interval = max(0.001, float(stop_poll_interval))
         self._join_timeout = max(0.0, float(join_timeout))
@@ -117,6 +121,7 @@ class CameraWarmupPool:
                 and not current.claimed
             ):
                 return
+            self._ensure_index_not_retiring_locked(index)
 
             other_role = SECONDARY if role == PRIMARY else PRIMARY
             other = self._slots[other_role]
@@ -377,7 +382,7 @@ class CameraWarmupPool:
         cap: Any | None = None
         preserve_for_claim = False
         try:
-            cap = self._capture_factory(slot.index)
+            cap = self._open_capture(slot)
             if cap is None:
                 raise CameraWarmupError(
                     f"{slot.role} camera {slot.index} returned no capture"
@@ -431,11 +436,15 @@ class CameraWarmupPool:
                 if not preserve_for_claim and slot.cap is cap:
                     slot.cap = None
                 self._condition.notify_all()
+            released = True
             if cap is not None and not preserve_for_claim:
-                self._release_once(slot, cap)
+                released = self._release_once(slot, cap)
             if not preserve_for_claim:
                 with self._condition:
-                    self._retired.pop(id(slot), None)
+                    if released:
+                        self._retired.pop(id(slot), None)
+                    else:
+                        self._retired[id(slot)] = slot
                     self._condition.notify_all()
 
     def _wait_expected_pair(
@@ -524,19 +533,38 @@ class CameraWarmupPool:
         slot.stop_event.set()
         self._retired[id(slot)] = slot
 
-    def _force_release(self, slot: _WarmupSlot) -> None:
-        with self._condition:
-            cap = slot.cap
-            slot.cap = None
-        if cap is not None:
-            self._release_once(slot, cap)
-
-    def _release_once(self, slot: _WarmupSlot, cap: Any) -> None:
+    def _release_once(self, slot: _WarmupSlot, cap: Any) -> bool:
         with slot.release_lock:
             if slot.released:
-                return
+                return True
+            try:
+                cap.release()
+            except Exception as exc:
+                with self._condition:
+                    slot.error = CameraWarmupError(
+                        f"{slot.role} camera {slot.index} release failed: {exc}"
+                    )
+                    if slot.cap is None:
+                        slot.cap = cap
+                    self._retired[id(slot)] = slot
+                    self._condition.notify_all()
+                return False
             slot.released = True
-        self._safe_release(cap)
+        with self._condition:
+            if slot.cap is cap:
+                slot.cap = None
+            self._condition.notify_all()
+        return True
+
+    def _request_capture_interrupt(self, slot: _WarmupSlot) -> None:
+        with self._condition:
+            cap = slot.cap
+        interrupt = getattr(cap, "interrupt", None) if cap is not None else None
+        if callable(interrupt):
+            try:
+                interrupt()
+            except Exception:
+                pass
 
     def _interrupt_slot(self, slot: _WarmupSlot, *, join: bool) -> None:
         slot.stop_event.set()
@@ -549,18 +577,23 @@ class CameraWarmupPool:
         ):
             thread.join(self._join_timeout)
 
+        if thread is not None and thread.is_alive():
+            self._request_capture_interrupt(slot)
+            if join and thread is not threading.current_thread():
+                thread.join(self._join_timeout)
+
         # Never release a capture while its owner thread may still be inside
         # open/read. A detached late reader releases it in _reader_loop.finally.
         if thread is None or not thread.is_alive():
             with self._condition:
                 cap = slot.cap
-                slot.cap = None
             if cap is not None:
-                self._release_once(slot, cap)
-            with self._condition:
-                self._retired.pop(id(slot), None)
-        elif join:
-            self._force_release(slot)
+                released = self._release_once(slot, cap)
+            else:
+                released = True
+            if released:
+                with self._condition:
+                    self._retired.pop(id(slot), None)
 
     def _reap_slot_async(self, slot: _WarmupSlot) -> None:
         """Finish a cancelled slot without blocking a UI caller."""
@@ -579,7 +612,8 @@ class CameraWarmupPool:
             ):
                 thread.join(self._join_timeout)
             if thread is not None and thread.is_alive():
-                self._force_release(slot)
+                self._request_capture_interrupt(slot)
+                thread.join(self._join_timeout)
             self._interrupt_slot(slot, join=False)
 
         reaper = threading.Thread(
@@ -590,8 +624,8 @@ class CameraWarmupPool:
         try:
             reaper.start()
         except BaseException:
-            # Cancellation must not strand an exclusive device lock even when
-            # the runtime cannot create the background cleanup thread.
+            # Keep cancellation bounded. The reader remains the only owner
+            # allowed to release a native capture after open/read returns.
             self._interrupt_slot(slot, join=True)
 
     def _interrupt_slots(
@@ -610,7 +644,7 @@ class CameraWarmupPool:
         for slot in slots:
             thread = slot.thread
             if thread is not None and thread.is_alive():
-                self._force_release(slot)
+                self._request_capture_interrupt(slot)
             self._interrupt_slot(slot, join=False)
 
     def _warm_pair(
@@ -625,6 +659,8 @@ class CameraWarmupPool:
 
         with self._condition:
             self._ensure_open()
+            for index in desired.values():
+                self._ensure_index_not_retiring_locked(index)
             if any(
                 slot is not None and slot.claimed
                 for slot in self._slots.values()
@@ -683,6 +719,23 @@ class CameraWarmupPool:
         if expected is None:  # pragma: no cover - guarded above
             raise CameraWarmupError("could not establish camera warmup pair")
         return expected
+
+    def _open_capture(self, slot: _WarmupSlot) -> Any:
+        if self._factory_accepts_stop_event:
+            return self._capture_factory(
+                slot.index, stop_event=slot.stop_event
+            )
+        return self._capture_factory(slot.index)
+
+    def _ensure_index_not_retiring_locked(self, index: int) -> None:
+        for slot in self._retired.values():
+            if slot.index != index or slot.released:
+                continue
+            thread = slot.thread
+            if (thread is not None and thread.is_alive()) or slot.cap is not None:
+                raise CameraWarmupError(
+                    f"camera {index} is still shutting down"
+                )
 
     def _new_slot_locked(self, role: str, index: int) -> _WarmupSlot:
         self._generations[role] += 1
@@ -830,11 +883,16 @@ class CameraWarmupPool:
             return False
 
     @staticmethod
-    def _safe_release(cap: Any) -> None:
+    def _supports_stop_event(factory: CaptureFactory) -> bool:
         try:
-            cap.release()
-        except Exception:
-            pass
+            parameters = inspect.signature(factory).parameters.values()
+        except (TypeError, ValueError):
+            return False
+        return any(
+            parameter.name == "stop_event"
+            or parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters
+        )
 
     @staticmethod
     def _normalize_error(slot: _WarmupSlot, exc: BaseException) -> BaseException:

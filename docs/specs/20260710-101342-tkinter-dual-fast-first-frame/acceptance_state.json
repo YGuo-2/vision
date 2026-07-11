@@ -1,0 +1,484 @@
+{
+  "affected_units": [
+    "U-001",
+    "U-002",
+    "U-003",
+    "U-004"
+  ],
+  "agents": [
+    {
+      "agent_id": "round-1-R-U-001",
+      "completed_at": "2026-07-10 19:00:49",
+      "report": "T-001 tests 25 passed; P1 concurrent force release while native read may remain alive; P2 blocked open_camera factory has no cancellable boundary.",
+      "result": "ACTIONABLE_ISSUES",
+      "role": "first_wave",
+      "round": 1,
+      "started_at": "2026-07-10 18:55:36",
+      "status": "completed",
+      "task_ids": [
+        "T-001"
+      ],
+      "unit_id": "U-001"
+    },
+    {
+      "agent_id": "round-1-A-U-001",
+      "completed_at": "2026-07-10 19:11:23",
+      "report": "Confirmed P1 active-read force-release race and P2 blocked-open duplicate opens; added P3 swallowed release failure marked handled without retry.",
+      "result": "ACTIONABLE_ISSUES",
+      "role": "adversarial",
+      "round": 1,
+      "started_at": "2026-07-10 19:05:05",
+      "status": "completed",
+      "task_ids": [
+        "T-001"
+      ],
+      "unit_id": "U-001"
+    },
+    {
+      "agent_id": "round-1-R-U-002",
+      "completed_at": "2026-07-10 19:00:50",
+      "report": "T-002 selector warmup, reuse, refresh/file/stop/close release, and post-session rewarm complete; 139 focused tests passed; no fallback or spec drift.",
+      "result": "PASS",
+      "role": "first_wave",
+      "round": 1,
+      "started_at": "2026-07-10 18:55:37",
+      "status": "completed",
+      "task_ids": [
+        "T-002"
+      ],
+      "unit_id": "U-002"
+    },
+    {
+      "agent_id": "round-1-A-U-002",
+      "completed_at": "2026-07-10 19:11:23",
+      "report": "Found P2 legacy single-camera preopen is not idempotent for same index and can overlap background open with a session-owned old capture.",
+      "result": "ACTIONABLE_ISSUES",
+      "role": "adversarial",
+      "round": 1,
+      "started_at": "2026-07-10 19:05:05",
+      "status": "completed",
+      "task_ids": [
+        "T-002"
+      ],
+      "unit_id": "U-002"
+    },
+    {
+      "agent_id": "round-1-R-U-003",
+      "completed_at": "2026-07-10 19:01:52",
+      "report": "T-003 core behavior complete and 164 tests pass; P3 startup metrics may emit outcome=starting before claim, preventing final claim failure/error_type from being logged.",
+      "result": "ACTIONABLE_ISSUES",
+      "role": "first_wave",
+      "round": 1,
+      "started_at": "2026-07-10 18:55:37",
+      "status": "completed",
+      "task_ids": [
+        "T-003"
+      ],
+      "unit_id": "U-003"
+    },
+    {
+      "agent_id": "round-1-A-U-003",
+      "completed_at": "2026-07-10 19:11:23",
+      "report": "Confirmed P3 skeleton-off metrics emit before claim terminal outcome; added P4 unbounded _dual_startup_metrics retention.",
+      "result": "ACTIONABLE_ISSUES",
+      "role": "adversarial",
+      "round": 1,
+      "started_at": "2026-07-10 19:05:05",
+      "status": "completed",
+      "task_ids": [
+        "T-003"
+      ],
+      "unit_id": "U-003"
+    },
+    {
+      "agent_id": "round-1-R-U-004",
+      "completed_at": "2026-07-10 19:05:05",
+      "report": "T-004/T-005 isolated A/B artifacts and report aggregates verified; 0.10.35/GPU no-go is evidence-backed; 35 and 192 regression tests passed; hardware P95 item explicitly disclosed.",
+      "result": "PASS",
+      "role": "first_wave",
+      "round": 1,
+      "started_at": "2026-07-10 19:00:50",
+      "status": "completed",
+      "task_ids": [
+        "T-004",
+        "T-005"
+      ],
+      "unit_id": "U-004"
+    },
+    {
+      "agent_id": "round-1-A-U-004",
+      "completed_at": "2026-07-10 19:18:29",
+      "report": "P2 completion records still point to pre-implementation commit 0b24519; P3 report omits latest 0.10.31 active-GPU six-video speedup evidence although no-go is correct.",
+      "result": "ACTIONABLE_ISSUES",
+      "role": "adversarial",
+      "round": 1,
+      "started_at": "2026-07-10 19:11:23",
+      "status": "completed",
+      "task_ids": [
+        "T-004",
+        "T-005"
+      ],
+      "unit_id": "U-004"
+    }
+  ],
+  "completed_at": null,
+  "created_at": "2026-07-10 18:54:54",
+  "deferred_issues": [],
+  "fixes": [
+    {
+      "completed_at": "2026-07-10 19:32:33",
+      "created_at": "2026-07-10 19:18:29",
+      "evidence": "Removed all cross-thread force-release paths; reapers request optional interrupt and only the owner reader releases; strict active-read test passes.",
+      "fix_id": "F-001",
+      "issue_ids": [
+        "I-001"
+      ],
+      "round": 1,
+      "severity": "P1",
+      "started_at": "2026-07-10 19:22:10",
+      "status": "done",
+      "task_ids": [
+        "T-001"
+      ],
+      "title": "Force release may race an active native camera read",
+      "unit_ids": [
+        "U-001"
+      ]
+    },
+    {
+      "completed_at": "2026-07-10 19:32:33",
+      "created_at": "2026-07-10 19:18:29",
+      "evidence": "Retired same-index open/read is quarantined and immediate retry is rejected without new factory calls; app exclusive lock acquisition is stop_event-cancellable; blocked-open test passes.",
+      "fix_id": "F-002",
+      "issue_ids": [
+        "I-002"
+      ],
+      "round": 1,
+      "severity": "P2",
+      "started_at": "2026-07-10 19:22:10",
+      "status": "done",
+      "task_ids": [
+        "T-001"
+      ],
+      "title": "Blocked camera open has no cancellable boundary",
+      "unit_ids": [
+        "U-001"
+      ]
+    },
+    {
+      "completed_at": "2026-07-10 19:32:33",
+      "created_at": "2026-07-10 19:18:29",
+      "evidence": "Metrics now require terminal outcome before normal emission; running emits after claim and failed claim emits once from finally; regression test passes.",
+      "fix_id": "F-003",
+      "issue_ids": [
+        "I-003"
+      ],
+      "round": 1,
+      "severity": "P3",
+      "started_at": "2026-07-10 19:22:10",
+      "status": "done",
+      "task_ids": [
+        "T-003"
+      ],
+      "title": "Startup metrics can freeze before claim outcome is known",
+      "unit_ids": [
+        "U-003"
+      ]
+    },
+    {
+      "completed_at": "2026-07-10 19:32:33",
+      "created_at": "2026-07-10 19:18:29",
+      "evidence": "Release is marked complete only after success; failures retain cap/error for reaper/close retry; fail-once release test passes.",
+      "fix_id": "F-004",
+      "issue_ids": [
+        "I-004"
+      ],
+      "round": 1,
+      "severity": "P3",
+      "started_at": "2026-07-10 19:22:10",
+      "status": "done",
+      "task_ids": [
+        "T-001"
+      ],
+      "title": "Release failure is swallowed and never retried",
+      "unit_ids": [
+        "U-001"
+      ]
+    },
+    {
+      "completed_at": "2026-07-10 19:32:33",
+      "created_at": "2026-07-10 19:18:29",
+      "evidence": "Legacy preopen tracks pending index and returns for same-index ready/in-flight requests; idempotency tests pass.",
+      "fix_id": "F-005",
+      "issue_ids": [
+        "I-005"
+      ],
+      "round": 1,
+      "severity": "P2",
+      "started_at": "2026-07-10 19:22:11",
+      "status": "done",
+      "task_ids": [
+        "T-002"
+      ],
+      "title": "Repeated same-index legacy preopen can duplicate camera opens",
+      "unit_ids": [
+        "U-002"
+      ]
+    },
+    {
+      "completed_at": "2026-07-10 19:32:33",
+      "created_at": "2026-07-10 19:18:29",
+      "evidence": "_post_done removes both render event and startup metrics for completed generation; lifecycle test asserts empty mappings.",
+      "fix_id": "F-006",
+      "issue_ids": [
+        "I-006"
+      ],
+      "round": 1,
+      "severity": "P4",
+      "started_at": "2026-07-10 19:22:11",
+      "status": "done",
+      "task_ids": [
+        "T-003"
+      ],
+      "title": "Dual startup metrics retain every session generation",
+      "unit_ids": [
+        "U-003"
+      ]
+    },
+    {
+      "completed_at": "2026-07-10 19:32:34",
+      "created_at": "2026-07-10 19:18:29",
+      "evidence": "tasks.md completion log and progress.md Last Known Commit now reference implementation commit a3a605f.",
+      "fix_id": "F-007",
+      "issue_ids": [
+        "I-007"
+      ],
+      "round": 1,
+      "severity": "P2",
+      "started_at": "2026-07-10 19:22:11",
+      "status": "done",
+      "task_ids": [
+        "T-004",
+        "T-005"
+      ],
+      "title": "Completion evidence points to pre-implementation commit",
+      "unit_ids": [
+        "U-004"
+      ]
+    },
+    {
+      "completed_at": "2026-07-10 19:32:34",
+      "created_at": "2026-07-10 19:18:29",
+      "evidence": "Report now includes 0.10.31 six-video active=gpu ratios 1.0020x pose-only and 1.0126x pose+hands against thresholds.",
+      "fix_id": "F-008",
+      "issue_ids": [
+        "I-008"
+      ],
+      "round": 1,
+      "severity": "P3",
+      "started_at": "2026-07-10 19:22:11",
+      "status": "done",
+      "task_ids": [
+        "T-004",
+        "T-005"
+      ],
+      "title": "Report omits current-version active GPU gate ratios",
+      "unit_ids": [
+        "U-004"
+      ]
+    }
+  ],
+  "full_fix_rounds": 3,
+  "issues": [
+    {
+      "agent_id": "round-1-R-U-001",
+      "created_at": "2026-07-10 19:00:49",
+      "evidence": "apps/camera_warmup.py lines 552-563, 573-583, 610-614 force release when reader remains alive; cooperative fake captures do not reject concurrent read/release.",
+      "fix_id": "F-001",
+      "issue_id": "I-001",
+      "round": 1,
+      "severity": "P1",
+      "status": "fixed",
+      "task_ids": [
+        "T-001"
+      ],
+      "title": "Force release may race an active native camera read",
+      "unit_id": "U-001"
+    },
+    {
+      "agent_id": "round-1-R-U-001",
+      "created_at": "2026-07-10 19:00:49",
+      "evidence": "apps/camera_warmup.py lines 378-390 calls capture factory inside daemon; timeout/cancel cannot release a capture that has not returned from open.",
+      "fix_id": "F-002",
+      "issue_id": "I-002",
+      "round": 1,
+      "severity": "P2",
+      "status": "fixed",
+      "task_ids": [
+        "T-001"
+      ],
+      "title": "Blocked camera open has no cancellable boundary",
+      "unit_id": "U-001"
+    },
+    {
+      "agent_id": "round-1-R-U-003",
+      "created_at": "2026-07-10 19:01:52",
+      "evidence": "apps/app_ui.py lines 3773-3782 emits once after first raw render while claim occurs later around line 3264; a later claim failure cannot replace starting/null error metrics; test currently asserts starting.",
+      "fix_id": "F-003",
+      "issue_id": "I-003",
+      "round": 1,
+      "severity": "P3",
+      "status": "fixed",
+      "task_ids": [
+        "T-003"
+      ],
+      "title": "Startup metrics can freeze before claim outcome is known",
+      "unit_id": "U-003"
+    },
+    {
+      "agent_id": "round-1-A-U-001",
+      "created_at": "2026-07-10 19:11:23",
+      "evidence": "apps/camera_warmup.py marks slot released before calling release; safe release swallows all exceptions, so later close does not retry and can report completion while device remains owned.",
+      "fix_id": "F-004",
+      "issue_id": "I-004",
+      "round": 1,
+      "severity": "P3",
+      "status": "fixed",
+      "task_ids": [
+        "T-001"
+      ],
+      "title": "Release failure is swallowed and never retried",
+      "unit_id": "U-001"
+    },
+    {
+      "agent_id": "round-1-A-U-002",
+      "created_at": "2026-07-10 19:11:23",
+      "evidence": "apps/app_ui.py _sync_camera_warmup repeatedly calls _kick_preopen; _kick_preopen always starts a new thread despite an existing same-index cap/task; dynamic probe observed opens=2 and start can claim old cap while new open continues.",
+      "fix_id": "F-005",
+      "issue_id": "I-005",
+      "round": 1,
+      "severity": "P2",
+      "status": "fixed",
+      "task_ids": [
+        "T-002"
+      ],
+      "title": "Repeated same-index legacy preopen can duplicate camera opens",
+      "unit_id": "U-002"
+    },
+    {
+      "agent_id": "round-1-A-U-003",
+      "created_at": "2026-07-10 19:11:23",
+      "evidence": "apps/app_ui.py stores _dual_startup_metrics per generation but _post_done removes only render events; repeated sessions grow the metrics mapping for process lifetime.",
+      "fix_id": "F-006",
+      "issue_id": "I-006",
+      "round": 1,
+      "severity": "P4",
+      "status": "fixed",
+      "task_ids": [
+        "T-003"
+      ],
+      "title": "Dual startup metrics retain every session generation",
+      "unit_id": "U-003"
+    },
+    {
+      "agent_id": "round-1-A-U-004",
+      "created_at": "2026-07-10 19:18:29",
+      "evidence": "tasks.md completion log and progress.md Last Known Commit/entries use 0b24519, while implementation is a3a605f; recorded SHA cannot reconstruct delivered changes.",
+      "fix_id": "F-007",
+      "issue_id": "I-007",
+      "round": 1,
+      "severity": "P2",
+      "status": "fixed",
+      "task_ids": [
+        "T-004",
+        "T-005"
+      ],
+      "title": "Completion evidence points to pre-implementation commit",
+      "unit_id": "U-004"
+    },
+    {
+      "agent_id": "round-1-A-U-004",
+      "created_at": "2026-07-10 19:18:29",
+      "evidence": "Latest report table covers CPU versions and 0.10.35 fallback, but 0.10.31 six-video active=gpu results show median FPS ratios 1.0020x pose-only and 1.0126x pose+hands and are needed to independently substantiate the GPU no-go.",
+      "fix_id": "F-008",
+      "issue_id": "I-008",
+      "round": 1,
+      "severity": "P3",
+      "status": "fixed",
+      "task_ids": [
+        "T-004",
+        "T-005"
+      ],
+      "title": "Report omits current-version active GPU gate ratios",
+      "unit_id": "U-004"
+    }
+  ],
+  "max_rounds": 6,
+  "notes": [],
+  "original_task_digest": "4308047409db",
+  "original_task_ids": [
+    "T-001",
+    "T-002",
+    "T-003",
+    "T-004",
+    "T-005"
+  ],
+  "policy": "rounds 1-3 fix all actionable issues; round 4+ auto-fix P0-P2 only",
+  "review_units": [
+    {
+      "adversarial_status": "issues",
+      "last_result": "ACTIONABLE_ISSUES",
+      "phase": "阶段 1：预热基础设施",
+      "review_status": "issues",
+      "round_started": null,
+      "status": "issues",
+      "task_ids": [
+        "T-001"
+      ],
+      "unit_id": "U-001"
+    },
+    {
+      "adversarial_status": "issues",
+      "last_result": "ACTIONABLE_ISSUES",
+      "phase": "阶段 2：Tkinter 双摄接入",
+      "review_status": "pass",
+      "round_started": null,
+      "status": "issues",
+      "task_ids": [
+        "T-002"
+      ],
+      "unit_id": "U-002"
+    },
+    {
+      "adversarial_status": "issues",
+      "last_result": "ACTIONABLE_ISSUES",
+      "phase": "阶段 2：Tkinter 双摄接入",
+      "review_status": "issues",
+      "round_started": null,
+      "status": "issues",
+      "task_ids": [
+        "T-003"
+      ],
+      "unit_id": "U-003"
+    },
+    {
+      "adversarial_status": "issues",
+      "last_result": "ACTIONABLE_ISSUES",
+      "phase": "阶段 3：依赖实验与交付",
+      "review_status": "pass",
+      "round_started": null,
+      "status": "issues",
+      "task_ids": [
+        "T-004",
+        "T-005"
+      ],
+      "unit_id": "U-004"
+    }
+  ],
+  "round": 1,
+  "schema_version": 1,
+  "status": "fixes-complete",
+  "task_count": 5,
+  "updated_at": "2026-07-10 19:32:34",
+  "workflow": "requirements-first"
+}
