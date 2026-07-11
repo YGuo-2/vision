@@ -250,6 +250,29 @@ def test_student_id_escaped_and_quoted_formats(tmp_path: Path) -> None:
     assert cands2[0].student_id == "ID-000123"
 
 
+def test_student_id_hash_optional_placeholders(tmp_path: Path) -> None:
+    """###000 + 123 → 123（# 不强制补零）；超出宽度保留 ID- 前缀。"""
+    from openpyxl import Workbook
+
+    from core.exam_roster import _display_text_from_number_format
+
+    assert _display_text_from_number_format(123, "###000") == "123"
+    assert _display_text_from_number_format(123, "000000") == "000123"
+    assert _display_text_from_number_format(12345, '"ID-"000') == "ID-12345"
+    assert _display_text_from_number_format(5, "#0") == "5"
+
+    path = tmp_path / "hash.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["序号", "学号", "姓名"])
+    ws.append([1, 123, "甲"])
+    ws.cell(row=2, column=2).number_format = "###000"
+    wb.save(path)
+    wb.close()
+    cands = import_roster_xlsx(path)
+    assert cands[0].student_id == "123"
+
+
 def test_student_id_unparseable_custom_format_rejects_sheet(tmp_path: Path) -> None:
     """无法还原的自定义格式不得静默裸数字，应整表拒绝。"""
     from openpyxl import Workbook

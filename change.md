@@ -1,3 +1,20 @@
+## 2026-07-11: [fix] 考试系统审查第四轮（主窗关面板台账 / # 占位符）
+
+### 问题描述
+
+主窗 `root.destroy` 不触发考试面板 `_on_close`，当前 `panel.scorebook` 未进 sinks 导致不 flush/close；Excel `#` 被当成 `0` 强制补零，超宽时丢掉字面量前缀。
+
+### 修改内容
+
+1. **`ExamPanel.prepare_for_app_close`**：中止考试、flush 台账、登记 `_exam_scorebook_sinks`；主窗 `_on_close` 优先调用它，并把 sinks（含刚移交面板）计入关窗额外预算。
+2. **学号格式**：`0` 必选补零、`#` 可选不补零（`###000`+123→`123`）；超出占位宽度时保留字面量（`"ID-"000`+12345→`ID-12345`）。
+
+### 验证方法
+
+- `pytest tests/test_exam_*.py tests/test_presence_gate.py tests/test_app_ui_lifecycle.py tests/test_recording_controller.py -q` → **104 passed**。
+
+---
+
 ## 2026-07-11: [fix] 考试系统审查第三轮（begin 不 advance / discard 关窗 / multi-sink）
 
 ### 问题描述

@@ -517,8 +517,46 @@ class ExamPanel:
             self.app._exam_lock_manual_record(False)  # type: ignore[attr-defined]
         except Exception:
             pass
-        self.phase_var.set(f"阶段：{self.session.phase}")
-        self.status_var.set("主会话已停止，考试已中止")
+        try:
+            self.phase_var.set(f"阶段：{self.session.phase}")
+            self.status_var.set("主会话已停止，考试已中止")
+        except Exception:
+            pass
+
+    def prepare_for_app_close(self) -> None:
+        """主窗口销毁前：中止考试、flush 成绩簿并移交 App sinks（保证落盘）。
+
+        主窗 ``root.destroy`` 不会触发本面板 ``WM_DELETE_WINDOW``/``_on_close``，
+        必须在此显式移交 scorebook，否则只关 sinks 会漏掉当前面板台账。
+        """
+        self.on_session_stop()
+        try:
+            self.win.after_cancel(self._tick_id)
+        except Exception:
+            pass
+        if self.scorebook is not None:
+            try:
+                self.scorebook.flush()
+            except Exception:
+                pass
+            # 一律登记 sink：应用关闭末段统一再 flush/close；processing 行仍可回填
+            try:
+                self.app._register_exam_scorebook_sink(self.scorebook)  # type: ignore[attr-defined]
+            except Exception:
+                sinks = getattr(self.app, "_exam_scorebook_sinks", None)
+                if sinks is None:
+                    self.app._exam_scorebook_sinks = [self.scorebook]  # type: ignore[attr-defined]
+                elif self.scorebook not in sinks:
+                    sinks.append(self.scorebook)
+            self.scorebook = None
+        try:
+            delattr(self.app, "_exam_panel")
+        except Exception:
+            pass
+        try:
+            self.win.destroy()
+        except Exception:
+            pass
 
     def bind_segment(self, row_id: str, segment_id: str, segment_dir: str) -> None:
         row = self._row_by_id.get(row_id)

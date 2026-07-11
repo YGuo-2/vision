@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
 from queue import Queue
 from types import SimpleNamespace
@@ -1323,6 +1324,69 @@ def test_exam_preflight_rejects_skeleton_session():
     ok, msg = app_ui.App._exam_preflight(app)
     assert ok is False
     assert "骨架" in msg
+
+
+def test_app_close_registers_open_panel_scorebook_for_flush_close(tmp_path):
+    """主窗关闭时，仍打开的考试面板成绩簿必须进入 sinks 并被 flush/close。"""
+    from apps.exam_panel import ExamPanel
+    from core.exam_roster import ExamCandidate, ExamScorebook
+
+    flushes: list[str] = []
+    closes: list[str] = []
+
+    class _Book(ExamScorebook):
+        def flush(self, *, timeout: float = 5.0) -> None:  # type: ignore[override]
+            flushes.append("flush")
+            # 不写盘，避免 openpyxl 依赖路径干扰
+            return
+
+        def close(self) -> None:  # type: ignore[override]
+            closes.append("close")
+            return
+
+    book = _Book(path=tmp_path / "scores.xlsx")
+    book.load_candidates([ExamCandidate(1, "S1", "甲")])
+    book.update_row(book.rows[0], status="processing")
+
+    app = SimpleNamespace(
+        _exam_scorebook_sinks=[],
+        _exam_panel="sentinel",
+    )
+    app._register_exam_scorebook_sink = (
+        lambda sb: app_ui.App._register_exam_scorebook_sink(app, sb)
+    )
+    app._exam_arm_occupancy = lambda *_a, **_k: None
+    app._exam_set_active = lambda *_a, **_k: None
+    app._exam_lock_manual_record = lambda *_a, **_k: None
+
+    panel = SimpleNamespace(
+        app=app,
+        scorebook=book,
+        session=SimpleNamespace(phase="completed"),
+        _tick_id="x",
+        win=SimpleNamespace(
+            after_cancel=lambda _i: None,
+            destroy=lambda: None,
+        ),
+        phase_var=_Var(""),
+        status_var=_Var(""),
+        on_session_stop=lambda: None,
+    )
+
+    ExamPanel.prepare_for_app_close(panel)  # type: ignore[arg-type]
+
+    assert flushes == ["flush"]
+    assert panel.scorebook is None
+    assert book in app._exam_scorebook_sinks
+    assert not hasattr(app, "_exam_panel") or getattr(app, "_exam_panel", None) is None
+
+    # 模拟主窗末段：drain 后 flush/close sinks
+    for sink in list(app._exam_scorebook_sinks):
+        sink.flush()
+        sink.close()
+    app._exam_scorebook_sinks = []
+    assert closes == ["close"]
+    assert flushes == ["flush", "flush"]
 
 
 def test_compare_update_ignores_old_segment_and_formats_latest_score():

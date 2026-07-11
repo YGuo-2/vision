@@ -3410,11 +3410,23 @@ class App:
     def _on_close(self) -> None:
         if self._closing:
             return
-        # 1) 先中止考试并 discard（此时 _closing 仍为 False，discard 能走 finalize）
+        # 1) 先中止考试、移交当前面板 scorebook 到 sinks（_closing 仍为 False，discard 可走）
+        #    root.destroy 不会触发面板 WM_DELETE_WINDOW，必须 prepare_for_app_close。
         panel = getattr(self, "_exam_panel", None)
         if panel is not None:
             try:
-                panel.on_session_stop()
+                if hasattr(panel, "prepare_for_app_close"):
+                    panel.prepare_for_app_close()
+                else:
+                    panel.on_session_stop()
+                    book = getattr(panel, "scorebook", None)
+                    if book is not None:
+                        App._register_exam_scorebook_sink(self, book)
+                        try:
+                            book.flush()
+                        except Exception:
+                            pass
+                        panel.scorebook = None
             except Exception:
                 pass
         elif bool(getattr(self, "_exam_active", False)):
@@ -3442,17 +3454,24 @@ class App:
                     control.configure(state="disabled")
                 except Exception:
                     pass
-        # 考试裁剪 / sink 落盘需要更长预算，避免 3s 全局 deadline 截断
+        # 考试裁剪 / sink（含刚移交的面板台账）落盘需要更长预算
         clip_alive = False
         with getattr(self, "_exam_clip_lock", threading.Lock()):
             threads = getattr(self, "_exam_clip_threads", None) or set()
             clip_alive = any(t.is_alive() for t in threads)
-        sink_pending = bool(getattr(self, "_exam_scorebook_sinks", None))
+        sinks = list(getattr(self, "_exam_scorebook_sinks", None) or [])
+        sink_pending = bool(sinks)
+        has_processing = any(
+            any(getattr(r, "status", None) == "processing" for r in getattr(s, "rows", []))
+            for s in sinks
+        )
         extra = 0.0
         if clip_alive:
             extra = max(extra, 30.0)
         if sink_pending:
             extra = max(extra, 8.0)
+        if has_processing:
+            extra = max(extra, 12.0)
         self._close_deadline = time.monotonic() + _CLOSE_JOIN_TIMEOUT_S + extra
         postprocessor = getattr(self, "_record_postprocessor", None)
         finalize_lock = getattr(self, "_record_finalize_lock", None)

@@ -196,9 +196,10 @@ def _display_text_from_number_format(value: int | float, number_format: str | No
 
     支持：
     - 纯补零：``000000`` + 123 → ``000123``
+    - ``0`` 必选位 / ``#`` 可选位：``###000`` + 123 → ``123``（不按 # 强制补零）
     - 分隔：``000-000`` / ``000\\-000`` + 123 → ``000-123``
     - 字面量前缀：``\"ID-\"000000`` + 123 → ``ID-000123``
-    - 分段：``00-00-00`` + 123 → ``00-01-23``
+    - 超出占位宽度时保留字面量：``\"ID-\"000`` + 12345 → ``ID-12345``
 
     无法安全解析时返回 None（调用方对自定义格式应整表拒绝，不得静默裸数字）。
     """
@@ -207,23 +208,49 @@ def _display_text_from_number_format(value: int | float, number_format: str | No
         if _excel_format_is_plain_number(number_format):
             return str(int(value)) if float(value).is_integer() else None
         return None
-    placeholders = [t for t in tokens if t[0] == "d"]
+    ph_types = [t[1] for t in tokens if t[0] == "d"]
+    if not ph_types:
+        return None
     n = int(value)
     if n < 0:
         return None
-    digits = str(n)
-    width = len(placeholders)
-    if len(digits) > width:
-        return digits
-    digits = digits.zfill(width)
+    digit_str = str(n)
+    # 仅按必选 0 位补零；# 不强制加宽
+    min_len = sum(1 for p in ph_types if p == "0")
+    if len(digit_str) < min_len:
+        digit_str = digit_str.zfill(min_len)
+
+    # 从右向左填入占位；多余数字保留为 excess（仍挂在字面量之后）
+    slots: list[str | None] = [None] * len(ph_types)
+    di = len(digit_str) - 1
+    for si in range(len(ph_types) - 1, -1, -1):
+        if di >= 0:
+            slots[si] = digit_str[di]
+            di -= 1
+        elif ph_types[si] == "0":
+            slots[si] = "0"
+        else:
+            slots[si] = None  # 未使用的 #
+    excess = digit_str[: di + 1] if di >= 0 else ""
+
     out: list[str] = []
-    di = 0
+    si = 0
+    excess_pending = excess
     for kind, payload in tokens:
         if kind == "d":
-            out.append(digits[di])
-            di += 1
+            ch = slots[si]
+            si += 1
+            if ch is None:
+                continue
+            if excess_pending:
+                out.append(excess_pending)
+                excess_pending = ""
+            out.append(ch)
         else:
             out.append(payload)
+    if excess_pending:
+        # 无数字位可挂时（极端），前缀 excess
+        out.insert(0, excess_pending)
     return "".join(out)
 
 
