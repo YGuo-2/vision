@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from core.exam_announcer import ExamAnnouncer
 from core.exam_roster import (
+    ExamResultRow,
     ExamScorebook,
     RosterError,
     import_roster_xlsx,
@@ -24,6 +25,36 @@ from core.presence_gate import PresenceGate, PresenceGateConfig
 
 if TYPE_CHECKING:
     from apps.app_ui import App
+
+
+def apply_postprocess_update_to_scorebook(
+    scorebook: ExamScorebook, update: Any
+) -> ExamResultRow | None:
+    """把后处理更新写入台账（面板存活或关窗后 sink 共用）。"""
+    row = scorebook.get_by_segment(str(update.segment_id))
+    if row is None:
+        return None
+    if update.status == "completed":
+        scorebook.update_row(
+            row,
+            status="completed",
+            front_score=float(update.front_score or 0.0),
+            side_score=float(update.side_score or 0.0),
+            combined_percent=int(update.combined_percent or 0),
+            combined_score=float(update.combined_percent or 0) / 100.0,
+            error_code=None,
+            error_message=None,
+        )
+    elif update.status in {"failed", "skipped", "cancelled"}:
+        scorebook.update_row(
+            row,
+            status="failed" if update.status == "failed" else update.status,
+            error_code=update.error_code,
+            error_message=update.message,
+        )
+    elif update.status in {"queued", "transcoding", "validating", "comparing"}:
+        scorebook.update_row(row, status="processing")
+    return row
 
 
 def _prefs_path() -> Path:
@@ -370,6 +401,8 @@ class ExamPanel:
             row = self._row_by_id.get(str(p.get("row_id") or ""))
             ok = self.app._begin_recording_segment(exam_row=row)  # type: ignore[attr-defined]
             if not ok:
+                # begin_failed 内部会 UPDATE failed 并推进指针；不得再执行外层
+                # 同批残留的 UPDATE_ROW(recording)（enter_stable 已不再附带该命令）。
                 self._dispatch(
                     self.session.handle(
                         "begin_failed",
@@ -378,9 +411,12 @@ class ExamPanel:
                     )
                 )
             else:
+                if row is not None and self.scorebook is not None:
+                    self.scorebook.update_row(row, status="recording")
                 self.gate.begin_recording(time.monotonic())
                 self.app._exam_arm_occupancy(True)  # type: ignore[attr-defined]
                 self.session.handle("record_started", now=time.monotonic())
+                self._refresh_tree()
         elif k == "END_SEGMENT":
             self._pending_discard = False
             row = self._row_by_id.get(str(p.get("row_id") or ""))
@@ -394,11 +430,14 @@ class ExamPanel:
             self._pending_discard = True
             row = self._row_by_id.get(str(p.get("row_id") or ""))
             self.app._end_recording_segment(discard=True, exam_row=row)  # type: ignore[attr-defined]
-            self._dispatch(
-                self.session.handle(
-                    "record_stopped", now=time.monotonic(), discarded=True
+            # 正常 skip 路径 phase=finishing，需 record_stopped 推进；
+            # abort 路径 phase 已是 aborted，只停 writer，不再推进/覆盖行状态。
+            if self.session.phase == "finishing":
+                self._dispatch(
+                    self.session.handle(
+                        "record_stopped", now=time.monotonic(), discarded=True
+                    )
                 )
-            )
         elif k == "UPDATE_ROW":
             row = self._row_by_id.get(str(p.get("row_id") or ""))
             if row is not None and self.scorebook is not None:
@@ -440,31 +479,37 @@ class ExamPanel:
     def on_postprocess_update(self, update: Any) -> None:
         if self.scorebook is None:
             return
-        row = self.scorebook.get_by_segment(str(update.segment_id))
-        if row is None:
-            # 尝试按当前 binding
+        if apply_postprocess_update_to_scorebook(self.scorebook, update) is None:
             return
-        if update.status == "completed":
-            self.scorebook.update_row(
-                row,
-                status="completed",
-                front_score=float(update.front_score or 0.0),
-                side_score=float(update.side_score or 0.0),
-                combined_percent=int(update.combined_percent or 0),
-                combined_score=float(update.combined_percent or 0) / 100.0,
-                error_code=None,
-                error_message=None,
-            )
-        elif update.status in {"failed", "skipped", "cancelled"}:
-            self.scorebook.update_row(
-                row,
-                status="failed" if update.status == "failed" else update.status,
-                error_code=update.error_code,
-                error_message=update.message,
-            )
-        elif update.status in {"queued", "transcoding", "validating", "comparing"}:
-            self.scorebook.update_row(row, status="processing")
-        self._refresh_tree()
+        try:
+            if self.win.winfo_exists():
+                self._refresh_tree()
+        except Exception:
+            pass
+
+    def on_session_stop(self) -> None:
+        """主窗口「停止」：同步中止考试状态机并解除占用/手动锁。"""
+        try:
+            if self.session.phase not in {"idle", "ready", "completed", "aborted"}:
+                self._dispatch(
+                    self.session.handle("abort_exam", now=time.monotonic())
+                )
+        except Exception:
+            traceback.print_exc()
+        try:
+            self.app._exam_arm_occupancy(False)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        try:
+            self.app._exam_set_active(False)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        try:
+            self.app._exam_lock_manual_record(False)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        self.phase_var.set(f"阶段：{self.session.phase}")
+        self.status_var.set("主会话已停止，考试已中止")
 
     def bind_segment(self, row_id: str, segment_id: str, segment_dir: str) -> None:
         row = self._row_by_id.get(row_id)
@@ -510,7 +555,7 @@ class ExamPanel:
             self.win.after_cancel(self._tick_id)
         except Exception:
             pass
-        # 关窗必须先中止：录制中则 discard，避免后台继续写/比对却无回填目标
+        # 关窗必须先中止：录制中/暂停自 recording 则 discard，避免后台继续写
         try:
             if self.session.phase not in {"idle", "ready", "completed", "aborted"}:
                 self._dispatch(
@@ -518,12 +563,8 @@ class ExamPanel:
                 )
         except Exception:
             traceback.print_exc()
-            # 兜底：尽量停录
             try:
-                if self.session.phase == "recording" or getattr(
-                    self.app, "_rec", None
-                ) is not None:
-                    self.app._end_recording_segment(discard=True)  # type: ignore[attr-defined]
+                self.app._end_recording_segment(discard=True)  # type: ignore[attr-defined]
             except Exception:
                 pass
         self.app._exam_arm_occupancy(False)  # type: ignore[attr-defined]
@@ -531,8 +572,22 @@ class ExamPanel:
         self.app._exam_lock_manual_record(False)  # type: ignore[attr-defined]
         self._announcer.close()
         if self.scorebook is not None:
-            self.scorebook.flush()
-            self.scorebook.close()
+            try:
+                self.scorebook.flush()
+            except Exception:
+                pass
+            # 仍有 processing 行时把台账交给 App sink，供后台比对回填；
+            # 无未完成行才立即 close。
+            has_processing = any(
+                r.status == "processing" for r in self.scorebook.rows
+            )
+            if has_processing:
+                self.app._exam_scorebook_sink = self.scorebook  # type: ignore[attr-defined]
+            else:
+                try:
+                    self.scorebook.close()
+                except Exception:
+                    pass
             self.scorebook = None
         try:
             delattr(self.app, "_exam_panel")

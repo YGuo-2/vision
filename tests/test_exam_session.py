@@ -32,6 +32,9 @@ def test_happy_path_two_students() -> None:
     cmds = s.handle("enter_stable", now=2.0)
     assert s.phase == "recording"
     assert "BEGIN_SEGMENT" in _kinds(cmds)
+    assert not any(
+        c.kind == "UPDATE_ROW" and c.payload.get("status") == "recording" for c in cmds
+    )
 
     cmds = s.handle("empty_stable", now=10.0)
     assert s.phase == "finishing"
@@ -92,6 +95,40 @@ def test_pause_resume_wait_enter() -> None:
     cmds = s.handle("resume", now=4.0)
     assert s.phase == "wait_enter"
     assert "ARM_OCCUPANCY" in _kinds(cmds)
+
+
+def test_begin_failed_keeps_failed_status_and_advances() -> None:
+    """开录失败应记 failed，不得停留在 recording，也不得被后续命令盖回。"""
+    s = ExamSession(ExamSessionConfig(inter_student_gap_s=0.0, post_call_guard_s=0.0))
+    s.load_roster(_cands(1))
+    s.handle("start_exam", now=0.0)
+    s.handle("tick", now=0.0)
+    s.handle("enter_stable", now=1.0)
+    assert s.phase == "recording"
+    # enter_stable 不再附带 UPDATE_ROW(recording)
+    cmds = s.handle("begin_failed", now=1.1, message="writer busy")
+    assert s.rows[0].status == "failed"
+    assert s.rows[0].error_code == "begin_failed"
+    assert any(c.kind == "UPDATE_ROW" and c.payload.get("status") == "failed" for c in cmds)
+    assert s.phase == "completed"
+    assert s.pointer == 1
+
+
+def test_abort_while_paused_from_recording_discards() -> None:
+    s = ExamSession()
+    s.load_roster(_cands(1))
+    s.handle("start_exam", now=0.0)
+    s.handle("call_guard_elapsed", now=2.0)
+    s.handle("enter_stable", now=3.0)
+    s.handle("pause", now=4.0)
+    assert s.phase == "paused"
+    assert s.paused_from == "recording"
+    cmds = s.handle("abort_exam", now=5.0)
+    assert s.phase == "aborted"
+    assert "DISCARD_SEGMENT" in _kinds(cmds)
+    assert s.rows[0].status == "skipped"
+    assert s.rows[0].error_code == "exam_aborted"
+    assert s.locked is False
 
 
 def test_retest_after_complete_does_not_reset_pointer_to_zero() -> None:

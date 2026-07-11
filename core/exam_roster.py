@@ -111,29 +111,55 @@ def _cell_text(value: Any) -> str:
 
 
 def _display_text_from_number_format(value: int | float, number_format: str | None) -> str | None:
-    """尽量按 Excel 显示文本还原学号（例如 123 + 000000 → 000123）。
+    """尽量按 Excel 显示文本还原学号。
 
-    只处理常见整数补零格式；复杂自定义格式返回 None，由调用方回退。
+    支持：
+    - 纯补零：``000000`` + 123 → ``000123``
+    - 分隔补零：``000-000`` + 123 → ``000-123``
+    - 分段：``00-00-00`` + 123 → ``00-01-23``
+    - 多段条件格式取第一段（``000-000;@``）
+
+    复杂会计/小数/科学计数格式返回 None，由调用方回退为裸数字文本。
     """
     import re
 
     fmt = (number_format or "").strip()
-    if not fmt or fmt in {"General", "0", "@", "0.00"}:
+    if not fmt or fmt in {"General", "@"}:
         return None
-    # 纯补零：000000 / 0000 等
-    if re.fullmatch(r"0+", fmt):
-        n = int(value)
-        if n < 0:
-            return None
-        return f"{n:0{len(fmt)}d}"
-    # 形如 000000;@ 或 0000;-0000 取第一段
     first = fmt.split(";")[0].strip()
-    if re.fullmatch(r"0+", first):
-        n = int(value)
-        if n < 0:
-            return None
-        return f"{n:0{len(first)}d}"
-    return None
+    # 去掉 Excel 颜色/条件前缀如 [Red]
+    first = re.sub(r"\[[^\]]*\]", "", first).strip()
+    if not first or first in {"General", "@", "0", "0.00"}:
+        if first == "0":
+            return str(int(value))
+        return None
+    # 仅支持整数位：0/# 与常见分隔符，不含小数点/逗号千分位/科学计数
+    if any(ch in first for ch in (".", ",", "E", "e", "%")):
+        return None
+    if not re.fullmatch(r"[0#\-\s/()_:]+", first):
+        return None
+    placeholders = [ch for ch in first if ch in "0#"]
+    if not placeholders:
+        return None
+    n = int(value)
+    if n < 0:
+        return None
+    digits = str(n)
+    width = len(placeholders)
+    if len(digits) > width:
+        # 超出格式宽度：Excel 仍显示完整数字；学号场景直接用全部数字
+        return digits
+    # 左侧按 0 位补零（# 位在左侧多余时也可补 0，便于学号定长）
+    digits = digits.zfill(width)
+    out: list[str] = []
+    di = 0
+    for ch in first:
+        if ch in "0#":
+            out.append(digits[di])
+            di += 1
+        else:
+            out.append(ch)
+    return "".join(out)
 
 
 def _student_id_from_cell(value: Any, *, row_no: int, number_format: str | None = None) -> str:
@@ -434,7 +460,7 @@ class ExamScorebook:
             self._mark_dirty_unlocked()
 
     def append_retest(self, candidate: ExamCandidate) -> ExamResultRow:
-        """队尾追加同学号重考行；历史成功行 is_scoring_row 在完成后调整。"""
+        """队尾追加同学号重考行；计分行策略见 ``_apply_scoring_policy_unlocked``。"""
         with self._lock:
             attempts = [
                 r.attempt_index
@@ -442,12 +468,20 @@ class ExamScorebook:
                 if r.candidate.student_id == candidate.student_id
             ]
             next_attempt = (max(attempts) if attempts else 0) + 1
+            # 已有成功分时，新补考暂不计分，直至其 completed
+            has_completed = any(
+                r.candidate.student_id == candidate.student_id
+                and r.status in {"completed", "superseded"}
+                and r.combined_percent is not None
+                for r in self._rows
+            )
             row = ExamResultRow(
                 candidate=candidate,
                 attempt_index=next_attempt,
-                is_scoring_row=True,
+                is_scoring_row=not has_completed,
             )
             self._rows.append(row)
+            self._apply_scoring_policy_unlocked(candidate.student_id)
             self._mark_dirty_unlocked()
             return row
 
@@ -468,40 +502,70 @@ class ExamScorebook:
 
     def update_row(self, row: ExamResultRow, **fields: Any) -> None:
         with self._lock:
+            # 终态不得被更弱状态覆盖（防止 begin_failed 后又被 UPDATE recording 盖回）
+            _terminal = frozenset(
+                {"completed", "failed", "skipped", "superseded", "cancelled"}
+            )
+            new_status = fields.get("status")
+            if (
+                new_status is not None
+                and row.status in _terminal
+                and new_status not in _terminal
+                and new_status != row.status
+            ):
+                fields = {k: v for k, v in fields.items() if k != "status"}
             for key, value in fields.items():
                 if not hasattr(row, key):
                     raise AttributeError(key)
                 setattr(row, key, value)
-            if row.status == "completed":
+            if row.status in {
+                "completed",
+                "failed",
+                "skipped",
+                "superseded",
+                "processing",
+                "pending",
+            }:
                 self._apply_scoring_policy_unlocked(row.candidate.student_id)
             self._mark_dirty_unlocked(force=row.status in {
                 "completed", "failed", "skipped", "superseded", "processing"
             })
 
     def _apply_scoring_policy_unlocked(self, student_id: str) -> None:
-        """同学号：最后一次 completed 为计分行，更早 completed → superseded。"""
+        """同学号计分行策略：
+
+        - 有成功分：最后一次 completed（含可恢复的 superseded）为唯一计分行；
+          更早成功 → superseded 且 is_scoring_row=False。
+        - 无成功分：仅 attempt_index 最大的一行 is_scoring_row=True
+          （避免「首次成功 + 补考失败」双行同时计分，也避免双失败双计分）。
+        """
+        rows = [r for r in self._rows if r.candidate.student_id == student_id]
+        if not rows:
+            return
         completed = [
             r
-            for r in self._rows
-            if r.candidate.student_id == student_id
-            and (
-                r.status == "completed"
-                or (r.status == "superseded" and r.combined_percent is not None)
-            )
+            for r in rows
+            if r.combined_percent is not None
+            and r.status in {"completed", "superseded"}
         ]
-        if not completed:
+        if completed:
+            completed.sort(key=lambda r: r.attempt_index)
+            winner = completed[-1]
+            for r in rows:
+                if r is winner:
+                    r.status = "completed"
+                    r.is_scoring_row = True
+                else:
+                    if r.combined_percent is not None and r.status in {
+                        "completed",
+                        "superseded",
+                    }:
+                        r.status = "superseded"
+                    r.is_scoring_row = False
             return
-        # 按 attempt_index 最大者为计分
-        completed.sort(key=lambda r: r.attempt_index)
-        winner = completed[-1]
-        for r in completed:
-            if r is winner:
-                r.status = "completed"
-                r.is_scoring_row = True
-            else:
-                if r.combined_percent is not None:
-                    r.status = "superseded"
-                r.is_scoring_row = False
+        last = max(rows, key=lambda r: r.attempt_index)
+        for r in rows:
+            r.is_scoring_row = r is last
 
     def scoring_rows(self) -> list[ExamResultRow]:
         """导出用：每学号优先最后成功，否则最后一次尝试。"""

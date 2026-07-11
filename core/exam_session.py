@@ -178,13 +178,12 @@ class ExamSession:
         self.record_started_mono = now
         row.status = "recording"
         row.record_started_at = local_timestamp()
+        # 注意：UPDATE_ROW(recording) 必须在 BEGIN 成功后由执行层发出。
+        # 若与 BEGIN_SEGMENT 同批且 BEGIN 失败触发 begin_failed，外层后续
+        # UPDATE_ROW(recording) 会把 failed 盖回 recording。
         return [
             ExamCommand("ANNOUNCE", {"text": "考试开始"}),
             ExamCommand("BEGIN_SEGMENT", {"row_id": row.row_id}),
-            ExamCommand(
-                "UPDATE_ROW",
-                {"row_id": row.row_id, "status": "recording"},
-            ),
         ]
 
     def _on_empty_stable(self, **_: Any) -> list[ExamCommand]:
@@ -332,11 +331,15 @@ class ExamSession:
         row.status = "failed"
         row.error_code = "begin_failed"
         row.error_message = message or "开录失败"
-        self.phase = "finishing"
-        # 当作 discard 后 advance
+        row.record_ended_at = local_timestamp()
+        self.record_started_mono = None
         self.pointer += 1
         cmds = [
             ExamCommand("DISARM_OCCUPANCY"),
+            ExamCommand(
+                "ANNOUNCE",
+                {"text": f"开录失败，{row.candidate.name} 记为失败"},
+            ),
             ExamCommand(
                 "UPDATE_ROW",
                 {
@@ -347,9 +350,9 @@ class ExamSession:
                 },
             ),
         ]
-        # 直接走 gap / done
-        self.phase = "calling" if self.pointer < len(self.rows) else "completed"
-        if self.phase == "completed":
+        # 直接走 gap / done（未真正开录，无需 DISCARD/record_stopped）
+        if self.pointer >= len(self.rows):
+            self.phase = "completed"
             self.locked = False
             cmds.extend(
                 [
@@ -359,6 +362,7 @@ class ExamSession:
                 ]
             )
             return cmds
+        self.phase = "calling"
         self.inter_gap_deadline = now + self.config.inter_student_gap_s
         self.call_guard_deadline = None
         cmds.append(
@@ -387,14 +391,46 @@ class ExamSession:
             cmds.append(ExamCommand("ARM_OCCUPANCY"))
         return cmds
 
+    def _needs_discard_on_abort(self) -> bool:
+        """录制中、收尾中，或从 recording 暂停时，中止须停 writer。"""
+        if self.phase in {"recording", "finishing"}:
+            return True
+        if self.phase == "paused" and self.paused_from == "recording":
+            return True
+        return False
+
     def _on_abort(self, **_: Any) -> list[ExamCommand]:
         if self.phase in {"idle", "aborted", "completed"}:
             return []
         cmds: list[ExamCommand] = [ExamCommand("DISARM_OCCUPANCY")]
-        if self.phase == "recording":
-            cmds.append(ExamCommand("DISCARD_SEGMENT", {"row_id": self.current.row_id if self.current else ""}))
+        row = self.current
+        if self._needs_discard_on_abort() and row is not None:
+            cmds.append(
+                ExamCommand("DISCARD_SEGMENT", {"row_id": row.row_id})
+            )
+            # 中止时不再走 record_stopped 推进；直接标记当前行
+            if row.status in {"recording", "pending", "processing"}:
+                row.status = "skipped"
+                row.error_code = row.error_code or "exam_aborted"
+                row.error_message = row.error_message or "考试中止"
+                row.record_ended_at = local_timestamp()
+                cmds.append(
+                    ExamCommand(
+                        "UPDATE_ROW",
+                        {
+                            "row_id": row.row_id,
+                            "status": "skipped",
+                            "error_code": row.error_code,
+                            "error_message": row.error_message,
+                        },
+                    )
+                )
         self.phase = "aborted"
+        self.paused_from = None
         self.locked = False
+        self.call_guard_deadline = None
+        self.inter_gap_deadline = None
+        self.record_started_mono = None
         cmds.append(ExamCommand("UI_UNLOCK_MANUAL_RECORD"))
         return cmds
 

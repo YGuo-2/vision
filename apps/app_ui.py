@@ -1323,6 +1323,10 @@ class App:
         self._exam_manual_locked = False
         self._exam_occupancy_queue: Queue[tuple[bool, float]] = Queue(maxsize=8)
         self._exam_occupancy_stride = 3
+        # 关考试面板后仍接收后台比对回填的台账 sink
+        self._exam_scorebook_sink = None
+        self._exam_clip_lock = threading.Lock()
+        self._exam_clip_threads: set[threading.Thread] = set()
 
         self._stop_evt = threading.Event()
         self._worker: threading.Thread | None = None
@@ -2405,26 +2409,47 @@ class App:
                         "exam_warnings": tuple(warnings),
                     }
                 )
-                if not processor.submit(job):
+                # 关窗过程中仍尽量提交；失败则通知台账（含 sink）
+                submitted_ok = False
+                try:
+                    submitted_ok = bool(processor.submit(job))
+                except Exception:
+                    submitted_ok = False
+                if not submitted_ok:
                     if getattr(self, "_latest_compare_segment_id", None) == seg_id:
                         self._latest_compare_segment_id = prev_latest
                     try:
-                        self._post_recording_compare_update(
+                        App._post_recording_compare_update(
+                            self,
                             PostprocessUpdate(
                                 segment_id=seg_id,
                                 status="failed",
                                 message="后处理队列提交失败",
                                 error_code="submit_failed",
-                            )
+                            ),
                         )
                     except Exception:
                         pass
+                with getattr(self, "_exam_clip_lock", threading.Lock()):
+                    threads = getattr(self, "_exam_clip_threads", None)
+                    if threads is not None:
+                        threads.discard(threading.current_thread())
 
-            threading.Thread(
+            t = threading.Thread(
                 target=_exam_clip_then_submit,
                 name=f"exam-clip-{segment_id}",
                 daemon=True,
-            ).start()
+            )
+            with getattr(self, "_exam_clip_lock", threading.Lock()):
+                threads = getattr(self, "_exam_clip_threads", None)
+                if threads is None:
+                    self._exam_clip_threads = set()
+                    threads = self._exam_clip_threads
+                # 清理已结束线程
+                dead = {x for x in threads if not x.is_alive()}
+                threads.difference_update(dead)
+                threads.add(t)
+            t.start()
             return
 
         job = DualRecordingJob(**job_kwargs)
@@ -2434,10 +2459,59 @@ class App:
             if getattr(self, "_latest_compare_segment_id", None) == segment_id:
                 self._latest_compare_segment_id = previous_latest
 
+    def _join_exam_clip_threads(self, timeout: float = 30.0) -> None:
+        """关窗/停止前等待考试裁剪线程，避免裁剪后 submit 必失败且无终态。"""
+        with getattr(self, "_exam_clip_lock", threading.Lock()):
+            threads = list(getattr(self, "_exam_clip_threads", set()) or set())
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        for t in threads:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                t.join(timeout=remaining)
+            except Exception:
+                pass
+        with getattr(self, "_exam_clip_lock", threading.Lock()):
+            threads_set = getattr(self, "_exam_clip_threads", None)
+            if threads_set is not None:
+                threads_set.difference_update({t for t in threads_set if not t.is_alive()})
+
+    def _apply_exam_postprocess_update(self, update: PostprocessUpdate) -> None:
+        """面板或关窗后的 scorebook sink 回填。"""
+        panel = getattr(self, "_exam_panel", None)
+        if panel is not None:
+            try:
+                panel.on_postprocess_update(update)
+                return
+            except Exception:
+                pass
+        sink = getattr(self, "_exam_scorebook_sink", None)
+        if sink is None:
+            return
+        try:
+            from apps.exam_panel import apply_postprocess_update_to_scorebook
+
+            apply_postprocess_update_to_scorebook(sink, update)
+            # 全部 processing 结束后落盘（保持 sink 打开至应用退出，避免再关丢写）
+            if not any(r.status == "processing" for r in sink.rows):
+                try:
+                    sink.flush()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     def _post_recording_compare_update(self, update: PostprocessUpdate) -> None:
         """后处理线程只把不可变状态写入队列，不直接调用任何 Tk API。"""
+        # 关窗时仍允许考试台账回填（panel 或 sink），避免裁剪线程晚到的终态被丢弃
         if getattr(self, "_closing", False):
-            return
+            has_exam = (
+                getattr(self, "_exam_panel", None) is not None
+                or getattr(self, "_exam_scorebook_sink", None) is not None
+            )
+            if not has_exam:
+                return
         self._compare_update_queue.put(update)
 
     def _drain_recording_compare_updates(self) -> None:
@@ -2454,12 +2528,11 @@ class App:
                 update = update_queue.get_nowait()
             except Empty:
                 return
-            if getattr(self, "_closing", False):
-                continue
+            closing = bool(getattr(self, "_closing", False))
             is_latest = update.segment_id == getattr(
                 self, "_latest_compare_segment_id", None
             )
-            if is_latest:
+            if is_latest and not closing:
                 status_labels = {
                     "queued": "排队中",
                     "transcoding": "正在转码",
@@ -2490,13 +2563,8 @@ class App:
                     self.compare_error_var.set(detail)
                 else:
                     self.compare_error_var.set("")
-            # 考试面板：所有片段的终态/过程态都要送达 Scorebook
-            panel = getattr(self, "_exam_panel", None)
-            if panel is not None:
-                try:
-                    panel.on_postprocess_update(update)
-                except Exception:
-                    pass
+            # 考试台账：面板或关窗后 sink，所有片段终态/过程态都要回填
+            App._apply_exam_postprocess_update(self, update)
 
     def _sync_record_stop_enabled(self, state: RecordingState) -> None:
         """根据录制状态联动「结束录制」按钮的可用性：recording/paused 启用，idle 禁用。"""
@@ -3298,6 +3366,13 @@ class App:
         self._set_running_controls(True)
 
     def _stop(self) -> None:
+        # 先同步考试状态机：否则 occupancy 退出后仍停在 recording，指针/手动锁不解除
+        panel = getattr(self, "_exam_panel", None)
+        if panel is not None:
+            try:
+                panel.on_session_stop()
+            except Exception:
+                pass
         dual_active = bool(getattr(self, "_active_dual_generation", 0))
         self._stop_evt.set()
         self._dual_recording_ready = False
@@ -3317,6 +3392,13 @@ class App:
         if self._closing:
             return
         self._closing = True
+        # 关主窗前尽量中止考试（若面板仍在）
+        panel = getattr(self, "_exam_panel", None)
+        if panel is not None:
+            try:
+                panel.on_session_stop()
+            except Exception:
+                pass
         self._stop_evt.set()
         self._dual_recording_ready = False
         App._invalidate_dual_preview(self)
@@ -3346,6 +3428,8 @@ class App:
                         App._finalize_and_dispatch_recording_pair(
                             self, close_session=False
                         )
+                    # 先等考试裁剪线程尽量 submit，再 cancel 后处理队列
+                    App._join_exam_clip_threads(self, timeout=25.0)
                     if postprocessor is not None:
                         postprocessor.cancel_all()
 
@@ -3443,6 +3527,20 @@ class App:
             except (TclError, RuntimeError):
                 pass
             return
+
+        # 最后一轮消费比对更新，并把考试 sink 落盘关闭
+        try:
+            App._drain_recording_compare_updates(self)
+        except Exception:
+            pass
+        sink = getattr(self, "_exam_scorebook_sink", None)
+        if sink is not None:
+            try:
+                sink.flush()
+                sink.close()
+            except Exception:
+                pass
+            self._exam_scorebook_sink = None
 
         try:
             self.root.destroy()

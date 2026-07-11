@@ -122,6 +122,7 @@ def test_scoring_policy_last_completed_wins() -> None:
         combined_percent=50,
     )
     r2 = book.append_retest(c)
+    assert r2.is_scoring_row is False  # 已有成功分时补考暂不计分
     book.update_row(
         r2,
         status="completed",
@@ -138,6 +139,17 @@ def test_scoring_policy_last_completed_wins() -> None:
     assert r2.is_scoring_row is True
 
 
+def test_update_row_refuses_to_downgrade_terminal_status() -> None:
+    book = ExamScorebook(path=None)
+    c = ExamCandidate(1, "S1", "甲")
+    book.load_candidates([c])
+    r = book.rows[0]
+    book.update_row(r, status="failed", error_code="begin_failed", error_message="x")
+    book.update_row(r, status="recording")
+    assert r.status == "failed"
+    assert r.error_code == "begin_failed"
+
+
 def test_student_id_zero_padded_number_format(tmp_path: Path) -> None:
     """数值 123 + 格式 000000 应按显示文本导入为 000123。"""
     from openpyxl import Workbook
@@ -152,6 +164,50 @@ def test_student_id_zero_padded_number_format(tmp_path: Path) -> None:
     wb.close()
     cands = import_roster_xlsx(path)
     assert cands[0].student_id == "000123"
+
+
+def test_student_id_dashed_number_format(tmp_path: Path) -> None:
+    """数值 123 + 格式 000-000 应按显示文本导入为 000-123。"""
+    from openpyxl import Workbook
+
+    path = tmp_path / "dash.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["序号", "学号", "姓名"])
+    ws.append([1, 123, "甲"])
+    ws.cell(row=2, column=2).number_format = "000-000"
+    wb.save(path)
+    wb.close()
+    cands = import_roster_xlsx(path)
+    assert cands[0].student_id == "000-123"
+
+
+def test_failed_retest_does_not_mark_two_scoring_rows() -> None:
+    """首次成功 + 补考失败：仅成功行计分。"""
+    book = ExamScorebook(path=None)
+    c = ExamCandidate(1, "S1", "张三")
+    book.load_candidates([c])
+    r1 = book.rows[0]
+    book.update_row(
+        r1,
+        status="completed",
+        front_score=0.8,
+        side_score=0.8,
+        combined_score=0.8,
+        combined_percent=80,
+    )
+    r2 = book.append_retest(c)
+    assert r2.is_scoring_row is False
+    assert r1.is_scoring_row is True
+    book.update_row(
+        r2,
+        status="failed",
+        error_code="compare_failed",
+        error_message="x",
+    )
+    assert r1.is_scoring_row is True
+    assert r2.is_scoring_row is False
+    assert r1.status == "completed"
 
 
 def test_scorebook_flush_does_not_overwrite_with_stale_snapshot(tmp_path: Path) -> None:

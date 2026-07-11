@@ -287,13 +287,37 @@ def prepare_exam_pair(
         fps=fps,
         size_hint=size_s if size_s[0] > 0 else None,
     )
-    # 再次截齐写出帧（极端情况下一路读短）
+    # 再次截齐：元数据与文件必须一致，禁止「假帧数 + 完整长文件」绕过 postprocess 校验
     written = min(front_written, side_written)
     if front_written != side_written:
         warnings.append(
-            f"clip_write_mismatch: front={front_written} side={side_written} -> {written}"
+            f"clip_write_mismatch: front={front_written} side={side_written} -> retrim {written}"
         )
-        # 不重写整段；比对侧用 min 帧数元数据，文件可能仍略长，postprocess 以 frame 计数为准
+        end_aligned = start + written
+        if front_written > written:
+            front_out, front_written = _stream_write_range(
+                front_source,
+                out_dir / "front_exam.mp4",
+                start=start,
+                end=end_aligned,
+                fps=fps,
+                size_hint=size_f if size_f[0] > 0 else None,
+            )
+        if side_written > written:
+            side_out, side_written = _stream_write_range(
+                side_source,
+                out_dir / "side_exam.mp4",
+                start=start,
+                end=end_aligned,
+                fps=fps,
+                size_hint=size_s if size_s[0] > 0 else None,
+            )
+        written = min(front_written, side_written)
+        if front_written != side_written:
+            # 仍不一致则失败，避免错误评分
+            raise RuntimeError(
+                f"clip re-trim still mismatched: front={front_written} side={side_written}"
+            )
     return ClipResult(
         front_path=front_out,
         side_path=side_out,

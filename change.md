@@ -1,3 +1,26 @@
+## 2026-07-11: [fix] 考试系统审查第二轮 P1/P2（begin_failed / 暂停中止 / sink / 主停）
+
+### 问题描述
+
+PR #72 复核 head 后仍有：开录失败被 UPDATE recording 盖回、暂停后中止不停 writer、关面板丢后台成绩、主窗口停止不同步考试、裁剪线程未纳入关窗、裁剪帧假元数据、失败补考双计分、学号 `000-000` 格式。
+
+### 修改内容
+
+1. **begin_failed**：`enter_stable` 不再附带 `UPDATE_ROW(recording)`；成功开录后由面板写 recording；`update_row` 拒绝终态被弱状态覆盖。
+2. **abort**：`paused_from==recording` / finishing 也发 `DISCARD_SEGMENT` 并标记 skipped；abort 后不再走 `record_stopped`。
+3. **关面板 sink**：有 `processing` 行时把 Scorebook 交给 `App._exam_scorebook_sink`，后台比对继续回填；应用关闭时 flush/close。
+4. **主窗口停止**：`_stop` / `_on_close` 调用 `ExamPanel.on_session_stop()` 中止考试。
+5. **裁剪线程**：登记 `_exam_clip_threads`，关窗先 join 再 cancel postprocessor；关窗期考试更新仍入队。
+6. **clip 帧一致**：写出帧数不等时 re-trim 文件，禁止假元数据。
+7. **计分行**：有成功分时补考默认不计分；失败后重算仅成功行计分。
+8. **学号格式**：支持 `000-000` 等 0/# + 分隔符掩码。
+
+### 验证方法
+
+- `pytest tests/test_exam_*.py tests/test_presence_gate.py tests/test_app_ui_lifecycle.py tests/test_recording_controller.py -q` → **99 passed**。
+
+---
+
 ## 2026-07-11: [fix] 考试系统审查 P1/P2 缺陷修复（成绩不丢 / 关窗 / 裁剪 / 开考闸）
 
 ### 问题描述
