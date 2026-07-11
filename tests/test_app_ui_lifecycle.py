@@ -8,6 +8,7 @@ from queue import Queue
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from apps import app_ui
 from core.recording_controller import RecordingController
@@ -225,6 +226,63 @@ def test_preopen_same_index_is_idempotent_when_ready(monkeypatch):
 
     assert starts == []
     assert app._preopen_cap is cached
+
+
+def test_serialized_open_times_out_when_device_lock_is_quarantined(monkeypatch):
+    app = _preopen_app()
+    index_lock = app._camera_open_lock(0)
+    index_lock.acquire()
+    calls: list[int] = []
+    monkeypatch.setattr(app_ui, "open_camera", calls.append)
+    try:
+        with pytest.raises(app_ui.CameraWarmupTimeout, match="still releasing"):
+            app._open_camera_serialized(0, timeout=0.01)
+        assert calls == []
+    finally:
+        index_lock.release()
+
+
+def test_preopen_lock_timeout_clears_pending_and_reports_status(monkeypatch):
+    app = _preopen_app()
+    app._preopen_generation = 3
+    app._preopen_pending_index = 0
+    statuses: list[str] = []
+    app._post_status = statuses.append
+    index_lock = app._camera_open_lock(0)
+    index_lock.acquire()
+    monkeypatch.setattr(app_ui, "_CAMERA_OPEN_LOCK_TIMEOUT_S", 0.01)
+    try:
+        app._preopen_camera(0, 3)
+        assert app._preopen_pending_index is None
+        assert statuses and "仍在释放" in statuses[-1]
+    finally:
+        index_lock.release()
+
+
+def test_exclusive_capture_retries_release_before_unlocking_index() -> None:
+    class FailOnceCapture(_Cap):
+        def __init__(self) -> None:
+            super().__init__()
+            self.attempts = 0
+
+        def release(self) -> None:
+            self.attempts += 1
+            if self.attempts == 1:
+                raise RuntimeError("release failed")
+            super().release()
+
+    capture = FailOnceCapture()
+    index_lock = threading.Lock()
+    index_lock.acquire()
+    wrapped = app_ui._ExclusiveCameraCapture(capture, index_lock)
+
+    with pytest.raises(RuntimeError, match="release failed"):
+        wrapped.release()
+    assert index_lock.locked()
+
+    wrapped.release()
+    assert not index_lock.locked()
+    assert capture.release_calls == 1
 
 
 def test_camera_enumeration_result_is_applied_only_from_main_thread_queue(monkeypatch):

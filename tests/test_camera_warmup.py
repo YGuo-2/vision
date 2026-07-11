@@ -314,7 +314,7 @@ def test_release_failure_is_retained_and_retried() -> None:
 
         def release(self) -> None:
             self.release_attempts += 1
-            if self.release_attempts == 1:
+            if self.release_attempts <= 2:
                 raise RuntimeError("driver release failed")
             super().release()
 
@@ -325,7 +325,27 @@ def test_release_failure_is_retained_and_retried() -> None:
         _eventually(lambda: capture.read_calls >= 1)
         pool.cancel(PRIMARY)
         _eventually(lambda: capture.release_attempts >= 2)
+        assert capture.release_calls == 0
+        pool.close()
+        _eventually(lambda: capture.release_attempts >= 3)
         assert capture.release_calls == 1
+    finally:
+        pool.close()
+
+
+def test_positional_only_stop_event_factory_uses_one_argument_contract() -> None:
+    captures = {0: ControlledCapture(1), 1: ControlledCapture(2)}
+    calls: list[int] = []
+
+    def factory(index: int, stop_event=None, /):
+        calls.append(index)
+        return captures[index]
+
+    pool = CameraWarmupPool(factory)
+    try:
+        pair = pool.wait_pair(0, 1, timeout=1.0, stop_event=threading.Event())
+        assert pair[0].generation > 0
+        assert sorted(calls) == [0, 1]
     finally:
         pool.close()
 

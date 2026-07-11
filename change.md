@@ -16,13 +16,14 @@ Tkinter 双摄点击“开始”后，第二摄像头仍需现场打开且两路
 - Spec acceptance 第一轮修复资源边界：禁止在 native `read()` 活跃时由其他线程强制 `release()`，仅使用 capture 显式 `interrupt()` 协作退出；无法取消的旧 open/read 进入退役隔离，同 index 在其收敛前禁止重复 open；release 异常保留资源并重试，不再静默标记完成。
 - Legacy 单摄预开对相同 index 的 ready/in-flight 请求改为幂等；pool 的同 index 互斥锁获取支持 stop_event 取消，避免停止后留下排队 open。
 - 启动计时日志只在 `running/failed/stopped` 终态输出，claim 失败不再被早先的 `starting` 覆盖；会话完成后清理对应 metrics，避免长期增长。
+- 第二轮验收继续收口异常路径：positional-only factory 不再被误判为支持 `stop_event`；重复 `close()` 会继续重试 retained capture；legacy 单摄同步 open 和预开对设备锁使用 5 秒有界等待，永久 release 失败时明确拒绝而不是无限挂起。
 - 报告补充当前锁定 `0.10.31` 的六视频 active-GPU 门控：pose-only `1.0020x`、pose+hands `1.0126x`，均远低于 `1.30x` / `1.20x`。
 
 ### 验证方法
 
-- 双摄预热、UI、生命周期、控件和录制定向回归：`170 passed`。
+- 双摄预热、UI、生命周期、控件和录制定向回归：`174 passed`。
 - delegate、benchmark 和 pose33_v3 golden 门控：`35 passed`。
-- 最终 Tkinter / MediaPipe / valid-mask 定向回归：`195 passed`。
+- 最终 Tkinter / MediaPipe / valid-mask 定向回归：`198 passed`。
 - `py_compile apps/app_ui.py apps/camera_warmup.py core/vision_pipeline.py analysis/bench_annotate_fps.py` 通过。
 - `git diff --check` 通过，仅有 Windows CRLF 提示。
 - 真实双摄骨架关/开各 20 次、点击到两路实际 Tk 渲染 P95 `<=0.5s` 仍需连接物理双摄人工验收；程序已输出结构化启动计时点用于采集。

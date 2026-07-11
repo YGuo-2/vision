@@ -359,15 +359,16 @@ class CameraWarmupPool:
 
         with self._condition:
             if self._closed:
-                return
-            self._closed = True
-            slots = [slot for slot in self._slots.values() if slot is not None]
-            for role in ROLES:
-                self._slots[role] = None
-                self._generations[role] += 1
-            for slot in slots:
-                slot.claim_token = None
-                self._retire_locked(slot)
+                slots = list(self._retired.values())
+            else:
+                self._closed = True
+                slots = [slot for slot in self._slots.values() if slot is not None]
+                for role in ROLES:
+                    self._slots[role] = None
+                    self._generations[role] += 1
+                for slot in slots:
+                    slot.claim_token = None
+                    self._retire_locked(slot)
             slots = list({id(slot): slot for slot in [*slots, *self._retired.values()]}.values())
             self._condition.notify_all()
         self._interrupt_slots(slots, timeout=self._join_timeout)
@@ -889,8 +890,15 @@ class CameraWarmupPool:
         except (TypeError, ValueError):
             return False
         return any(
-            parameter.name == "stop_event"
-            or parameter.kind is inspect.Parameter.VAR_KEYWORD
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            or (
+                parameter.name == "stop_event"
+                and parameter.kind
+                in (
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    inspect.Parameter.KEYWORD_ONLY,
+                )
+            )
             for parameter in parameters
         )
 

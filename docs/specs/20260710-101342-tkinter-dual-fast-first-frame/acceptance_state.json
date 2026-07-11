@@ -1,9 +1,7 @@
 {
   "affected_units": [
     "U-001",
-    "U-002",
-    "U-003",
-    "U-004"
+    "U-002"
   ],
   "agents": [
     {
@@ -113,6 +111,120 @@
       "role": "adversarial",
       "round": 1,
       "started_at": "2026-07-10 19:11:23",
+      "status": "completed",
+      "task_ids": [
+        "T-004",
+        "T-005"
+      ],
+      "unit_id": "U-004"
+    },
+    {
+      "agent_id": "round-2-R-U-001",
+      "completed_at": "2026-07-10 19:38:59",
+      "report": "First-round issues fixed; raised P2 unbounded default factory open and P3 positional-only stop_event signature misclassification.",
+      "result": "ACTIONABLE_ISSUES",
+      "role": "first_wave",
+      "round": 2,
+      "started_at": "2026-07-10 19:33:29",
+      "status": "completed",
+      "task_ids": [
+        "T-001"
+      ],
+      "unit_id": "U-001"
+    },
+    {
+      "agent_id": "round-2-A-U-001",
+      "completed_at": "2026-07-10 19:49:11",
+      "report": "Confirmed native open/read cancellation limitation; positional-only issue downgraded P4; added P3 close retry gap after repeated release failures.",
+      "result": "ACTIONABLE_ISSUES",
+      "role": "adversarial",
+      "round": 2,
+      "started_at": "2026-07-10 19:41:40",
+      "status": "completed",
+      "task_ids": [
+        "T-001"
+      ],
+      "unit_id": "U-001"
+    },
+    {
+      "agent_id": "round-2-R-U-002",
+      "completed_at": "2026-07-10 19:38:59",
+      "report": "Main lifecycle fixes pass 145 tests; raised P2 concern that permanent wrapped capture release failure retains the exclusive index lock.",
+      "result": "ACTIONABLE_ISSUES",
+      "role": "first_wave",
+      "round": 2,
+      "started_at": "2026-07-10 19:33:29",
+      "status": "completed",
+      "task_ids": [
+        "T-002"
+      ],
+      "unit_id": "U-002"
+    },
+    {
+      "agent_id": "round-2-A-U-002",
+      "completed_at": "2026-07-10 19:49:11",
+      "report": "Fail-once wrapper/pool retry is correct; refined P2: permanent release failure safely retains index lock but legacy serialized/preopen paths wait without timeout and can hang.",
+      "result": "ACTIONABLE_ISSUES",
+      "role": "adversarial",
+      "round": 2,
+      "started_at": "2026-07-10 19:41:40",
+      "status": "completed",
+      "task_ids": [
+        "T-002"
+      ],
+      "unit_id": "U-002"
+    },
+    {
+      "agent_id": "round-2-R-U-003",
+      "completed_at": "2026-07-10 19:38:59",
+      "report": "Terminal startup metrics, failure error_type, exactly-once emission and metrics cleanup verified; 170 focused tests pass.",
+      "result": "PASS",
+      "role": "first_wave",
+      "round": 2,
+      "started_at": "2026-07-10 19:33:29",
+      "status": "completed",
+      "task_ids": [
+        "T-003"
+      ],
+      "unit_id": "U-003"
+    },
+    {
+      "agent_id": "round-2-A-U-003",
+      "completed_at": "2026-07-10 19:49:11",
+      "report": "Terminal metrics, cleanup, atomic rendering, recording boundary and generation behavior pass; 117 tests.",
+      "result": "PASS",
+      "role": "adversarial",
+      "round": 2,
+      "started_at": "2026-07-10 19:41:40",
+      "status": "completed",
+      "task_ids": [
+        "T-003"
+      ],
+      "unit_id": "U-003"
+    },
+    {
+      "agent_id": "round-2-R-U-004",
+      "completed_at": "2026-07-10 19:41:40",
+      "report": "SHA evidence, current-version active GPU ratios, no-go decisions and 170/195/35 test evidence verified.",
+      "result": "PASS",
+      "role": "first_wave",
+      "round": 2,
+      "started_at": "2026-07-10 19:38:59",
+      "status": "completed",
+      "task_ids": [
+        "T-004",
+        "T-005"
+      ],
+      "unit_id": "U-004"
+    },
+    {
+      "agent_id": "round-2-A-U-004",
+      "completed_at": "2026-07-10 19:51:21",
+      "report": "SHA chain, 0.10.31 active-GPU ratios, no-go decisions and test/hardware disclosure verified; no issues.",
+      "result": "PASS",
+      "role": "adversarial",
+      "round": 2,
+      "started_at": "2026-07-10 19:49:11",
       "status": "completed",
       "task_ids": [
         "T-004",
@@ -286,6 +398,86 @@
       "unit_ids": [
         "U-004"
       ]
+    },
+    {
+      "completed_at": "2026-07-10 19:55:35",
+      "created_at": "2026-07-10 19:51:21",
+      "evidence": "Application-level stop/close is bounded and quarantines a native open/read that ignores cancellation, preventing duplicate opens; Python cannot safely terminate a permanently blocked OpenCV syscall without a process architecture change. User requested exit after round 2, so this external driver limitation is explicitly retained.",
+      "fix_id": "F-009",
+      "issue_ids": [
+        "I-009"
+      ],
+      "round": 2,
+      "severity": "P2",
+      "started_at": "2026-07-10 19:51:34",
+      "status": "done",
+      "task_ids": [
+        "T-001"
+      ],
+      "title": "Default capture factory open remains non-cancellable",
+      "unit_ids": [
+        "U-001"
+      ]
+    },
+    {
+      "completed_at": "2026-07-10 19:55:35",
+      "created_at": "2026-07-10 19:51:21",
+      "evidence": "stop_event support detection now excludes positional-only parameters; positional-only factory regression passes.",
+      "fix_id": "F-010",
+      "issue_ids": [
+        "I-010"
+      ],
+      "round": 2,
+      "severity": "P3",
+      "started_at": "2026-07-10 19:51:34",
+      "status": "done",
+      "task_ids": [
+        "T-001"
+      ],
+      "title": "Positional-only stop_event factory is called with a keyword",
+      "unit_ids": [
+        "U-001"
+      ]
+    },
+    {
+      "completed_at": "2026-07-10 19:55:36",
+      "created_at": "2026-07-10 19:51:21",
+      "evidence": "Legacy serialized open and preopen now acquire per-index lock with a 5s bounded timeout and clear/report pending state; fail-once wrapper retry and quarantine tests pass.",
+      "fix_id": "F-011",
+      "issue_ids": [
+        "I-011"
+      ],
+      "round": 2,
+      "severity": "P2",
+      "started_at": "2026-07-10 19:51:34",
+      "status": "done",
+      "task_ids": [
+        "T-002"
+      ],
+      "title": "Permanent wrapped release failure retains device index lock",
+      "unit_ids": [
+        "U-002"
+      ]
+    },
+    {
+      "completed_at": "2026-07-10 19:55:36",
+      "created_at": "2026-07-10 19:51:21",
+      "evidence": "Repeated close now retries retained retired captures; fail-twice then close-success regression passes.",
+      "fix_id": "F-012",
+      "issue_ids": [
+        "I-012"
+      ],
+      "round": 2,
+      "severity": "P3",
+      "started_at": "2026-07-10 19:51:34",
+      "status": "done",
+      "task_ids": [
+        "T-001"
+      ],
+      "title": "Repeated close cannot retry retained capture release",
+      "unit_ids": [
+        "U-001"
+      ]
     }
   ],
   "full_fix_rounds": 3,
@@ -411,6 +603,66 @@
       ],
       "title": "Report omits current-version active GPU gate ratios",
       "unit_id": "U-004"
+    },
+    {
+      "agent_id": "round-2-R-U-001",
+      "created_at": "2026-07-10 19:38:59",
+      "evidence": "CameraWarmupPool only passes stop_event when factory declares it; default open_camera is not cancellable, so a permanently blocked native open leaves a daemon worker alive although same-index retries are quarantined.",
+      "fix_id": "F-009",
+      "issue_id": "I-009",
+      "round": 2,
+      "severity": "P2",
+      "status": "fixed",
+      "task_ids": [
+        "T-001"
+      ],
+      "title": "Default capture factory open remains non-cancellable",
+      "unit_id": "U-001"
+    },
+    {
+      "agent_id": "round-2-R-U-001",
+      "created_at": "2026-07-10 19:38:59",
+      "evidence": "_supports_stop_event accepts any parameter named stop_event, but _open_capture passes it by keyword; positional-only callable is misclassified and raises TypeError.",
+      "fix_id": "F-010",
+      "issue_id": "I-010",
+      "round": 2,
+      "severity": "P3",
+      "status": "fixed",
+      "task_ids": [
+        "T-001"
+      ],
+      "title": "Positional-only stop_event factory is called with a keyword",
+      "unit_id": "U-001"
+    },
+    {
+      "agent_id": "round-2-R-U-002",
+      "created_at": "2026-07-10 19:38:59",
+      "evidence": "_ExclusiveCameraCapture releases its per-index lock only after underlying release succeeds; a permanent release exception can keep later same-index opens blocked, and no wrapper integration test covers retry/unlock.",
+      "fix_id": "F-011",
+      "issue_id": "I-011",
+      "round": 2,
+      "severity": "P2",
+      "status": "fixed",
+      "task_ids": [
+        "T-002"
+      ],
+      "title": "Permanent wrapped release failure retains device index lock",
+      "unit_id": "U-002"
+    },
+    {
+      "agent_id": "round-2-A-U-001",
+      "created_at": "2026-07-10 19:49:11",
+      "evidence": "After repeated release failures _retired retains capture, but close returns immediately once _closed is true; second close makes no retry.",
+      "fix_id": "F-012",
+      "issue_id": "I-012",
+      "round": 2,
+      "severity": "P3",
+      "status": "fixed",
+      "task_ids": [
+        "T-001"
+      ],
+      "title": "Repeated close cannot retry retained capture release",
+      "unit_id": "U-001"
     }
   ],
   "max_rounds": 6,
@@ -430,7 +682,7 @@
       "last_result": "ACTIONABLE_ISSUES",
       "phase": "阶段 1：预热基础设施",
       "review_status": "issues",
-      "round_started": null,
+      "round_started": 2,
       "status": "issues",
       "task_ids": [
         "T-001"
@@ -441,8 +693,8 @@
       "adversarial_status": "issues",
       "last_result": "ACTIONABLE_ISSUES",
       "phase": "阶段 2：Tkinter 双摄接入",
-      "review_status": "pass",
-      "round_started": null,
+      "review_status": "issues",
+      "round_started": 2,
       "status": "issues",
       "task_ids": [
         "T-002"
@@ -450,24 +702,24 @@
       "unit_id": "U-002"
     },
     {
-      "adversarial_status": "issues",
-      "last_result": "ACTIONABLE_ISSUES",
+      "adversarial_status": "pass",
+      "last_result": "PASS",
       "phase": "阶段 2：Tkinter 双摄接入",
-      "review_status": "issues",
-      "round_started": null,
-      "status": "issues",
+      "review_status": "pass",
+      "round_started": 2,
+      "status": "pass",
       "task_ids": [
         "T-003"
       ],
       "unit_id": "U-003"
     },
     {
-      "adversarial_status": "issues",
-      "last_result": "ACTIONABLE_ISSUES",
+      "adversarial_status": "pass",
+      "last_result": "PASS",
       "phase": "阶段 3：依赖实验与交付",
       "review_status": "pass",
-      "round_started": null,
-      "status": "issues",
+      "round_started": 2,
+      "status": "pass",
       "task_ids": [
         "T-004",
         "T-005"
@@ -475,10 +727,10 @@
       "unit_id": "U-004"
     }
   ],
-  "round": 1,
+  "round": 2,
   "schema_version": 1,
   "status": "fixes-complete",
   "task_count": 5,
-  "updated_at": "2026-07-10 19:32:34",
+  "updated_at": "2026-07-10 19:55:36",
   "workflow": "requirements-first"
 }

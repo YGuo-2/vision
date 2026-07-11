@@ -1,7 +1,7 @@
 # Acceptance Fixes
 
 > **Source:** E:/CodeProject/vision/docs/specs/20260710-101342-tkinter-dual-fast-first-frame/acceptance_state.json
-> **Round:** 1
+> **Round:** 2
 > **Policy:** rounds 1-3 fix all actionable issues; round 4+ auto-fix P0-P2 only
 > **Original tasks:** 5 frozen tasks; do not append acceptance fixes to tasks.md
 
@@ -17,6 +17,10 @@
 | F-006 | I-006 | P4 | U-003 | done | _post_done removes both render event and startup metrics for completed generation; lifecycle test asserts empty mappings. |
 | F-007 | I-007 | P2 | U-004 | done | tasks.md completion log and progress.md Last Known Commit now reference implementation commit a3a605f. |
 | F-008 | I-008 | P3 | U-004 | done | Report now includes 0.10.31 six-video active=gpu ratios 1.0020x pose-only and 1.0126x pose+hands against thresholds. |
+| F-009 | I-009 | P2 | U-001 | done | Application-level stop/close is bounded and quarantines a native open/read that ignores cancellation, preventing duplicate opens; Python cannot safely terminate a permanently blocked OpenCV syscall without a process architecture change. User requested exit after round 2, so this external driver limitation is explicitly retained. |
+| F-010 | I-010 | P3 | U-001 | done | stop_event support detection now excludes positional-only parameters; positional-only factory regression passes. |
+| F-011 | I-011 | P2 | U-002 | done | Legacy serialized open and preopen now acquire per-index lock with a 5s bounded timeout and clear/report pending state; fail-once wrapper retry and quarantine tests pass. |
+| F-012 | I-012 | P3 | U-001 | done | Repeated close now retries retained retired captures; fail-twice then close-success regression passes. |
 
 ## Deferred Issues
 

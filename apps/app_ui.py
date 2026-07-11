@@ -28,6 +28,7 @@ from apps.camera_enum import CameraEntry, InputSourceState, enumerate_cameras, o
 from apps.camera_warmup import (
     CameraWarmupPool,
     CameraWarmupStopped,
+    CameraWarmupTimeout,
     PRIMARY,
     SECONDARY,
 )
@@ -119,6 +120,7 @@ _CLOSE_JOIN_TIMEOUT_S = 3.0
 _CLOSE_JOIN_SLICE_S = 0.05
 _CLOSE_POLL_MS = 50
 _CAMERA_CANCEL_JOIN_TIMEOUT_S = 0.05
+_CAMERA_OPEN_LOCK_TIMEOUT_S = 5.0
 _DUAL_RAW_PUMP_INTERVAL_S = 0.05
 _DUAL_STAGE_RANK = {"raw": 0, "annotated": 1}
 
@@ -2495,10 +2497,44 @@ class App:
                 self._camera_open_locks[index] = lock
             return lock
 
-    def _open_camera_serialized(self, index: int):
+    def _acquire_camera_open_lock(
+        self,
+        index: int,
+        *,
+        stop_event: threading.Event | None = None,
+        timeout: float = _CAMERA_OPEN_LOCK_TIMEOUT_S,
+    ) -> threading.Lock:
+        index_lock = self._camera_open_lock(index)
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        while True:
+            if stop_event is not None and stop_event.is_set():
+                raise CameraWarmupStopped("camera open was stopped")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise CameraWarmupTimeout(
+                    f"camera {index} is still releasing"
+                )
+            if index_lock.acquire(
+                timeout=min(_CAMERA_CANCEL_JOIN_TIMEOUT_S, remaining)
+            ):
+                return index_lock
+
+    def _open_camera_serialized(
+        self,
+        index: int,
+        *,
+        timeout: float = _CAMERA_OPEN_LOCK_TIMEOUT_S,
+    ):
         """串行化同一设备的驱动 open，避免 legacy preopen 与双摄 pool 争抢。"""
-        with self._camera_open_lock(index):
+        index_lock = self._acquire_camera_open_lock(
+            index,
+            stop_event=getattr(self, "_stop_evt", None),
+            timeout=timeout,
+        )
+        try:
             return open_camera(index)
+        finally:
+            index_lock.release()
 
     def _open_camera_exclusive(
         self,
@@ -2507,16 +2543,10 @@ class App:
         stop_event: threading.Event | None = None,
     ):
         """打开 pool capture，并把同编号互斥延续到 capture.release()。"""
-        index_lock = self._camera_open_lock(index)
-        if stop_event is None:
-            index_lock.acquire()
-        else:
-            while not index_lock.acquire(timeout=_CAMERA_CANCEL_JOIN_TIMEOUT_S):
-                if stop_event.is_set():
-                    raise CameraWarmupStopped("camera open was stopped")
-            if stop_event.is_set():
-                index_lock.release()
-                raise CameraWarmupStopped("camera open was stopped")
+        index_lock = self._acquire_camera_open_lock(
+            index,
+            stop_event=stop_event,
+        )
         try:
             capture = open_camera(index)
         except BaseException:
@@ -2589,7 +2619,14 @@ class App:
         """
         # 外层按 index 持锁直到失效 capture 已释放；pool 对同一 index 的 factory
         # 只有在这里完整收敛后才能进入，避免驱动层出现重叠 open handle。
-        with self._camera_open_lock(index):
+        index_lock = self._camera_open_lock(index)
+        if not index_lock.acquire(timeout=_CAMERA_OPEN_LOCK_TIMEOUT_S):
+            with self._preopen_lock:
+                if generation == self._preopen_generation:
+                    self._preopen_pending_index = None
+            self._post_status(f"摄像头 {index} 仍在释放，请稍后重试")
+            return
+        try:
             # 线程可能在创建后尚未获得 index lock，期间用户已切到双摄且 pool
             # 抢先完成 open。此时旧 generation 必须在触碰驱动前直接退出。
             with self._preopen_lock:
@@ -2631,6 +2668,8 @@ class App:
                 replaced_cap.release()
             if not keep and cap is not None:
                 cap.release()
+        finally:
+            index_lock.release()
 
     def _take_preopen_cap(self, index: int):
         """消费预热 cap（转移所有权）：命中且仍 isOpened() 才返回，否则 None（回退 open_camera）。
