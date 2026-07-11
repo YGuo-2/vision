@@ -9,6 +9,7 @@ import ast
 import sys
 import threading
 from pathlib import Path
+from queue import Queue
 from types import SimpleNamespace
 
 import numpy as np
@@ -63,6 +64,22 @@ class _GridContainer:
         self.column_weights[index] = weight
 
 
+class _ImageWidget:
+    def __init__(self) -> None:
+        self.images: list[object] = []
+
+    def configure(self, *, image) -> None:
+        self.images.append(image)
+
+
+class _TickRoot:
+    def __init__(self) -> None:
+        self.after_calls: list[tuple[int, object]] = []
+
+    def after(self, delay: int, callback) -> None:
+        self.after_calls.append((delay, callback))
+
+
 def _app_stub(
     *,
     source: str = "0",
@@ -103,6 +120,44 @@ def _layout_stub():
     app.preview2 = _GridWidget()
     app.preview.grid(row=0, column=0, sticky="nsew")
     app.preview2.grid(row=1, column=0, sticky="nsew")
+    return app
+
+
+def _dual_preview_stub(*, generation: int = 1, record_skeleton: bool = False):
+    app = object.__new__(app_ui.App)
+    app._dual_preview_queue = Queue(maxsize=1)
+    app._dual_preview_lock = threading.Lock()
+    app._dual_render_lock = threading.Lock()
+    app._active_dual_generation = generation
+    app._dual_preview_stage = "raw"
+    app._dual_recording_ready = False
+    app._preview_wh = (0, 0)
+    app._preview_wh2 = (0, 0)
+    app._queue = Queue(maxsize=1)
+    app._queue2 = Queue(maxsize=1)
+    app._dual_metrics_lock = threading.Lock()
+    app._dual_startup_metrics = {
+        generation: app_ui._DualStartupMetrics(
+            session_generation=generation,
+            primary_index=0,
+            secondary_index=1,
+            record_skeleton=record_skeleton,
+            start_click=1.0,
+            outcome="starting",
+        )
+    }
+    app._dual_first_render_events = {generation: threading.Event()}
+    app.root = _TickRoot()
+    app.preview = _ImageWidget()
+    app.preview2 = _ImageWidget()
+    app.actions_var = _Var("-")
+    app.status_var = _Var("就绪")
+    app._photo = None
+    app._photo2 = None
+    app._drain_recording_compare_updates = lambda: None
+    app._drain_dual_preview_layout = lambda: None
+    app._drain_camera_enum_results = lambda: None
+    app._refresh_recording_status = lambda: None
     return app
 
 
@@ -332,6 +387,233 @@ def test_collect_state_rejects_same_camera_for_both_views():
         app_ui.App._collect_state(app)
 
 
+def test_second_camera_combobox_binds_warmup_selection_handler():
+    build_ui = _app_method_node("_build_ui")
+    bindings = [
+        call
+        for call in _named_calls(build_ui, "bind")
+        if isinstance(call.func, ast.Attribute)
+        and ast.unparse(call.func.value) == "self.camera_combo_2"
+    ]
+
+    assert len(bindings) == 1
+    assert [ast.unparse(arg) for arg in bindings[0].args] == [
+        "'<<ComboboxSelected>>'",
+        "self._on_camera_2_selected",
+    ]
+
+
+def test_app_warmup_pool_uses_exclusive_camera_factory_explicitly():
+    init = _app_method_node("__init__")
+    calls = _named_calls(init, "CameraWarmupPool")
+
+    assert len(calls) == 1
+    capture_factory = next(
+        keyword.value for keyword in calls[0].keywords if keyword.arg == "capture_factory"
+    )
+    assert ast.unparse(capture_factory) == "self._open_camera_exclusive"
+
+
+def test_dual_start_dispatches_state_without_claiming_in_parent_worker(monkeypatch):
+    worker_calls: list[object] = []
+
+    class _Pool:
+        def __getattr__(self, name):
+            pytest.fail(f"parent worker must not call pool.{name}")
+
+    state = SimpleNamespace(source="0", source2="1", workers=4)
+    app = SimpleNamespace(
+        _camera_warmup_pool=_Pool(),
+        _stop_evt=threading.Event(),
+        _worker_loop_dual_camera=worker_calls.append,
+    )
+    monkeypatch.setattr(
+        app_ui,
+        "open_camera",
+        lambda _index: pytest.fail("dual start must reuse CameraWarmupPool"),
+    )
+
+    app_ui.App._worker_loop(app, state)
+
+    assert worker_calls == [state]
+
+
+def test_dual_wait_failure_posts_status_and_done_exactly_once(monkeypatch):
+    statuses: list[str] = []
+    done_calls: list[bool] = []
+    cancel_calls: list[bool] = []
+
+    class _Pool:
+        def wait_pair(self, _primary, _secondary, *, timeout, stop_event):
+            assert 0.0 <= timeout <= 5.0
+            assert not stop_event.is_set()
+            raise RuntimeError("camera 1 unavailable")
+
+        def claim_pair(self, _primary: int, _secondary: int, *, timeout: float):
+            pytest.fail("claim must not run after wait_pair fails")
+
+    state = SimpleNamespace(
+        source="0",
+        source2="1",
+        workers=1,
+        session_generation=3,
+        rotate=0,
+        rotate2=0,
+        record_skeleton=False,
+        pose_variant="full",
+        enable_hands=True,
+    )
+    app = SimpleNamespace(
+        _camera_warmup_pool=_Pool(),
+        _stop_evt=threading.Event(),
+        _post_status=statuses.append,
+        _post_done=lambda **_kwargs: done_calls.append(True),
+        _cancel_dual_warmup_roles=lambda: cancel_calls.append(True),
+        _invalidate_dual_preview=lambda _generation: None,
+        _finish_dual_startup_metrics=lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        app_ui,
+        "open_camera",
+        lambda _index: pytest.fail("claim failure must not fall back to serial open"),
+    )
+
+    app_ui.App._worker_loop_dual_camera(app, state)
+
+    assert statuses == ["双摄像头预热失败：camera 1 unavailable"]
+    assert done_calls == [True]
+    assert cancel_calls == [True]
+
+
+def test_dual_worker_never_opens_camera_after_pair_claim():
+    worker = _function_node("_worker_loop_dual_camera")
+
+    assert _named_calls(worker, "open_camera") == []
+
+
+def test_dual_preview_queue_is_latest_only_and_rejects_old_generation():
+    app = _dual_preview_stub()
+    first = np.full((2, 3, 3), 10, dtype=np.uint8)
+    latest = np.full((2, 3, 3), 20, dtype=np.uint8)
+
+    assert app_ui.App._post_dual_frame_pair(
+        app, first, "first", first, "first2", session_generation=1, stage="raw"
+    )
+    assert app_ui.App._post_dual_frame_pair(
+        app, latest, "latest", latest, "latest2", session_generation=1, stage="raw"
+    )
+    assert not app_ui.App._post_dual_frame_pair(
+        app, first, "old", first, "old2", session_generation=0, stage="raw"
+    )
+
+    packet = app._dual_preview_queue.get_nowait()
+    assert packet.actions == "latest"
+    assert int(packet.frame_rgb[0, 0, 0]) == 20
+
+
+def test_annotated_stage_drops_queued_and_late_raw_packets():
+    app = _dual_preview_stub(record_skeleton=True)
+    frame = np.zeros((2, 3, 3), dtype=np.uint8)
+
+    assert app_ui.App._post_dual_frame_pair(
+        app, frame, "raw", frame, "raw2", session_generation=1, stage="raw"
+    )
+    assert app_ui.App._advance_dual_preview_stage(app, 1, "annotated")
+    assert app._dual_preview_queue.empty()
+    assert not app_ui.App._post_dual_frame_pair(
+        app, frame, "late", frame, "late2", session_generation=1, stage="raw"
+    )
+    assert app_ui.App._post_dual_frame_pair(
+        app,
+        frame,
+        "annotated",
+        frame,
+        "annotated2",
+        session_generation=1,
+        stage="annotated",
+    )
+    assert app._dual_preview_queue.get_nowait().stage == "annotated"
+
+
+def test_tick_renders_dual_packet_atomically_and_emits_metrics_once(
+    monkeypatch, capsys
+):
+    app = _dual_preview_stub()
+    frame = np.full((2, 3, 3), 7, dtype=np.uint8)
+    monkeypatch.setattr(app_ui.ImageTk, "PhotoImage", lambda image: image)
+
+    app_ui.App._post_dual_frame_pair(
+        app, frame, "front", frame, "side", session_generation=1, stage="raw"
+    )
+    app_ui.App._tick(app)
+
+    assert len(app.preview.images) == 1
+    assert len(app.preview2.images) == 1
+    assert app.actions_var.get() == "front"
+    assert app._dual_startup_metrics[1].first_pair_rendered is not None
+    assert app._dual_first_render_events[1].is_set()
+    assert len(app.root.after_calls) == 1
+    first_output = capsys.readouterr().out
+    assert first_output.count("[dual-startup]") == 1
+    assert '"outcome": "starting"' in first_output
+
+    app_ui.App._post_dual_frame_pair(
+        app, frame, "front2", frame, "side2", session_generation=1, stage="raw"
+    )
+    app_ui.App._tick(app)
+    assert capsys.readouterr().out == ""
+
+
+def test_active_dual_tick_never_consumes_old_single_queue(monkeypatch):
+    app = _dual_preview_stub(generation=2)
+    app._queue.put((np.zeros((2, 3, 3), dtype=np.uint8), "single"))
+    stale = app_ui.DualPreviewPacket(
+        session_generation=1,
+        frame_rgb=np.zeros((2, 3, 3), dtype=np.uint8),
+        actions="stale",
+        frame_rgb2=np.zeros((2, 3, 3), dtype=np.uint8),
+        actions2="stale2",
+        stage="raw",
+        enqueued_at=0.0,
+    )
+    app._dual_preview_queue.put(stale)
+    monkeypatch.setattr(app_ui.ImageTk, "PhotoImage", lambda image: image)
+
+    app_ui.App._tick(app)
+
+    assert app._queue.qsize() == 1
+    assert app.preview.images == []
+    assert app.preview2.images == []
+
+
+def test_dual_startup_metrics_expose_all_six_timing_points_once(capsys):
+    app = _dual_preview_stub(record_skeleton=True)
+    metrics = app._dual_startup_metrics[1]
+    metrics.start_click = 10.0
+    metrics.pair_ready = 10.1
+    metrics.first_pair_enqueued = 10.2
+    metrics.first_pair_rendered = 10.3
+    metrics.pipeline_ready = 10.4
+    metrics.first_annotated_enqueued = 10.5
+    metrics.first_annotated_rendered = 10.6
+    metrics.outcome = "running"
+
+    app_ui.App._emit_dual_startup_metrics(app, 1)
+    app_ui.App._emit_dual_startup_metrics(app, 1, force=True)
+
+    output = capsys.readouterr().out.strip()
+    assert output.count("[dual-startup]") == 1
+    for name in (
+        "pair_ready",
+        "first_pair_enqueued",
+        "first_pair_rendered",
+        "pipeline_ready",
+        "first_annotated_enqueued",
+        "first_annotated_rendered",
+    ):
+        assert f'"start_to_{name}_ms"' in output
+
+
 def test_dual_camera_worker_creates_two_mediapipe_pipelines():
     worker = _function_node("_worker_loop_dual_camera")
 
@@ -365,7 +647,12 @@ def test_all_camera_capture_paths_apply_rotation(worker_name, expected_args):
         (ast.unparse(call.args[0]), ast.unparse(call.args[1])) for call in calls
     )
 
-    assert actual_args == sorted(expected_args)
+    if worker_name == "_worker_loop_dual_camera":
+        assert set(expected_args).issubset(set(actual_args))
+        assert ("pair[0].frame", "state.rotate") in actual_args
+        assert ("pair[1].frame", "state.rotate2") in actual_args
+    else:
+        assert actual_args == sorted(expected_args)
 
 
 def test_shared_single_worker_rotation_is_guarded_to_camera_sources():
@@ -428,8 +715,11 @@ def test_dual_worker_writes_selected_frames_but_previews_annotated_frames():
     worker = _function_node("_worker_loop_dual_camera")
     select_calls = _named_calls(worker, "_select_dual_recording_frames")
     write_calls = _named_calls(worker, "_write_recording_pair")
-    preview_calls = _named_calls(worker, "_post_frame")
-    preview2_calls = _named_calls(worker, "_post_frame2")
+    preview_calls = [
+        call
+        for call in _named_calls(worker, "_post_dual_frame_pair")
+        if call.args and ast.unparse(call.args[0]) == "annotated"
+    ]
 
     assert len(select_calls) == 1
     assert [ast.unparse(arg) for arg in select_calls[0].args] == [
@@ -442,8 +732,13 @@ def test_dual_worker_writes_selected_frames_but_previews_annotated_frames():
         "record_frame",
         "record_frame2",
     ]
-    assert ast.unparse(preview_calls[0].args[0]) == "annotated"
-    assert ast.unparse(preview2_calls[0].args[0]) == "annotated2"
+    assert len(preview_calls) == 1
+    assert [ast.unparse(arg) for arg in preview_calls[0].args[:4]] == [
+        "annotated",
+        "actions_text",
+        "annotated2",
+        "actions_text2",
+    ]
 
 
 def test_dual_worker_finally_always_closes_recording_pair():
@@ -459,10 +754,7 @@ def test_dual_worker_finally_always_closes_recording_pair():
     assert len(finally_calls) == 1
 
 
-@pytest.mark.parametrize("failure_phase", ["annotate", "write"])
-def test_dual_worker_releases_captures_and_pipelines_after_runtime_error(
-    failure_phase, monkeypatch
-):
+def _exercise_dual_runtime_failure(monkeypatch, *, record_skeleton: bool, phase: str):
     frame = np.zeros((4, 6, 3), dtype=np.uint8)
 
     class _Capture:
@@ -489,7 +781,7 @@ def test_dual_worker_releases_captures_and_pipelines_after_runtime_error(
             pass
 
     class _Pipeline:
-        def __init__(self, *, fail_annotate: bool) -> None:
+        def __init__(self, *, fail_annotate: bool = False) -> None:
             self.fail_annotate = fail_annotate
             self.close_calls = 0
 
@@ -508,9 +800,37 @@ def test_dual_worker_releases_captures_and_pipelines_after_runtime_error(
     side_cap = _Capture()
     pipelines: list[_Pipeline] = []
 
+    class _Pool:
+        def wait_pair(self, primary, secondary, *, timeout, stop_event):
+            assert (primary, secondary) == (0, 1)
+            return (
+                SimpleNamespace(frame=frame.copy(), sequence=1, generation=1),
+                SimpleNamespace(frame=frame.copy(), sequence=1, generation=1),
+            )
+
+        def snapshot_pair(self, *_args, **_kwargs):
+            return None
+
+        def claim_pair(
+            self,
+            primary,
+            secondary,
+            *,
+            timeout,
+            expected_generations,
+            stop_event,
+        ):
+            assert (primary, secondary) == (0, 1)
+            assert expected_generations == (1, 1)
+            assert not stop_event.is_set()
+            return front_cap, side_cap
+
+        def cancel(self, _role):
+            pass
+
     def pipeline_factory(**_kwargs):
         pipeline = _Pipeline(
-            fail_annotate=failure_phase == "annotate" and not pipelines
+            fail_annotate=phase == "annotate" and not pipelines
         )
         pipelines.append(pipeline)
         return pipeline
@@ -519,10 +839,12 @@ def test_dual_worker_releases_captures_and_pipelines_after_runtime_error(
     done_calls: list[bool] = []
 
     def write_pair(_front, _side) -> None:
-        if failure_phase == "write":
+        if phase == "write":
             raise RuntimeError("write failed")
 
     app = SimpleNamespace(
+        _camera_warmup_pool=_Pool(),
+        _current_session_generation=1,
         _record_pair_lock=threading.Lock(),
         _rec=_RecordingSession(),
         _rec2=_RecordingSession(),
@@ -530,35 +852,292 @@ def test_dual_worker_releases_captures_and_pipelines_after_runtime_error(
         _post_dual_preview_layout=lambda _layout: None,
         _post_status=lambda _status: None,
         _post_progress=lambda _current, _total: None,
-        _post_done=lambda: done_calls.append(True),
-        _post_frame=lambda _frame, _actions: None,
-        _post_frame2=lambda _frame, _actions: None,
+        _post_done=lambda **_kwargs: done_calls.append(True),
+        _post_dual_frame_pair=lambda *_args, **_kwargs: True,
+        _mark_dual_startup_metric=lambda *_args, **_kwargs: None,
+        _advance_dual_preview_stage=lambda *_args, **_kwargs: True,
+        _set_dual_startup_outcome=lambda *_args, **_kwargs: None,
+        _post_dual_recording_ready=lambda _generation: None,
+        _cancel_dual_warmup_roles=lambda: None,
+        _invalidate_dual_preview=lambda _generation: None,
+        _finish_dual_startup_metrics=lambda *_args, **_kwargs: None,
         _write_recording_pair=write_pair,
         _close_recording_pair=lambda: close_pair_calls.append(True),
     )
     state = SimpleNamespace(
+        source="0",
         source2="1",
+        session_generation=1,
         pose_variant="full",
         enable_hands=True,
         rotate=0,
         rotate2=0,
-        record_skeleton=False,
+        record_skeleton=record_skeleton,
     )
-    monkeypatch.setattr(app_ui, "open_camera", lambda _index: side_cap)
     monkeypatch.setattr(app_ui, "models_dir", lambda: Path("models"))
     monkeypatch.setattr(app_ui, "MediaPipePipeline", pipeline_factory)
     monkeypatch.setattr(app_ui.cv2, "putText", lambda image, *_args, **_kwargs: image)
     monkeypatch.setattr(app_ui.cv2, "destroyAllWindows", lambda: None)
 
-    with pytest.raises(RuntimeError, match=f"{failure_phase} failed"):
-        app_ui.App._worker_loop_dual_camera(app, state, front_cap)
+    app_ui.App._worker_loop_dual_camera(app, state)
 
     assert front_cap.release_calls == 1
     assert side_cap.release_calls == 1
-    assert len(pipelines) == 2
-    assert [pipeline.close_calls for pipeline in pipelines] == [1, 1]
     assert close_pair_calls == [True]
     assert done_calls == [True]
+    return pipelines
+
+
+def test_dual_skeleton_annotate_failure_closes_two_pipelines(monkeypatch):
+    pipelines = _exercise_dual_runtime_failure(
+        monkeypatch, record_skeleton=True, phase="annotate"
+    )
+
+    assert len(pipelines) == 2
+    assert [pipeline.close_calls for pipeline in pipelines] == [1, 1]
+
+
+def test_dual_raw_write_failure_creates_no_pipeline(monkeypatch):
+    pipelines = _exercise_dual_runtime_failure(
+        monkeypatch, record_skeleton=False, phase="write"
+    )
+
+    assert pipelines == []
+
+
+def test_pipeline_loading_keeps_raw_pair_flowing_without_writes(monkeypatch):
+    frame = np.zeros((4, 6, 3), dtype=np.uint8)
+    pipeline_entered = threading.Event()
+    allow_pipeline = threading.Event()
+    accepted_stages: list[str] = []
+    write_calls: list[bool] = []
+    ready_calls: list[int] = []
+    done_calls: list[int] = []
+
+    class _Capture:
+        def __init__(self) -> None:
+            self.read_calls = 0
+            self.release_calls = 0
+
+        def get(self, prop) -> int:
+            return 6 if prop == app_ui.cv2.CAP_PROP_FRAME_WIDTH else 4
+
+        def read(self):
+            self.read_calls += 1
+            if self.read_calls == 1:
+                return True, frame.copy()
+            return False, None
+
+        def release(self) -> None:
+            self.release_calls += 1
+
+    front_cap = _Capture()
+    side_cap = _Capture()
+
+    class _Pool:
+        def __init__(self) -> None:
+            self.sequence = 1
+
+        def wait_pair(self, *_args, **_kwargs):
+            return (
+                SimpleNamespace(frame=frame.copy(), sequence=1, generation=1),
+                SimpleNamespace(frame=frame.copy(), sequence=1, generation=1),
+            )
+
+        def snapshot_pair(self, *_args, **_kwargs):
+            self.sequence += 1
+            value = self.sequence
+            return (
+                SimpleNamespace(frame=frame.copy(), sequence=value, generation=1),
+                SimpleNamespace(frame=frame.copy(), sequence=value, generation=1),
+            )
+
+        def claim_pair(self, *_args, **_kwargs):
+            return front_cap, side_cap
+
+        def cancel(self, _role):
+            pass
+
+    class _RecordingSession:
+        def begin_session(self, **_kwargs) -> None:
+            pass
+
+        def update_session_size(self, **_kwargs) -> None:
+            pass
+
+    class _Pipeline:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        def next_timestamp_ms(self, **_kwargs) -> int:
+            return 1
+
+        def annotate(self, current_frame, **_kwargs):
+            return current_frame.copy(), []
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    pipelines: list[_Pipeline] = []
+
+    def pipeline_factory(**_kwargs):
+        if not pipelines:
+            pipeline_entered.set()
+            assert allow_pipeline.wait(2.0)
+        pipeline = _Pipeline()
+        pipelines.append(pipeline)
+        return pipeline
+
+    app = _dual_preview_stub(record_skeleton=True)
+    app._camera_warmup_pool = _Pool()
+    app._current_session_generation = 1
+    app._stop_evt = threading.Event()
+    app._record_pair_lock = threading.Lock()
+    app._rec = _RecordingSession()
+    app._rec2 = _RecordingSession()
+    app._dual_active = False
+    app._post_dual_preview_layout = lambda _layout: None
+    app._post_status = lambda _status: None
+    app._post_progress = lambda _done, _total: None
+    app._post_dual_recording_ready = ready_calls.append
+    app._write_recording_pair = lambda *_frames: write_calls.append(True)
+    app._close_recording_pair = lambda: None
+    app._post_done = lambda **kwargs: done_calls.append(
+        kwargs.get("session_generation")
+    )
+    app._finish_dual_startup_metrics = lambda *_args, **_kwargs: None
+    original_post = app_ui.App._post_dual_frame_pair
+
+    def post_pair(*args, **kwargs):
+        accepted = original_post(app, *args, **kwargs)
+        if accepted:
+            accepted_stages.append(kwargs["stage"])
+        return accepted
+
+    app._post_dual_frame_pair = post_pair
+    state = SimpleNamespace(
+        source="0",
+        source2="1",
+        session_generation=1,
+        pose_variant="full",
+        enable_hands=True,
+        rotate=0,
+        rotate2=0,
+        record_skeleton=True,
+    )
+    monkeypatch.setattr(app_ui, "models_dir", lambda: Path("models"))
+    monkeypatch.setattr(app_ui, "MediaPipePipeline", pipeline_factory)
+    monkeypatch.setattr(app_ui.cv2, "putText", lambda image, *_args, **_kwargs: image)
+    monkeypatch.setattr(app_ui.cv2, "destroyAllWindows", lambda: None)
+
+    worker = threading.Thread(
+        target=lambda: app_ui.App._worker_loop_dual_camera(app, state)
+    )
+    worker.start()
+    assert pipeline_entered.wait(1.0)
+    deadline = app_ui.time.monotonic() + 1.0
+    while accepted_stages.count("raw") < 2 and app_ui.time.monotonic() < deadline:
+        app_ui.time.sleep(0.01)
+    assert accepted_stages.count("raw") >= 2
+    assert write_calls == []
+    assert ready_calls == []
+
+    allow_pipeline.set()
+    worker.join(2.0)
+
+    assert not worker.is_alive()
+    assert len(pipelines) == 2
+    assert [pipeline.close_calls for pipeline in pipelines] == [1, 1]
+    assert ready_calls == [1]
+    assert write_calls == [True]
+    assert "annotated" in accepted_stages
+    first_annotated = accepted_stages.index("annotated")
+    assert "raw" not in accepted_stages[first_annotated + 1 :]
+    assert done_calls == [1]
+    assert front_cap.release_calls == 1
+    assert side_cap.release_calls == 1
+
+
+def test_second_pipeline_failure_closes_first_without_starting_recording(monkeypatch):
+    frame = np.zeros((4, 6, 3), dtype=np.uint8)
+    cancel_calls: list[str] = []
+    begin_calls: list[bool] = []
+    done_calls: list[int] = []
+
+    class _Pool:
+        def wait_pair(self, *_args, **_kwargs):
+            return (
+                SimpleNamespace(frame=frame.copy(), sequence=1, generation=1),
+                SimpleNamespace(frame=frame.copy(), sequence=1, generation=1),
+            )
+
+        def snapshot_pair(self, *_args, **_kwargs):
+            return None
+
+        def claim_pair(self, *_args, **_kwargs):
+            pytest.fail("claim must not run after pipeline initialization fails")
+
+        def cancel(self, role):
+            cancel_calls.append(role)
+
+    class _RecordingSession:
+        def begin_session(self, **_kwargs) -> None:
+            begin_calls.append(True)
+
+    class _Pipeline:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    first = _Pipeline()
+    calls = 0
+
+    def pipeline_factory(**_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return first
+        raise RuntimeError("second pipeline failed")
+
+    app = _dual_preview_stub(record_skeleton=True)
+    app._camera_warmup_pool = _Pool()
+    app._current_session_generation = 1
+    app._stop_evt = threading.Event()
+    app._record_pair_lock = threading.Lock()
+    app._rec = _RecordingSession()
+    app._rec2 = _RecordingSession()
+    app._post_dual_preview_layout = lambda _layout: None
+    app._post_status = lambda _status: None
+    app._post_progress = lambda *_args: None
+    app._post_done = lambda **kwargs: done_calls.append(
+        kwargs.get("session_generation")
+    )
+    app._close_recording_pair = lambda: pytest.fail(
+        "recording pair must not start"
+    )
+    app._finish_dual_startup_metrics = lambda *_args, **_kwargs: None
+    state = SimpleNamespace(
+        source="0",
+        source2="1",
+        session_generation=1,
+        pose_variant="full",
+        enable_hands=True,
+        rotate=0,
+        rotate2=0,
+        record_skeleton=True,
+    )
+    monkeypatch.setattr(app_ui, "models_dir", lambda: Path("models"))
+    monkeypatch.setattr(app_ui, "MediaPipePipeline", pipeline_factory)
+    monkeypatch.setattr(app_ui.cv2, "destroyAllWindows", lambda: None)
+
+    app_ui.App._worker_loop_dual_camera(app, state)
+
+    assert first.close_calls == 1
+    assert begin_calls == []
+    assert cancel_calls == [app_ui.PRIMARY, app_ui.SECONDARY]
+    assert done_calls == [1]
 
 
 def test_main_stop_does_not_cancel_background_compare_queue():

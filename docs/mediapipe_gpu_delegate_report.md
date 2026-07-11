@@ -2,6 +2,45 @@
 
 日期：2026-06-02
 
+## 2026-07-10：MediaPipe 0.10.31 / 0.10.35 双摄首屏优化门控复测
+
+### 结论
+
+- **版本升级 no-go：** 保持 `mediapipe==0.10.31`。`0.10.35` 未在当前 VIDEO-mode Pose/Hands 链路达到相关指标改善 `>=10%`，同时绝对进程峰值 RSS 明显增加。
+- **GPU UI no-go：** 不增加 Tkinter GPU 开关。Windows 的 `0.10.35` wheel 对 12 次 GPU pipeline 请求全部回退 CPU，错误为 `ImageCloneCalculator: GPU processing is disabled in build flags`，不满足 `active_delegate=gpu` 的前置条件。
+- **发布说明不直接转化为本项目性能收益：** 0.10.35 的 API3、calculator、构建和跨平台修复可以作为未来升级候选信息，但本次真实样本 A/B 没有证明它能缩短 Tkinter 双摄点击开始到预览出现的时间。当前首屏优化继续依赖摄像头预热、原子双帧交付和模型加载期裸帧过渡。
+
+### 隔离环境和方法
+
+- Windows / Python `3.13.9`，两套独立 venv。
+- 两边统一 OpenCV `4.13.0`、NumPy `2.4.4`、相同 `.task` 模型和 `docs/yolo_eval_samples.json` 的 6 段真实视频。
+- 每个样本每档先跑 5 帧 warmup，再计时 60 帧；CPU 版本对比串行执行，避免两个 benchmark 进程互相争用。
+- 指标为 6 个样本的中位数；峰值内存为 benchmark 进程 RSS 峰值。
+
+| case | version | init s | first annotate s | FPS | P90 ms | P99 ms | peak RSS MB |
+|:---|:---|---:|---:|---:|---:|---:|---:|
+| pose-only CPU | 0.10.31 | 0.077 | 0.026 | 70.183 | 14.857 | 21.441 | 231.758 |
+| pose-only CPU | 0.10.35 | 0.074 | 0.026 | 69.375 | 15.035 | 20.017 | 273.830 |
+| pose+hands CPU | 0.10.31 | 0.095 | 0.043 | 31.416 | 37.335 | 41.890 | 295.340 |
+| pose+hands CPU | 0.10.35 | 0.097 | 0.039 | 31.979 | 38.094 | 41.199 | 338.529 |
+
+逐样本比值的中位数显示：
+
+- pose-only：`0.10.35 / 0.10.31` FPS `0.984x`，P90 `1.025x`，峰值 RSS `1.187x`。
+- pose+hands：`0.10.35 / 0.10.31` FPS `0.983x`，P90 `1.029x`，峰值 RSS `1.152x`。
+- `0.10.35` GPU 请求实际均为 `active_delegate=cpu`，因此不计算或宣称 GPU 加速比；回退后观察到的约 `1.01x` FPS 波动不属于 GPU 收益。
+
+### 证据与复现
+
+本地原始结果位于 gitignored 的：
+
+- `outputs/mediapipe_ab/mp_031_cpu_serial/`
+- `outputs/mediapipe_ab/mp_035_cpu_serial/`
+- `outputs/mediapipe_ab/mp_031/`
+- `outputs/mediapipe_ab/mp_035/`
+
+benchmark 新增 `--mediapipe-only`，并记录 `active_delegate`、`delegate_fallback_reason`、`peak_rss_mb` 和 `rss_delta_mb`，用于避免混入 YOLO case 或把 GPU 回退误判为 GPU 成功。
+
 ## 结论
 
 本机 `mediapipe==0.10.31` 的 Tasks Python API 暴露 `BaseOptions(delegate=...)`，且 `BaseOptions.Delegate` 包含 `CPU` / `GPU`。在 Windows 11 + RTX 4060 Laptop GPU 环境下，`PoseLandmarker` 与 `HandLandmarker` 使用 `BaseOptions.Delegate.GPU` 均可初始化并完成一帧 `detect_for_video()` smoke。

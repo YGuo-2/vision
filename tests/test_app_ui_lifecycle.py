@@ -7,6 +7,8 @@ from pathlib import Path
 from queue import Queue
 from types import SimpleNamespace
 
+import numpy as np
+
 from apps import app_ui
 from core.recording_controller import RecordingController
 
@@ -42,6 +44,44 @@ class _Cap:
         self.release_calls += 1
 
 
+class _WarmupPool:
+    def __init__(self) -> None:
+        self.warm_calls: list[tuple[str, int]] = []
+        self.cancel_calls: list[str] = []
+        self.close_calls = 0
+
+    def warm(self, role: str, index: int) -> None:
+        self.warm_calls.append((role, index))
+
+    def cancel(self, role: str) -> None:
+        self.cancel_calls.append(role)
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+
+class _WarmCapture(_Cap):
+    def __init__(self, value: int) -> None:
+        super().__init__()
+        self._condition = threading.Condition()
+        self._frame = np.full((2, 3, 3), value, dtype=np.uint8)
+        self._sent = False
+
+    def read(self):
+        with self._condition:
+            if not self._sent:
+                self._sent = True
+                return True, self._frame.copy()
+            while self.release_calls == 0:
+                self._condition.wait()
+            return False, None
+
+    def release(self) -> None:
+        with self._condition:
+            super().release()
+            self._condition.notify_all()
+
+
 class _QueuedRoot:
     def __init__(self) -> None:
         self.after_calls: list[tuple[int, object]] = []
@@ -60,9 +100,23 @@ def _preopen_app(index: int = 0):
     app._preopen_cap = None
     app._preopen_index = None
     app._preopen_generation = 0
+    app._camera_open_locks_guard = threading.Lock()
+    app._camera_open_locks = {}
     app._worker = None
     app._source_state = app_ui.InputSourceState()
     app._source_state.select_camera(index)
+    return app
+
+
+def _warmup_app(*, second_label: str = "摄像头 1"):
+    app = _preopen_app()
+    app._closing = False
+    app._camera_entries = [
+        app_ui.CameraEntry(label="摄像头 0", index=0),
+        app_ui.CameraEntry(label="摄像头 1", index=1),
+    ]
+    app.camera_choice_var_2 = _Var(second_label)
+    app._camera_warmup_pool = _WarmupPool()
     return app
 
 
@@ -120,7 +174,8 @@ def test_preopen_late_generation_cannot_replace_newer_cap(monkeypatch):
     assert app._preopen_cap is newest
     assert app._preopen_index == 0
     assert newest.release_calls == 0
-    assert late.release_calls == 1
+    # 旧 generation 在拿到 per-index open lock 后先退出，不再触碰驱动。
+    assert late.release_calls == 0
 
 
 def test_camera_enumeration_result_is_applied_only_from_main_thread_queue(monkeypatch):
@@ -241,6 +296,269 @@ def test_take_preopen_releases_mismatched_cached_handle():
     assert app._preopen_index is None
 
 
+def test_two_camera_selection_warms_both_roles_and_releases_single_preopen():
+    app = _warmup_app()
+    cached = _Cap()
+    app._preopen_cap = cached
+    app._preopen_index = 0
+
+    app_ui.App._sync_camera_warmup(app)
+
+    assert cached.release_calls == 1
+    assert app._camera_warmup_pool.warm_calls == [
+        (app_ui.PRIMARY, 0),
+        (app_ui.SECONDARY, 1),
+    ]
+
+
+def test_same_index_pool_open_waits_for_legacy_preopen_release(monkeypatch):
+    app = _warmup_app()
+    legacy_entered = threading.Event()
+    allow_legacy_open = threading.Event()
+    pool_primary_entered = threading.Event()
+    pool_secondary_entered = threading.Event()
+    legacy = _Cap()
+    primary = _WarmCapture(1)
+    secondary = _WarmCapture(2)
+    primary_calls = 0
+    observed_legacy_releases: list[int] = []
+
+    def camera_factory(index: int):
+        nonlocal primary_calls
+        if index == 1:
+            pool_secondary_entered.set()
+            return secondary
+        primary_calls += 1
+        if primary_calls == 1:
+            legacy_entered.set()
+            assert allow_legacy_open.wait(1.0)
+            return legacy
+        observed_legacy_releases.append(legacy.release_calls)
+        pool_primary_entered.set()
+        return primary
+
+    monkeypatch.setattr(app_ui, "open_camera", camera_factory)
+    app._camera_warmup_pool = app_ui.CameraWarmupPool(
+        capture_factory=app._open_camera_exclusive,
+        join_timeout=0.1,
+    )
+    try:
+        app_ui.App._kick_preopen(app, 0)
+        assert legacy_entered.wait(1.0)
+
+        app_ui.App._sync_camera_warmup(app)
+
+        assert pool_secondary_entered.wait(1.0)
+        assert not pool_primary_entered.is_set()
+        allow_legacy_open.set()
+        assert pool_primary_entered.wait(1.0)
+        assert observed_legacy_releases == [1]
+    finally:
+        allow_legacy_open.set()
+        app._camera_warmup_pool.close()
+
+
+def test_single_preopen_waits_until_cancelled_pool_capture_is_released(monkeypatch):
+    app = _warmup_app()
+    pool_opened = threading.Event()
+    allow_pool_release = threading.Event()
+    single_opened = threading.Event()
+    pool_capture = _WarmCapture(1)
+    single_capture = _Cap()
+    calls: list[int] = []
+
+    original_release = pool_capture.release
+
+    def delayed_release() -> None:
+        assert allow_pool_release.wait(1.0)
+        original_release()
+
+    pool_capture.release = delayed_release
+
+    def camera_factory(index: int):
+        calls.append(index)
+        if len(calls) == 1:
+            pool_opened.set()
+            return pool_capture
+        single_opened.set()
+        return single_capture
+
+    monkeypatch.setattr(app_ui, "open_camera", camera_factory)
+    app._camera_warmup_pool = app_ui.CameraWarmupPool(
+        capture_factory=app._open_camera_exclusive,
+        join_timeout=0.01,
+    )
+    try:
+        app._camera_warmup_pool.warm(app_ui.PRIMARY, 0)
+        assert pool_opened.wait(1.0)
+        app.camera_choice_var_2 = _Var(app_ui.NO_SECOND_CAMERA)
+
+        switch = threading.Thread(
+            target=app_ui.App._sync_camera_warmup,
+            args=(app,),
+            daemon=True,
+        )
+        switch.start()
+        assert not single_opened.wait(0.05)
+        allow_pool_release.set()
+        assert single_opened.wait(1.0)
+        switch.join(1.0)
+        assert calls == [0, 0]
+    finally:
+        allow_pool_release.set()
+        app._release_preopen_cap()
+        app._camera_warmup_pool.close()
+
+
+def test_same_camera_selection_never_starts_duplicate_pool_reader():
+    app = _warmup_app(second_label="摄像头 0")
+    single_preopen: list[int] = []
+    app._kick_preopen = single_preopen.append
+
+    app_ui.App._sync_camera_warmup(app)
+
+    assert app._camera_warmup_pool.warm_calls == []
+    assert app._camera_warmup_pool.cancel_calls == [
+        app_ui.PRIMARY,
+        app_ui.SECONDARY,
+    ]
+    assert single_preopen == [0]
+
+
+def test_returning_to_single_camera_cancels_pool_and_restores_legacy_preopen():
+    app = _warmup_app(second_label=app_ui.NO_SECOND_CAMERA)
+    single_preopen: list[int] = []
+    app._kick_preopen = single_preopen.append
+
+    app_ui.App._sync_camera_warmup(app)
+
+    assert app._camera_warmup_pool.cancel_calls == [
+        app_ui.PRIMARY,
+        app_ui.SECONDARY,
+    ]
+    assert single_preopen == [0]
+
+
+def test_refresh_releases_all_camera_warmups_before_enumeration():
+    app = _warmup_app()
+    app._enum_busy = threading.Event()
+    events: list[str] = []
+    app._release_camera_warmups = lambda: events.append("release")
+    app._start_enumeration = lambda: events.append("enumerate")
+
+    app_ui.App._refresh_cameras(app)
+
+    assert events == ["release", "enumerate"]
+
+
+def test_video_worker_releases_camera_warmups_before_opening_file(monkeypatch):
+    events: list[str] = []
+    video_cap = _Cap(opened=False)
+    app = SimpleNamespace(
+        _release_camera_warmups=lambda: events.append("release"),
+        _post_status=lambda text: events.append(text),
+        _post_done=lambda: events.append("done"),
+    )
+    state = SimpleNamespace(source="input.mp4", source2=None, workers=1)
+
+    monkeypatch.setattr(
+        app_ui.cv2,
+        "VideoCapture",
+        lambda path: (events.append(f"open:{path}"), video_cap)[1],
+    )
+
+    app_ui.App._worker_loop(app, state)
+
+    assert events[:2] == ["release", "open:input.mp4"]
+    assert events[-1] == "done"
+    assert video_cap.release_calls == 1
+
+
+def test_post_done_rewarms_current_selection_for_next_session():
+    calls: list[bool] = []
+
+    class _ImmediateRoot:
+        def after(self, _delay, callback) -> None:
+            callback()
+
+    app = SimpleNamespace(
+        _closing=False,
+        root=_ImmediateRoot(),
+        start_btn=_Widget(),
+        stop_btn=_Widget(),
+        _set_refresh_enabled=lambda: None,
+        _set_running_controls=lambda _running: None,
+        _sync_camera_warmup=lambda *, allow_running=False: calls.append(allow_running),
+    )
+
+    app_ui.App._post_done(app)
+
+    assert calls == [True]
+
+
+def test_generation_aware_post_done_ignores_stale_and_deduplicates_current():
+    events: list[str] = []
+
+    class _ImmediateRoot:
+        def after(self, _delay, callback) -> None:
+            callback()
+
+    app = SimpleNamespace(
+        _closing=False,
+        root=_ImmediateRoot(),
+        start_btn=_Widget(),
+        stop_btn=_Widget(),
+        _set_refresh_enabled=lambda: events.append("refresh"),
+        _set_running_controls=lambda _running: events.append("controls"),
+        _sync_camera_warmup=lambda *, allow_running=False: events.append("warm"),
+        _current_session_generation=4,
+        _dual_done_generation=0,
+        _active_dual_generation=4,
+        _dual_recording_ready=True,
+        _dual_preview_lock=threading.Lock(),
+        _dual_preview_queue=Queue(maxsize=1),
+        status_var=_Var("就绪"),
+    )
+
+    app_ui.App._post_done(app, session_generation=3)
+    assert events == []
+
+    app_ui.App._post_done(
+        app, session_generation=4, final_status="初始化失败：boom"
+    )
+    app_ui.App._post_done(app, session_generation=4)
+
+    assert events == ["refresh", "controls", "warm"]
+    assert app._current_session_generation == 0
+    assert app._dual_done_generation == 4
+    assert app._dual_recording_ready is False
+    assert app.status_var.get() == "初始化失败：boom"
+
+
+def test_recording_ready_callback_requires_current_live_generation():
+    class _ImmediateRoot:
+        def after(self, _delay, callback) -> None:
+            callback()
+
+    app = SimpleNamespace(
+        _closing=False,
+        root=_ImmediateRoot(),
+        _stop_evt=threading.Event(),
+        _current_session_generation=8,
+        _active_dual_generation=8,
+        _dual_recording_ready=False,
+        _dual_preview_lock=threading.Lock(),
+        record_btn=_Widget(),
+    )
+
+    app_ui.App._post_dual_recording_ready(app, 7)
+    assert app._dual_recording_ready is False
+
+    app_ui.App._post_dual_recording_ready(app, 8)
+    assert app._dual_recording_ready is True
+    assert app.record_btn.config["state"] == "normal"
+
+
 def test_transcode_worker_is_non_daemon_tracked_and_removed(monkeypatch):
     app = _closing_app()
     entered = threading.Event()
@@ -291,6 +609,18 @@ def test_close_waits_for_transcode_without_blocking_tk_loop(monkeypatch):
     _delay, poll = app.root.after_calls.pop(0)
     poll()
     assert app.root.destroy_calls == 1
+
+
+def test_close_permanently_closes_dual_camera_warmup_pool():
+    app = _closing_app()
+    pool = _WarmupPool()
+    app._camera_warmup_pool = pool
+
+    app_ui.App._on_close(app)
+    app._close_prepare_worker.join(timeout=1.0)
+
+    assert not app._close_prepare_worker.is_alive()
+    assert pool.close_calls == 1
 
 
 def test_close_destroys_window_after_bounded_deadline(monkeypatch):

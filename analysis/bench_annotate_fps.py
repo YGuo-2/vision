@@ -87,6 +87,16 @@ class FrameLoopStats:
     wall_sec: float
     wall_latencies_sec: tuple[float, ...]
     infer_latencies_sec: tuple[float, ...] = ()
+    peak_rss_bytes: int | None = None
+
+
+def _process_rss_bytes() -> int | None:
+    try:
+        import psutil
+
+        return int(psutil.Process(os.getpid()).memory_info().rss)
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def collect_env() -> dict[str, Any]:
@@ -605,6 +615,7 @@ def _run_frame_loop(
     frames = 0
     wall_latencies: list[float] = []
     infer_latencies: list[float] = []
+    peak_rss_bytes = _process_rss_bytes()
     while True:
         if frame_limit is not None and frames >= frame_limit:
             break
@@ -619,12 +630,16 @@ def _run_frame_loop(
         infer_sec = getattr(runner, "last_yolo_raw_infer_sec", None)
         if infer_sec is not None:
             infer_latencies.append(float(infer_sec))
+        current_rss_bytes = _process_rss_bytes()
+        if current_rss_bytes is not None:
+            peak_rss_bytes = max(peak_rss_bytes or 0, current_rss_bytes)
         frames += 1
     return FrameLoopStats(
         frames=frames,
         wall_sec=float(sum(wall_latencies)),
         wall_latencies_sec=tuple(wall_latencies),
         infer_latencies_sec=tuple(infer_latencies),
+        peak_rss_bytes=peak_rss_bytes,
     )
 
 
@@ -725,6 +740,7 @@ def bench_sample(
             if hasattr(warmup_runner, "close"):
                 warmup_runner.close()
 
+    rss_before_bytes = _process_rss_bytes()
     init_start = time.perf_counter()
     runner = _make_runner(
         case,
@@ -734,6 +750,9 @@ def bench_sample(
         valid_conf_thr=valid_conf_thr,
     )
     init_sec = time.perf_counter() - init_start
+    rss_after_init_bytes = _process_rss_bytes()
+    active_delegate = str(getattr(runner, "active_delegate", case.delegate))
+    delegate_fallback_reason = getattr(runner, "delegate_fallback_reason", None)
 
     if warmup_frames > 0 and case.backend == "yolo":
         # Warm only YOLO inference on the same adapter so CUDA/model cold-start
@@ -774,6 +793,17 @@ def bench_sample(
             runner.close()
 
     timing = _timing_metrics(timed=timed_stats, warmup=warmup_stats)
+    peak_rss_candidates = [
+        value
+        for value in (rss_after_init_bytes, timed_stats.peak_rss_bytes)
+        if value is not None
+    ]
+    peak_rss_bytes = max(peak_rss_candidates) if peak_rss_candidates else None
+    rss_delta_bytes = (
+        max(0, peak_rss_bytes - rss_before_bytes)
+        if peak_rss_bytes is not None and rss_before_bytes is not None
+        else None
+    )
 
     return {
         "sample_id": sample.sample_id,
@@ -783,6 +813,8 @@ def bench_sample(
         "hands": case.enable_hands,
         "device": case.device,
         "delegate": case.delegate,
+        "active_delegate": active_delegate,
+        "delegate_fallback_reason": delegate_fallback_reason,
         "imgsz": case.imgsz,
         "half": case.half,
         "adapter_warmup": case.adapter_warmup,
@@ -790,6 +822,8 @@ def bench_sample(
         "status": "ok",
         "expected_frames": sample.expected_frames,
         "init_sec": round(init_sec, 4),
+        "peak_rss_mb": round(peak_rss_bytes / (1024 * 1024), 3) if peak_rss_bytes is not None else None,
+        "rss_delta_mb": round(rss_delta_bytes / (1024 * 1024), 3) if rss_delta_bytes is not None else None,
         **timing,
         **yolo_metrics,
     }
@@ -803,6 +837,8 @@ def _write_csv(path: Path, records: list[dict[str, Any]]) -> None:
         "hands",
         "device",
         "delegate",
+        "active_delegate",
+        "delegate_fallback_reason",
         "imgsz",
         "half",
         "adapter_warmup",
@@ -813,6 +849,8 @@ def _write_csv(path: Path, records: list[dict[str, Any]]) -> None:
         "timed_frames",
         "expected_frames",
         "init_sec",
+        "peak_rss_mb",
+        "rss_delta_mb",
         "cold_first_infer_sec",
         "cold_first_annotate_sec",
         "annotate_wall_sec",
@@ -864,6 +902,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Opt-in MediaPipe BaseOptions.Delegate.GPU cases for P4 feasibility spikes",
     )
+    parser.add_argument(
+        "--mediapipe-only",
+        action="store_true",
+        help="Run only MediaPipe CPU/GPU cases (skip every YOLO benchmark case)",
+    )
     parser.add_argument("--out", default="outputs/gpu_recheck")
     parser.add_argument("--env-only", action="store_true", help="Write environment JSON and exit")
     args = parser.parse_args(argv)
@@ -889,6 +932,8 @@ def main(argv: list[str] | None = None) -> int:
         yolo_delegate=yolo_delegate,
         include_mediapipe_gpu=bool(args.include_mediapipe_gpu),
     )
+    if args.mediapipe_only:
+        bench_cases = [case for case in bench_cases if case.backend == "mediapipe"]
 
     records: list[dict[str, Any]] = []
     for sample in samples:
@@ -955,6 +1000,7 @@ def main(argv: list[str] | None = None) -> int:
         "status": "ok",
         "requested_device": args.device,
         "include_mediapipe_gpu": bool(args.include_mediapipe_gpu),
+        "mediapipe_only": bool(args.mediapipe_only),
         "warmup_frames": int(args.warmup_frames),
         "samples_total": len(samples),
         "records": records,

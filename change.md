@@ -1,3 +1,30 @@
+## 2026-07-10: [perf/test] Tkinter 双摄快速首屏、裸帧过渡与 MediaPipe 门控复测
+
+### 问题描述
+
+Tkinter 双摄点击“开始”后，第二摄像头仍需现场打开且两路首帧串行等待；开启骨架录像时，两条 MediaPipe VIDEO pipeline 还会在任何画面出现前串行初始化，造成明显黑屏。旧异常测试同时存在“关闭骨架却期待创建两条 pipeline”的自相矛盾。MediaPipe `0.10.35` 和 GPU 是否值得进入 UI 也缺少同样本、同参数的门控证据。
+
+### 修改内容
+
+- 新增 `apps/camera_warmup.py`：按 `primary` / `secondary` 角色并发预热摄像头、持续保存 latest-only 帧，以 generation 隔离选择变化和旧会话，并支持两路原子 claim、超时/停止/关闭释放及异步 reaper。
+- `apps/app_ui.py` 接入双摄选择预热和会话结束后重新预热；启动时复用 ready/in-flight capture，不再串行重复打开。预览改用单槽 `DualPreviewPacket`，Tk 主线程同一次 `_tick` 更新两路 Label，任一路失败时不残留单路画面。
+- 开启骨架时，pipeline 仍由正式 worker 原线程串行创建，预热线程在加载期持续发布同步裸帧；两条 pipeline 全部 ready 后才整体切换到骨架帧。加载期录制按钮禁用，裸帧绝不进入 `_write_recording_pair`。
+- 增加会话 stage/generation/render barrier、启动阶段六个计时点和 exactly-once 收敛，覆盖启动期停止、关窗、模型失败和快速重启。
+- 修正双摄异常测试语义：骨架推理异常使用 `record_skeleton=True` 并验证两条 pipeline；无骨架写盘异常使用 `record_skeleton=False` 并验证零 pipeline。
+- `analysis/bench_annotate_fps.py` 新增 `--mediapipe-only`，并输出实际 `active_delegate`、fallback 原因、峰值 RSS 和 RSS 增量。
+- 隔离 venv 使用 6 段真实视频对比 MediaPipe `0.10.31` / `0.10.35`。`0.10.35` 未达到 10% 性能门槛，CPU FPS 中位数约低 1.6%-1.7%，峰值 RSS 高约 15%-19%；12 次 GPU 请求全部因 Windows build 禁用 GPU 而回退 CPU。因此保持 `mediapipe==0.10.31`、CPU 默认且不增加 GPU UI，结果置顶写入 `docs/mediapipe_gpu_delegate_report.md`。
+
+### 验证方法
+
+- 双摄预热、UI、生命周期、控件和录制定向回归：`164 passed`。
+- delegate、benchmark 和 pose33_v3 golden 门控：`35 passed`。
+- 最终 Tkinter / MediaPipe / valid-mask 定向回归：`192 passed`。
+- `py_compile apps/app_ui.py apps/camera_warmup.py core/vision_pipeline.py analysis/bench_annotate_fps.py` 通过。
+- `git diff --check` 通过，仅有 Windows CRLF 提示。
+- 真实双摄骨架关/开各 20 次、点击到两路实际 Tk 渲染 P95 `<=0.5s` 仍需连接物理双摄人工验收；程序已输出结构化启动计时点用于采集。
+
+---
+
 ## 2026-07-10: [feat] Tkinter 录制保存目录持久化
 
 ### 问题描述

@@ -99,6 +99,8 @@ def test_csv_schema_contains_gpu_recheck_metric_fields(tmp_path):
                 "backend": "yolo",
                 "device": "cuda",
                 "delegate": "pytorch",
+                "active_delegate": "pytorch",
+                "delegate_fallback_reason": None,
                 "imgsz": 640,
                 "half": True,
                 "adapter_warmup": True,
@@ -107,6 +109,8 @@ def test_csv_schema_contains_gpu_recheck_metric_fields(tmp_path):
                 "frames": 1,
                 "warmup_frames": 10,
                 "timed_frames": 1,
+                "peak_rss_mb": 100.0,
+                "rss_delta_mb": 10.0,
                 "timed_latency_ms_p50": 10.0,
                 "timed_latency_ms_p90": 10.0,
                 "timed_latency_ms_p99": 10.0,
@@ -128,10 +132,14 @@ def test_csv_schema_contains_gpu_recheck_metric_fields(tmp_path):
     assert "yolo_raw_infer_fps" in text
     assert "yolo_miss_rate" in text
     assert "warmup_frames" in text
+    assert "active_delegate" in text
+    assert "delegate_fallback_reason" in text
     assert "imgsz" in text
     assert "adapter_warmup" in text
     assert "warmup_shape" in text
     assert "timed_frames" in text
+    assert "peak_rss_mb" in text
+    assert "rss_delta_mb" in text
     assert "timed_latency_ms_p50" in text
     assert "yolo_raw_infer_latency_ms_p99" in text
     assert "max_persons" in text
@@ -189,6 +197,49 @@ def test_mediapipe_gpu_cases_are_explicit_opt_in():
     assert gpu_cases["mediapipe_gpu_pose_hands"].delegate == "gpu"
     assert gpu_cases["mediapipe_gpu_pose_hands"].enable_hands is True
     assert not gpu_cases["mediapipe_gpu_pose_hands"].requires_cuda
+
+
+def test_mediapipe_only_cli_filters_every_yolo_case(tmp_path):
+    samples_path = tmp_path / "samples.json"
+    samples_path.write_text(
+        json.dumps(
+            {
+                "samples": [
+                    {
+                        "id": "missing",
+                        "path": "missing.mp4",
+                        "view": "front",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    out_dir = tmp_path / "out"
+
+    exit_code = bench_annotate_fps.main(
+        [
+            "--samples",
+            str(samples_path),
+            "--asset-root",
+            str(tmp_path),
+            "--out",
+            str(out_dir),
+            "--include-mediapipe-gpu",
+            "--mediapipe-only",
+        ]
+    )
+
+    assert exit_code == 1
+    payload = json.loads((out_dir / "annotate_fps_gpu_recheck.json").read_text(encoding="utf-8"))
+    assert payload["mediapipe_only"] is True
+    assert {record["case"] for record in payload["records"]} == {
+        "mediapipe_pose_only",
+        "mediapipe_pose_hands",
+        "mediapipe_gpu_pose_only",
+        "mediapipe_gpu_pose_hands",
+    }
+    assert {record["backend"] for record in payload["records"]} == {"mediapipe"}
 
 
 def test_mediapipe_runner_passes_delegate_to_pipeline(tmp_path, monkeypatch):
@@ -263,6 +314,37 @@ def test_timing_metrics_separate_warmup_and_timed_latency():
     assert metrics["yolo_raw_infer_latency_ms_p50"] == 6.0
 
 
+def test_frame_loop_records_peak_process_rss(monkeypatch):
+    rss_values = iter((100, 120, 115))
+
+    class FakeCap:
+        def __init__(self) -> None:
+            self.frames = 0
+
+        def read(self):
+            if self.frames >= 2:
+                return False, None
+            self.frames += 1
+            return True, object()
+
+    class FakeRunner:
+        last_yolo_raw_infer_sec = None
+
+        def annotate(self, frame, *, timestamp_ms: int) -> None:
+            pass
+
+    monkeypatch.setattr(bench_annotate_fps, "_process_rss_bytes", lambda: next(rss_values))
+
+    stats = bench_annotate_fps._run_frame_loop(
+        cap=FakeCap(),
+        runner=FakeRunner(),
+        fps_for_ts=30.0,
+        frame_limit=None,
+    )
+
+    assert stats.peak_rss_bytes == 120
+
+
 def test_bench_sample_yolo_warmup_is_reset_before_timed_metrics(tmp_path, monkeypatch):
     video_path = tmp_path / "sample.mp4"
     video_path.write_bytes(b"fake video")
@@ -291,6 +373,8 @@ def test_bench_sample_yolo_warmup_is_reset_before_timed_metrics(tmp_path, monkey
 
     class FakeYoloRunner:
         last_yolo_raw_infer_sec: float | None = None
+        active_delegate = "pytorch"
+        delegate_fallback_reason = None
 
         def __init__(self) -> None:
             self.frames = 0
@@ -378,6 +462,8 @@ def test_bench_sample_yolo_warmup_is_reset_before_timed_metrics(tmp_path, monkey
         "backend",
         "device",
         "delegate",
+        "active_delegate",
+        "delegate_fallback_reason",
         "imgsz",
         "half",
         "adapter_warmup",
@@ -385,6 +471,8 @@ def test_bench_sample_yolo_warmup_is_reset_before_timed_metrics(tmp_path, monkey
         "warmup_frames",
         "timed_frames",
         "init_sec",
+        "peak_rss_mb",
+        "rss_delta_mb",
         "cold_first_infer_sec",
         "timed_latency_ms_p50",
         "timed_latency_ms_p90",

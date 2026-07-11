@@ -294,6 +294,30 @@ def test_set_running_controls_when_running():
     assert stub.refresh_btn.cget("state") == "disabled"
 
 
+def test_dual_loading_keeps_record_control_disabled():
+    stub = _make_controls_stub(worker_alive=True)
+    stub._dual_recording_ready = False
+
+    App._set_running_controls(stub, True)
+
+    assert stub.record_btn.cget("state") == "disabled"
+
+
+def test_record_toggle_rejects_dual_loading_even_when_called_directly():
+    stub = _make_toggle_stub()
+    stub._rec.begin_session(fps=30.0, size=(640, 480))
+    stub._rec2.begin_session(fps=30.0, size=(480, 640))
+    stub._stop_evt = threading.Event()
+    stub._active_dual_generation = 7
+    stub._dual_recording_ready = False
+
+    App._on_record_toggle(stub)
+
+    assert stub._rec.state == "idle"
+    assert stub._rec2.state == "idle"
+    assert stub.record_btn.cget("text") == RECORD_BTN_TEXT["idle"]
+
+
 def test_set_running_controls_when_not_running():
     """running=False：Record_Toggle 禁用、Compare 仍 enabled、Start 恢复「开始」并启用、
     Status_Area 显示「就绪」（需求 4.5、5.1、6.5）。"""
