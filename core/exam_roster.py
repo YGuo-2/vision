@@ -214,11 +214,15 @@ def _display_text_from_number_format(value: int | float, number_format: str | No
     n = int(value)
     if n < 0:
         return None
-    digit_str = str(n)
     # 仅按必选 0 位补零；# 不强制加宽
     min_len = sum(1 for p in ph_types if p == "0")
-    if len(digit_str) < min_len:
-        digit_str = digit_str.zfill(min_len)
+    # Excel：纯 #（无必选 0 位）对数值 0 显示为空，不得导入成 "0"
+    if n == 0 and min_len == 0:
+        digit_str = ""
+    else:
+        digit_str = str(n)
+        if len(digit_str) < min_len:
+            digit_str = digit_str.zfill(min_len)
 
     # 从右向左填入占位；多余数字保留为 excess（仍挂在字面量之后）
     slots: list[str | None] = [None] * len(ph_types)
@@ -251,7 +255,11 @@ def _display_text_from_number_format(value: int | float, number_format: str | No
     if excess_pending:
         # 无数字位可挂时（极端），前缀 excess
         out.insert(0, excess_pending)
-    return "".join(out)
+    result = "".join(out)
+    # 零值 + 仅 # 位：显示无数字 → 空串（调用方按空学号拒绝）
+    if n == 0 and min_len == 0 and not any(c.isdigit() for c in result):
+        return ""
+    return result
 
 
 def _student_id_from_cell(value: Any, *, row_no: int, number_format: str | None = None) -> str:
@@ -274,6 +282,11 @@ def _student_id_from_cell(value: Any, *, row_no: int, number_format: str | None 
     if isinstance(value, int):
         display = _display_text_from_number_format(value, number_format)
         if display is not None:
+            if not str(display).strip():
+                raise RosterError(
+                    "empty_student_id",
+                    f"第 {row_no} 行学号为空（显示格式下无有效文本，如 0+###）",
+                )
             return display
         if _excel_format_is_plain_number(number_format):
             return str(value)
@@ -297,6 +310,11 @@ def _student_id_from_cell(value: Any, *, row_no: int, number_format: str | None 
         ival = int(value)
         display = _display_text_from_number_format(ival, number_format)
         if display is not None:
+            if not str(display).strip():
+                raise RosterError(
+                    "empty_student_id",
+                    f"第 {row_no} 行学号为空（显示格式下无有效文本，如 0+###）",
+                )
             return display
         if _excel_format_is_plain_number(number_format):
             return str(ival)

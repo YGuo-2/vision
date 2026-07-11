@@ -534,6 +534,11 @@ class ExamPanel:
             self.win.after_cancel(self._tick_id)
         except Exception:
             pass
+        # 与 _on_close 一致：停播报线程/语音，避免窗毁后仍 Speak
+        try:
+            self._announcer.close()
+        except Exception:
+            pass
         if self.scorebook is not None:
             try:
                 self.scorebook.flush()

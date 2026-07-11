@@ -1359,6 +1359,8 @@ def test_app_close_registers_open_panel_scorebook_for_flush_close(tmp_path):
     app._exam_set_active = lambda *_a, **_k: None
     app._exam_lock_manual_record = lambda *_a, **_k: None
 
+    announcer_closed: list[str] = []
+
     panel = SimpleNamespace(
         app=app,
         scorebook=book,
@@ -1371,11 +1373,13 @@ def test_app_close_registers_open_panel_scorebook_for_flush_close(tmp_path):
         phase_var=_Var(""),
         status_var=_Var(""),
         on_session_stop=lambda: None,
+        _announcer=SimpleNamespace(close=lambda: announcer_closed.append("close")),
     )
 
     ExamPanel.prepare_for_app_close(panel)  # type: ignore[arg-type]
 
     assert flushes == ["flush"]
+    assert announcer_closed == ["close"], "主窗关闭路径必须停 exam-announcer"
     assert panel.scorebook is None
     assert book in app._exam_scorebook_sinks
     assert not hasattr(app, "_exam_panel") or getattr(app, "_exam_panel", None) is None

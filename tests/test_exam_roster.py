@@ -260,6 +260,9 @@ def test_student_id_hash_optional_placeholders(tmp_path: Path) -> None:
     assert _display_text_from_number_format(123, "000000") == "000123"
     assert _display_text_from_number_format(12345, '"ID-"000') == "ID-12345"
     assert _display_text_from_number_format(5, "#0") == "5"
+    # 纯 # + 0：Excel 显示为空
+    assert _display_text_from_number_format(0, "###") == ""
+    assert _display_text_from_number_format(0, "#0") == "0"
 
     path = tmp_path / "hash.xlsx"
     wb = Workbook()
@@ -271,6 +274,23 @@ def test_student_id_hash_optional_placeholders(tmp_path: Path) -> None:
     wb.close()
     cands = import_roster_xlsx(path)
     assert cands[0].student_id == "123"
+
+
+def test_student_id_pure_hash_zero_rejected(tmp_path: Path) -> None:
+    """0 + ### 显示为空，应按空学号整表拒绝，不得导入为 \"0\"。"""
+    from openpyxl import Workbook
+
+    path = tmp_path / "hash0.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["序号", "学号", "姓名"])
+    ws.append([1, 0, "甲"])
+    ws.cell(row=2, column=2).number_format = "###"
+    wb.save(path)
+    wb.close()
+    with pytest.raises(RosterError) as ei:
+        import_roster_xlsx(path)
+    assert ei.value.code == "empty_student_id"
 
 
 def test_student_id_unparseable_custom_format_rejects_sheet(tmp_path: Path) -> None:

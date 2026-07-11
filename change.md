@@ -1,3 +1,20 @@
+## 2026-07-11: [fix] 考试系统审查第五轮（关窗停播报 / 纯#零值）
+
+### 问题描述
+
+主窗 `prepare_for_app_close` 未 `_announcer.close()`，语音线程可能残留；纯 `#` 格式下数值 0 被导入为 `"0"`，与 Excel 空显示不符。
+
+### 修改内容
+
+1. `prepare_for_app_close` 与普通关面板一致调用 `_announcer.close()`。
+2. 无必选 `0` 位时数值 0 显示为空串，导入按 `empty_student_id` 拒绝（`#0` 仍为 `"0"`）。
+
+### 验证方法
+
+- `pytest tests/test_exam_roster.py tests/test_exam_session.py tests/test_app_ui_lifecycle.py::test_app_close_registers_open_panel_scorebook_for_flush_close -q` → **27 passed**。
+
+---
+
 ## 2026-07-11: [fix] 考试系统审查第四轮（主窗关面板台账 / # 占位符）
 
 ### 问题描述
