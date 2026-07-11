@@ -97,21 +97,36 @@ def test_pause_resume_wait_enter() -> None:
     assert "ARM_OCCUPANCY" in _kinds(cmds)
 
 
-def test_begin_failed_keeps_failed_status_and_advances() -> None:
-    """开录失败应记 failed，不得停留在 recording，也不得被后续命令盖回。"""
+def test_begin_failed_does_not_advance_allows_retry() -> None:
+    """开录失败：记 failed，不 advance；回到 wait_enter 供重试/skip。"""
     s = ExamSession(ExamSessionConfig(inter_student_gap_s=0.0, post_call_guard_s=0.0))
-    s.load_roster(_cands(1))
+    s.load_roster(_cands(2))
     s.handle("start_exam", now=0.0)
     s.handle("tick", now=0.0)
     s.handle("enter_stable", now=1.0)
     assert s.phase == "recording"
-    # enter_stable 不再附带 UPDATE_ROW(recording)
     cmds = s.handle("begin_failed", now=1.1, message="writer busy")
     assert s.rows[0].status == "failed"
     assert s.rows[0].error_code == "begin_failed"
+    assert s.pointer == 0  # 不得静默跳过
+    assert s.phase == "wait_enter"
+    assert "ARM_OCCUPANCY" in _kinds(cmds)
     assert any(c.kind == "UPDATE_ROW" and c.payload.get("status") == "failed" for c in cmds)
-    assert s.phase == "completed"
-    assert s.pointer == 1
+    # 重试：再次 enter_stable
+    s.handle("enter_stable", now=2.0)
+    assert s.phase == "recording"
+    assert s.pointer == 0
+    assert s.rows[0].status == "recording"
+    # 或 skip 离开
+    s2 = ExamSession(ExamSessionConfig(inter_student_gap_s=0.0, post_call_guard_s=0.0))
+    s2.load_roster(_cands(2))
+    s2.handle("start_exam", now=0.0)
+    s2.handle("tick", now=0.0)
+    s2.handle("enter_stable", now=1.0)
+    s2.handle("begin_failed", now=1.1, message="x")
+    s2.handle("skip_current", now=2.0)
+    assert s2.pointer == 1
+    assert s2.rows[0].status == "failed"
 
 
 def test_abort_while_paused_from_recording_discards() -> None:

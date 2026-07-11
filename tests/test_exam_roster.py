@@ -139,15 +139,56 @@ def test_scoring_policy_last_completed_wins() -> None:
     assert r2.is_scoring_row is True
 
 
-def test_update_row_refuses_to_downgrade_terminal_status() -> None:
+def test_update_row_refuses_to_downgrade_hard_terminal_but_allows_failed_retry() -> None:
     book = ExamScorebook(path=None)
     c = ExamCandidate(1, "S1", "甲")
     book.load_candidates([c])
     r = book.rows[0]
-    book.update_row(r, status="failed", error_code="begin_failed", error_message="x")
+    book.update_row(
+        r,
+        status="completed",
+        front_score=0.5,
+        side_score=0.5,
+        combined_score=0.5,
+        combined_percent=50,
+    )
     book.update_row(r, status="recording")
-    assert r.status == "failed"
-    assert r.error_code == "begin_failed"
+    assert r.status == "completed"
+    # begin_failed 后允许重试回 recording
+    r2_book = ExamScorebook(path=None)
+    r2_book.load_candidates([c])
+    r2 = r2_book.rows[0]
+    r2_book.update_row(r2, status="failed", error_code="begin_failed", error_message="x")
+    r2_book.update_row(r2, status="recording", error_code=None, error_message=None)
+    assert r2.status == "recording"
+
+
+def test_scorebook_close_stops_writer_when_file_locked(tmp_path: Path) -> None:
+    """close() 后即使 PermissionError 也不得让 writer 永久重试。"""
+    import threading
+    import time
+
+    path = tmp_path / "locked.xlsx"
+    calls = {"n": 0}
+
+    def always_locked(_p, _rows):
+        calls["n"] += 1
+        raise PermissionError("locked by Excel")
+
+    book = ExamScorebook(path=path, write_fn=always_locked, throttle_s=0.0)
+    book.load_candidates([ExamCandidate(1, "A", "甲")])
+    t0 = time.monotonic()
+    book.close()
+    elapsed = time.monotonic() - t0
+    assert elapsed < 5.0
+    worker = book._worker
+    if worker is not None:
+        worker.join(timeout=1.0)
+        assert not worker.is_alive()
+    # close 周期有限次尝试，不会无限涨
+    n_after = calls["n"]
+    time.sleep(0.6)
+    assert calls["n"] == n_after
 
 
 def test_student_id_zero_padded_number_format(tmp_path: Path) -> None:
@@ -180,6 +221,51 @@ def test_student_id_dashed_number_format(tmp_path: Path) -> None:
     wb.close()
     cands = import_roster_xlsx(path)
     assert cands[0].student_id == "000-123"
+
+
+def test_student_id_escaped_and_quoted_formats(tmp_path: Path) -> None:
+    """000\\-000 → 000-123；\"ID-\"000000 → ID-000123。"""
+    from openpyxl import Workbook
+
+    path = tmp_path / "esc.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["序号", "学号", "姓名"])
+    ws.append([1, 123, "甲"])
+    ws.cell(row=2, column=2).number_format = r"000\-000"
+    wb.save(path)
+    wb.close()
+    cands = import_roster_xlsx(path)
+    assert cands[0].student_id == "000-123"
+
+    path2 = tmp_path / "quote.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["序号", "学号", "姓名"])
+    ws.append([1, 123, "乙"])
+    ws.cell(row=2, column=2).number_format = '"ID-"000000'
+    wb.save(path2)
+    wb.close()
+    cands2 = import_roster_xlsx(path2)
+    assert cands2[0].student_id == "ID-000123"
+
+
+def test_student_id_unparseable_custom_format_rejects_sheet(tmp_path: Path) -> None:
+    """无法还原的自定义格式不得静默裸数字，应整表拒绝。"""
+    from openpyxl import Workbook
+
+    path = tmp_path / "badfmt.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["序号", "学号", "姓名"])
+    ws.append([1, 123, "甲"])
+    # 科学计数等无法安全还原
+    ws.cell(row=2, column=2).number_format = "0.00E+00"
+    wb.save(path)
+    wb.close()
+    with pytest.raises(RosterError) as ei:
+        import_roster_xlsx(path)
+    assert ei.value.code == "student_id_not_text"
 
 
 def test_failed_retest_does_not_mark_two_scoring_rows() -> None:

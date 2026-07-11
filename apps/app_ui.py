@@ -1323,8 +1323,8 @@ class App:
         self._exam_manual_locked = False
         self._exam_occupancy_queue: Queue[tuple[bool, float]] = Queue(maxsize=8)
         self._exam_occupancy_stride = 3
-        # 关考试面板后仍接收后台比对回填的台账 sink
-        self._exam_scorebook_sink = None
+        # 关考试面板后仍接收后台比对回填的台账 sinks（可多场并存，禁止单例覆盖）
+        self._exam_scorebook_sinks: list = []
         self._exam_clip_lock = threading.Lock()
         self._exam_clip_threads: set[threading.Thread] = set()
 
@@ -2041,11 +2041,15 @@ class App:
         return True
 
     def _end_recording_segment(self, *, discard: bool = False, exam_row=None) -> None:
-        """结束当前录制片段；discard=True 时不入比对队列。"""
+        """结束当前录制片段；discard=True 时不入比对队列。
+
+        discard 在关窗/中止路径也必须执行：不得因 ``_closing`` 提前 return，
+        否则随后的普通 finalize 会把已 aborted 片段送去评分。
+        """
         stop_evt = getattr(self, "_stop_evt", None)
-        if getattr(self, "_closing", False) or (
-            stop_evt is not None and stop_evt.is_set()
-        ):
+        closing = bool(getattr(self, "_closing", False))
+        stopped = stop_evt is not None and stop_evt.is_set()
+        if not discard and (closing or stopped):
             return
         if exam_row is not None:
             self._exam_pending_row = exam_row
@@ -2477,38 +2481,53 @@ class App:
             if threads_set is not None:
                 threads_set.difference_update({t for t in threads_set if not t.is_alive()})
 
+    def _register_exam_scorebook_sink(self, scorebook) -> None:
+        """登记关面板后的台账 sink；多场可并存，禁止覆盖丢失。"""
+        sinks = getattr(self, "_exam_scorebook_sinks", None)
+        if sinks is None:
+            self._exam_scorebook_sinks = []
+            sinks = self._exam_scorebook_sinks
+        if scorebook is not None and scorebook not in sinks:
+            sinks.append(scorebook)
+
     def _apply_exam_postprocess_update(self, update: PostprocessUpdate) -> None:
-        """面板或关窗后的 scorebook sink 回填。"""
+        """面板 + 所有 sink 尝试回填；新面板未匹配时不得吃掉旧场次更新。"""
+        from apps.exam_panel import apply_postprocess_update_to_scorebook
+
         panel = getattr(self, "_exam_panel", None)
-        if panel is not None:
+        panel_book = getattr(panel, "scorebook", None) if panel is not None else None
+        if panel is not None and hasattr(panel, "on_postprocess_update"):
             try:
                 panel.on_postprocess_update(update)
-                return
             except Exception:
                 pass
-        sink = getattr(self, "_exam_scorebook_sink", None)
-        if sink is None:
-            return
-        try:
-            from apps.exam_panel import apply_postprocess_update_to_scorebook
 
-            apply_postprocess_update_to_scorebook(sink, update)
-            # 全部 processing 结束后落盘（保持 sink 打开至应用退出，避免再关丢写）
-            if not any(r.status == "processing" for r in sink.rows):
-                try:
-                    sink.flush()
-                except Exception:
-                    pass
-        except Exception:
-            pass
+        sinks = list(getattr(self, "_exam_scorebook_sinks", None) or [])
+        still: list = []
+        for sink in sinks:
+            # 当前面板 scorebook 已由 on_postprocess_update 处理，避免重复
+            if panel_book is not None and sink is panel_book:
+                still.append(sink)
+                continue
+            try:
+                apply_postprocess_update_to_scorebook(sink, update)
+                if not any(r.status == "processing" for r in sink.rows):
+                    try:
+                        sink.flush()
+                    except Exception:
+                        pass
+                still.append(sink)
+            except Exception:
+                still.append(sink)
+        self._exam_scorebook_sinks = still
 
     def _post_recording_compare_update(self, update: PostprocessUpdate) -> None:
         """后处理线程只把不可变状态写入队列，不直接调用任何 Tk API。"""
-        # 关窗时仍允许考试台账回填（panel 或 sink），避免裁剪线程晚到的终态被丢弃
+        # 关窗时仍允许考试台账回填（panel 或 sinks），避免裁剪线程晚到的终态被丢弃
         if getattr(self, "_closing", False):
             has_exam = (
                 getattr(self, "_exam_panel", None) is not None
-                or getattr(self, "_exam_scorebook_sink", None) is not None
+                or bool(getattr(self, "_exam_scorebook_sinks", None))
             )
             if not has_exam:
                 return
@@ -3391,14 +3410,20 @@ class App:
     def _on_close(self) -> None:
         if self._closing:
             return
-        self._closing = True
-        # 关主窗前尽量中止考试（若面板仍在）
+        # 1) 先中止考试并 discard（此时 _closing 仍为 False，discard 能走 finalize）
         panel = getattr(self, "_exam_panel", None)
         if panel is not None:
             try:
                 panel.on_session_stop()
             except Exception:
                 pass
+        elif bool(getattr(self, "_exam_active", False)):
+            try:
+                App._end_recording_segment(self, discard=True)
+            except Exception:
+                pass
+        # 2) 再进入关闭态
+        self._closing = True
         self._stop_evt.set()
         self._dual_recording_ready = False
         App._invalidate_dual_preview(self)
@@ -3417,19 +3442,32 @@ class App:
                     control.configure(state="disabled")
                 except Exception:
                     pass
-        self._close_deadline = time.monotonic() + _CLOSE_JOIN_TIMEOUT_S
+        # 考试裁剪 / sink 落盘需要更长预算，避免 3s 全局 deadline 截断
+        clip_alive = False
+        with getattr(self, "_exam_clip_lock", threading.Lock()):
+            threads = getattr(self, "_exam_clip_threads", None) or set()
+            clip_alive = any(t.is_alive() for t in threads)
+        sink_pending = bool(getattr(self, "_exam_scorebook_sinks", None))
+        extra = 0.0
+        if clip_alive:
+            extra = max(extra, 30.0)
+        if sink_pending:
+            extra = max(extra, 8.0)
+        self._close_deadline = time.monotonic() + _CLOSE_JOIN_TIMEOUT_S + extra
         postprocessor = getattr(self, "_record_postprocessor", None)
         finalize_lock = getattr(self, "_record_finalize_lock", None)
 
         def _prepare_close() -> None:
             try:
                 def _finish_current_then_cancel() -> None:
+                    # 考试 abort 已在 _closing 前 discard；此处只收尾仍在录的普通双摄片段。
+                    # 若考试仍标记 discard（异常路径），保留 _exam_discard_next。
                     if bool(getattr(self, "_dual_active", False)):
                         App._finalize_and_dispatch_recording_pair(
                             self, close_session=False
                         )
                     # 先等考试裁剪线程尽量 submit，再 cancel 后处理队列
-                    App._join_exam_clip_threads(self, timeout=25.0)
+                    App._join_exam_clip_threads(self, timeout=28.0)
                     if postprocessor is not None:
                         postprocessor.cancel_all()
 
@@ -3528,19 +3566,18 @@ class App:
                 pass
             return
 
-        # 最后一轮消费比对更新，并把考试 sink 落盘关闭
+        # 最后一轮消费比对更新，并把所有考试 sink 落盘关闭
         try:
             App._drain_recording_compare_updates(self)
         except Exception:
             pass
-        sink = getattr(self, "_exam_scorebook_sink", None)
-        if sink is not None:
+        for sink in list(getattr(self, "_exam_scorebook_sinks", None) or []):
             try:
                 sink.flush()
                 sink.close()
             except Exception:
                 pass
-            self._exam_scorebook_sink = None
+        self._exam_scorebook_sinks = []
 
         try:
             self.root.destroy()

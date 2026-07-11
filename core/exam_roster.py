@@ -110,60 +110,128 @@ def _cell_text(value: Any) -> str:
     return str(value).strip()
 
 
+def _excel_format_is_plain_number(number_format: str | None) -> bool:
+    """General / @ / 0 等视为「无自定义显示」，可安全回退为裸数字。"""
+    import re
+
+    fmt = (number_format or "").strip()
+    if not fmt or fmt in {"General", "@", "0"}:
+        return True
+    first = fmt.split(";")[0].strip()
+    first = re.sub(r"\[[^\]]*\]", "", first).strip()
+    return first in {"", "General", "@", "0"}
+
+
+def _tokenize_excel_number_format(number_format: str | None) -> list[tuple[str, str]] | None:
+    """解析 Excel 数字格式第一段为 token 列表：('d','0'|'#') 或 ('lit', ch)。
+
+    支持反斜杠转义（``000\\-000``）与双引号字面量（``\"ID-\"000000``）。
+    不支持小数/千分位/科学计数/条件格式表达式时返回 None。
+    """
+    import re
+
+    fmt = (number_format or "").strip()
+    if not fmt:
+        return None
+    first = fmt.split(";")[0]
+    first = re.sub(r"\[[^\]]*\]", "", first)
+    if not first.strip() or first.strip() in {"General", "@"}:
+        return None
+
+    tokens: list[tuple[str, str]] = []
+    i = 0
+    n = len(first)
+    while i < n:
+        ch = first[i]
+        if ch == "\\":
+            if i + 1 >= n:
+                return None
+            tokens.append(("lit", first[i + 1]))
+            i += 2
+            continue
+        if ch == '"':
+            i += 1
+            buf: list[str] = []
+            while i < n:
+                if first[i] == '"':
+                    if i + 1 < n and first[i + 1] == '"':
+                        buf.append('"')
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                buf.append(first[i])
+                i += 1
+            else:
+                return None  # 未闭合引号
+            for c in buf:
+                tokens.append(("lit", c))
+            continue
+        if ch in "0#":
+            tokens.append(("d", ch))
+            i += 1
+            continue
+        if ch in "- /()_:.":
+            # 字面分隔；小数点单独拒绝（与科学/会计格式混淆）
+            if ch == ".":
+                return None
+            tokens.append(("lit", ch))
+            i += 1
+            continue
+        if ch in {",", "E", "e", "%", "*", "?", "_"}:
+            return None
+        # 其他字符（含中文）视为字面量，便于少量自定义
+        if ch.isalpha() or ord(ch) > 127:
+            tokens.append(("lit", ch))
+            i += 1
+            continue
+        return None
+    if not any(t[0] == "d" for t in tokens):
+        return None
+    return tokens
+
+
 def _display_text_from_number_format(value: int | float, number_format: str | None) -> str | None:
     """尽量按 Excel 显示文本还原学号。
 
     支持：
     - 纯补零：``000000`` + 123 → ``000123``
-    - 分隔补零：``000-000`` + 123 → ``000-123``
+    - 分隔：``000-000`` / ``000\\-000`` + 123 → ``000-123``
+    - 字面量前缀：``\"ID-\"000000`` + 123 → ``ID-000123``
     - 分段：``00-00-00`` + 123 → ``00-01-23``
-    - 多段条件格式取第一段（``000-000;@``）
 
-    复杂会计/小数/科学计数格式返回 None，由调用方回退为裸数字文本。
+    无法安全解析时返回 None（调用方对自定义格式应整表拒绝，不得静默裸数字）。
     """
-    import re
-
-    fmt = (number_format or "").strip()
-    if not fmt or fmt in {"General", "@"}:
+    tokens = _tokenize_excel_number_format(number_format)
+    if tokens is None:
+        if _excel_format_is_plain_number(number_format):
+            return str(int(value)) if float(value).is_integer() else None
         return None
-    first = fmt.split(";")[0].strip()
-    # 去掉 Excel 颜色/条件前缀如 [Red]
-    first = re.sub(r"\[[^\]]*\]", "", first).strip()
-    if not first or first in {"General", "@", "0", "0.00"}:
-        if first == "0":
-            return str(int(value))
-        return None
-    # 仅支持整数位：0/# 与常见分隔符，不含小数点/逗号千分位/科学计数
-    if any(ch in first for ch in (".", ",", "E", "e", "%")):
-        return None
-    if not re.fullmatch(r"[0#\-\s/()_:]+", first):
-        return None
-    placeholders = [ch for ch in first if ch in "0#"]
-    if not placeholders:
-        return None
+    placeholders = [t for t in tokens if t[0] == "d"]
     n = int(value)
     if n < 0:
         return None
     digits = str(n)
     width = len(placeholders)
     if len(digits) > width:
-        # 超出格式宽度：Excel 仍显示完整数字；学号场景直接用全部数字
         return digits
-    # 左侧按 0 位补零（# 位在左侧多余时也可补 0，便于学号定长）
     digits = digits.zfill(width)
     out: list[str] = []
     di = 0
-    for ch in first:
-        if ch in "0#":
+    for kind, payload in tokens:
+        if kind == "d":
             out.append(digits[di])
             di += 1
         else:
-            out.append(ch)
+            out.append(payload)
     return "".join(out)
 
 
 def _student_id_from_cell(value: Any, *, row_no: int, number_format: str | None = None) -> str:
-    """强制按文本语义读取学号；数值单元格优先用 number_format 显示文本。"""
+    """强制按文本语义读取学号；数值单元格优先用 number_format 显示文本。
+
+    自定义格式无法还原时 **拒绝**（不静默变成裸数字），迫使将学号列设为文本。
+    """
     if value is None:
         raise RosterError("empty_student_id", f"第 {row_no} 行学号为空")
     if isinstance(value, str):
@@ -178,7 +246,15 @@ def _student_id_from_cell(value: Any, *, row_no: int, number_format: str | None 
         )
     if isinstance(value, int):
         display = _display_text_from_number_format(value, number_format)
-        return display if display is not None else str(value)
+        if display is not None:
+            return display
+        if _excel_format_is_plain_number(number_format):
+            return str(value)
+        raise RosterError(
+            "student_id_not_text",
+            f"第 {row_no} 行学号无法按显示格式 {number_format!r} 还原，"
+            "请将该列设为文本格式后重试",
+        )
     if isinstance(value, float):
         # 允许整数值 float（Excel 有时如此），但拒绝非整数 / 过大科学计数
         if not value.is_integer():
@@ -193,7 +269,15 @@ def _student_id_from_cell(value: Any, *, row_no: int, number_format: str | None 
             )
         ival = int(value)
         display = _display_text_from_number_format(ival, number_format)
-        return display if display is not None else str(ival)
+        if display is not None:
+            return display
+        if _excel_format_is_plain_number(number_format):
+            return str(ival)
+        raise RosterError(
+            "student_id_not_text",
+            f"第 {row_no} 行学号无法按显示格式 {number_format!r} 还原，"
+            "请将该列设为文本格式后重试",
+        )
     text = _cell_text(value)
     if not text:
         raise RosterError("empty_student_id", f"第 {row_no} 行学号为空")
@@ -502,15 +586,18 @@ class ExamScorebook:
 
     def update_row(self, row: ExamResultRow, **fields: Any) -> None:
         with self._lock:
-            # 终态不得被更弱状态覆盖（防止 begin_failed 后又被 UPDATE recording 盖回）
-            _terminal = frozenset(
-                {"completed", "failed", "skipped", "superseded", "cancelled"}
+            # 终态保护：
+            # - completed/skipped/superseded 不得被 recording/processing 等弱状态盖回
+            # - failed 允许回到 recording（BEGIN 失败后同人重试，见 begin_failed 契约）
+            _hard_terminal = frozenset(
+                {"completed", "skipped", "superseded", "cancelled"}
             )
             new_status = fields.get("status")
             if (
                 new_status is not None
-                and row.status in _terminal
-                and new_status not in _terminal
+                and row.status in _hard_terminal
+                and new_status not in _hard_terminal
+                and new_status != "failed"
                 and new_status != row.status
             ):
                 fields = {k: v for k, v in fields.items() if k != "status"}
@@ -601,13 +688,21 @@ class ExamScorebook:
         _ = timeout  # API 兼容
 
     def close(self) -> None:
+        """关闭台账：有限次终刷后停止后台 writer（文件被锁时不永久重试）。"""
         with self._lock:
             self._closed = True
             self._dirty = True
         self._wake.set()
-        # 终刷一次，确保 close 前最新行已落盘
+        # 同步有限次终刷（例如 Excel 占用时最多 2 次）
         if self.path is not None:
-            self._persist_latest(force=True)
+            for _ in range(2):
+                self._persist_latest(force=True)
+                with self._lock:
+                    if not self._dirty:
+                        break
+            # 仍失败则放弃后台重试，保留 write_error 供 UI 提示
+            with self._lock:
+                self._dirty = False
         worker = self._worker
         if worker is not None and worker.is_alive():
             worker.join(timeout=3.0)
@@ -638,6 +733,7 @@ class ExamScorebook:
                 rows_snapshot = list(self._rows)
                 path = self.path
                 gen = self._generation
+                closed = self._closed
             try:
                 self._write_fn(path, rows_snapshot)
                 with self._lock:
@@ -653,11 +749,12 @@ class ExamScorebook:
                     self._write_error = (
                         f"scorebook_locked: 成绩文件被占用，请关闭 Excel 后重试（{exc}）"
                     )
-                    self._dirty = True
+                    # close 之后不再靠 dirty 驱动无限重试
+                    self._dirty = not closed
             except OSError as exc:
                 with self._lock:
                     self._write_error = f"scorebook_write_failed: {exc}"
-                    self._dirty = True
+                    self._dirty = not closed
 
     def _writer_loop(self) -> None:
         while True:
@@ -681,7 +778,10 @@ class ExamScorebook:
                     and self._dirty
                 ):
                     continue
-            self._persist_latest(force=self._closed)
+                closed = self._closed
+            self._persist_latest(force=closed)
             with self._lock:
-                if self._closed and not self._dirty:
+                if self._closed:
+                    # close 周期只做有限尝试；避免 PermissionError 下永久循环
+                    self._dirty = False
                     return

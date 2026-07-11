@@ -176,7 +176,10 @@ class ExamSession:
             return []
         self.phase = "recording"
         self.record_started_mono = now
+        # 允许 begin_failed 后同人重试：清掉失败标记
         row.status = "recording"
+        row.error_code = None
+        row.error_message = None
         row.record_started_at = local_timestamp()
         # 注意：UPDATE_ROW(recording) 必须在 BEGIN 成功后由执行层发出。
         # 若与 BEGIN_SEGMENT 同批且 BEGIN 失败触发 begin_failed，外层后续
@@ -286,13 +289,20 @@ class ExamSession:
         if row is None:
             return []
         if self.phase in {"calling", "wait_enter"}:
-            row.status = "skipped"
+            # begin_failed 后停在 wait_enter 且 status=failed：skip 保留 failed，否则标 skipped
+            if row.status != "failed":
+                row.status = "skipped"
             row.record_ended_at = local_timestamp()
             cmds = [
                 ExamCommand("DISARM_OCCUPANCY"),
                 ExamCommand(
                     "UPDATE_ROW",
-                    {"row_id": row.row_id, "status": "skipped"},
+                    {
+                        "row_id": row.row_id,
+                        "status": row.status,
+                        "error_code": row.error_code,
+                        "error_message": row.error_message,
+                    },
                 ),
             ]
             self.pointer += 1
@@ -323,6 +333,11 @@ class ExamSession:
         ]
 
     def _on_begin_failed(self, *, now: float, message: str = "", **_: Any) -> list[ExamCommand]:
+        """开录失败：标记 failed，回到 wait_enter 供考官重试或 skip；不静默 advance。
+
+        设计契约 docs/exam_system_design.md §6.6：BEGIN_SEGMENT 失败可 skip/重试，
+        不得自动 pointer+=1。
+        """
         if self.phase != "recording":
             return []
         row = self.current
@@ -331,14 +346,20 @@ class ExamSession:
         row.status = "failed"
         row.error_code = "begin_failed"
         row.error_message = message or "开录失败"
-        row.record_ended_at = local_timestamp()
+        # 不写 record_ended_at：允许同一次尝试重试开录
         self.record_started_mono = None
-        self.pointer += 1
-        cmds = [
+        self.phase = "wait_enter"
+        self.call_guard_deadline = None
+        self.inter_gap_deadline = None
+        return [
             ExamCommand("DISARM_OCCUPANCY"),
             ExamCommand(
                 "ANNOUNCE",
-                {"text": f"开录失败，{row.candidate.name} 记为失败"},
+                {
+                    "text": (
+                        f"{row.candidate.name} 开录失败，请重试上场或跳过"
+                    )
+                },
             ),
             ExamCommand(
                 "UPDATE_ROW",
@@ -349,29 +370,9 @@ class ExamSession:
                     "error_message": row.error_message,
                 },
             ),
+            # 重新武装占用，便于进场稳定后再次 BEGIN
+            ExamCommand("ARM_OCCUPANCY"),
         ]
-        # 直接走 gap / done（未真正开录，无需 DISCARD/record_stopped）
-        if self.pointer >= len(self.rows):
-            self.phase = "completed"
-            self.locked = False
-            cmds.extend(
-                [
-                    ExamCommand("ANNOUNCE", {"text": "本场考试已全部结束"}),
-                    ExamCommand("EXPORT"),
-                    ExamCommand("UI_UNLOCK_MANUAL_RECORD"),
-                ]
-            )
-            return cmds
-        self.phase = "calling"
-        self.inter_gap_deadline = now + self.config.inter_student_gap_s
-        self.call_guard_deadline = None
-        cmds.append(
-            ExamCommand(
-                "SCHEDULE_INTER_GAP",
-                {"deadline": self.inter_gap_deadline},
-            )
-        )
-        return cmds
 
     def _on_pause(self, **_: Any) -> list[ExamCommand]:
         if self.phase in {"idle", "ready", "completed", "aborted", "paused", "finishing"}:

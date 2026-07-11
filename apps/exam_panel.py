@@ -412,7 +412,13 @@ class ExamPanel:
                 )
             else:
                 if row is not None and self.scorebook is not None:
-                    self.scorebook.update_row(row, status="recording")
+                    # begin_failed 重试成功：清失败标记
+                    self.scorebook.update_row(
+                        row,
+                        status="recording",
+                        error_code=None,
+                        error_message=None,
+                    )
                 self.gate.begin_recording(time.monotonic())
                 self.app._exam_arm_occupancy(True)  # type: ignore[attr-defined]
                 self.session.handle("record_started", now=time.monotonic())
@@ -476,16 +482,19 @@ class ExamPanel:
                 self._dispatch(self.session.handle("empty_stable", now=now))
         self._refresh_tree()
 
-    def on_postprocess_update(self, update: Any) -> None:
+    def on_postprocess_update(self, update: Any) -> ExamResultRow | None:
+        """回填当前面板台账；未匹配返回 None（App 会继续尝试旧 sinks）。"""
         if self.scorebook is None:
-            return
-        if apply_postprocess_update_to_scorebook(self.scorebook, update) is None:
-            return
+            return None
+        row = apply_postprocess_update_to_scorebook(self.scorebook, update)
+        if row is None:
+            return None
         try:
             if self.win.winfo_exists():
                 self._refresh_tree()
         except Exception:
             pass
+        return row
 
     def on_session_stop(self) -> None:
         """主窗口「停止」：同步中止考试状态机并解除占用/手动锁。"""
@@ -576,13 +585,21 @@ class ExamPanel:
                 self.scorebook.flush()
             except Exception:
                 pass
-            # 仍有 processing 行时把台账交给 App sink，供后台比对回填；
+            # 仍有 processing 行时登记到 App sinks（可多场并存，禁止覆盖）；
             # 无未完成行才立即 close。
             has_processing = any(
                 r.status == "processing" for r in self.scorebook.rows
             )
             if has_processing:
-                self.app._exam_scorebook_sink = self.scorebook  # type: ignore[attr-defined]
+                try:
+                    self.app._register_exam_scorebook_sink(self.scorebook)  # type: ignore[attr-defined]
+                except Exception:
+                    # 兼容旧桩
+                    sinks = getattr(self.app, "_exam_scorebook_sinks", None)
+                    if sinks is None:
+                        self.app._exam_scorebook_sinks = [self.scorebook]  # type: ignore[attr-defined]
+                    elif self.scorebook not in sinks:
+                        sinks.append(self.scorebook)
             else:
                 try:
                     self.scorebook.close()

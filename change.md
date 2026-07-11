@@ -1,3 +1,24 @@
+## 2026-07-11: [fix] 考试系统审查第三轮（begin 不 advance / discard 关窗 / multi-sink）
+
+### 问题描述
+
+PR 复核：开录失败仍自动跳过；关主窗 `_closing` 导致 discard 被跳过并正常评分；重开面板覆盖 sink 丢延迟成绩；3s 关窗预算截断裁剪；自定义学号格式静默裸数字；Scorebook close 后 writer 永久重试。
+
+### 修改内容
+
+1. **begin_failed**：不 advance，回 `wait_enter`+ARM，可重试/skip（符合设计 §6.6）。
+2. **关窗顺序**：先 `on_session_stop`/discard，再 `_closing=True`；`_end_recording_segment(discard=True)` 在 closing 时仍执行。
+3. **multi-sink**：`_exam_scorebook_sinks` 列表登记，新面板未匹配时继续投递旧 sink。
+4. **关窗预算**：有考试裁剪/sink 时 deadline 额外 +30s/+8s；prepare 内 join clip 28s。
+5. **学号格式**：支持 `000\-000`、`"ID-"000000`；无法解析的自定义格式整表拒绝。
+6. **Scorebook.close**：有限次终刷后清 dirty 并退出 writer，文件锁定不永久重试。
+
+### 验证方法
+
+- `pytest tests/test_exam_*.py tests/test_presence_gate.py tests/test_app_ui_lifecycle.py tests/test_recording_controller.py -q` → **102 passed**。
+
+---
+
 ## 2026-07-11: [fix] 考试系统审查第二轮 P1/P2（begin_failed / 暂停中止 / sink / 主停）
 
 ### 问题描述
