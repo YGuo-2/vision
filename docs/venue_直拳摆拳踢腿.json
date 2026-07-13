@@ -1,0 +1,60 @@
+{
+  "id": "straight_swing_kick",
+  "name": "直拳+摆拳+踢腿场地",
+  "actions": ["直拳", "摆拳", "踢腿"],
+  "unit": "cm",
+  "source": {
+    "sketch": "直拳+摆拳+踢腿场地.jpg",
+    "imported_at": "2026-07-11",
+    "note": "手绘俯视草图。警告：源图 直拳+摆拳+踢腿场地.jpg 里正/侧机位的纸面位置都是旋转后画的，不可按图上上下左右直接装机。装机唯一以本 JSON 语义为准（正摄对上边界外、侧摄对左边界外；高=对地垂直高度；机位距=到对应边界水平垂距）。"
+  },
+  "platform": {
+    "description": "学员考试运动范围 / 考台（矩形框）",
+    "top_edge_cm": 102,
+    "right_edge_cm": 89,
+    "bottom_edge_cm": 102,
+    "left_edge_cm": 89,
+    "size_note": "上/下边界各 102cm，左/右边界各 89cm。"
+  },
+  "cameras": {
+    "front": {
+      "role": "primary",
+      "label": "正摄像头",
+      "faces_edge": "top",
+      "height_cm": 100,
+      "height_semantics": "摄像机镜头对地垂直高度（离地高，非到考台斜距）",
+      "perpendicular_distance_to_edge_cm": 216,
+      "distance_to_platform_cm": 216,
+      "distance_semantics": "距上边界的直线垂直距离（俯视水平垂距）",
+      "projection_offset_cm": 35.6,
+      "projection_offset_ref": "right_edge",
+      "projection_offset_note": "正面摄像头在考台外侧正对上边界；投影落点距框右边界 35.6cm。"
+    },
+    "side": {
+      "role": "secondary",
+      "label": "侧摄像头",
+      "faces_edge": "left",
+      "height_cm": 83,
+      "height_semantics": "摄像机镜头对地垂直高度（离地高，非到考台斜距）",
+      "perpendicular_distance_to_edge_cm": 241,
+      "distance_to_platform_cm": 241,
+      "distance_semantics": "距左侧边界的直线垂直距离（俯视水平垂距）",
+      "projection_offset_cm": 21.5,
+      "projection_offset_ref": "top_edge",
+      "projection_offset_note": "侧面摄像头在考台外侧正对左侧边界；投影落点在框内、距上边界 21.5cm（靠上）。"
+    }
+  },
+  "exam_roi": {
+    "status": "not_derived",
+    "note": "物理厘米不能直接换算为 exam_roi_norm；须在 primary（正摄）旋转后预览上现场框选保存。"
+  },
+  "layout_summary": {
+    "platform": "上/下 102cm × 左/右 89cm",
+    "front_cam": "正对上边界；高 100；垂直距上边界 216；投影距右边界 35.6",
+    "side_cam": "正对左侧边界；高 83；垂直距左边界 241；投影距上边界 21.5"
+  },
+  "corrections": [
+    "侧摄垂直距由草图误读 249 更正为用户确认 241",
+    "正/侧距离均明确为到对应边界的直线垂直距离"
+  ]
+}
