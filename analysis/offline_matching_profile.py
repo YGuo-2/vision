@@ -61,7 +61,7 @@ from core.pose_features import (  # noqa: E402
 from core.vision_pipeline import MediaPipePipeline, PipelineConfig  # noqa: E402
 
 
-POSE33_BASELINE = 2.0
+POSE33_BASELINE = 3.0  # 2026-07-11 校准：2.0 → 3.0（同人自复现 avg_cost≈0.333 锚到 ~0.90 分）
 
 
 @dataclass

@@ -118,7 +118,9 @@ POSE33_V3 = FeatureLayoutSpec(
     shape=(22, 2),
     mirror_pairs=tuple((i, i + 1) for i in range(0, 22, 2)),  # (0,1),(2,3),...,(20,21)
     joint_names=_POSE33_V3_JOINT_NAMES,
-    default_baseline=2.0,
+    # baseline 从 2.0 → 3.0（2026-07-11 校准）：4 组「同一人连打同一套两遍」的
+    # avg_cost 中位数 ≈ 0.333，把这一「人类自然复现上限」锚到 ~0.90 分（3.0/(3.0+0.333)）。
+    default_baseline=3.0,
 )
 
 

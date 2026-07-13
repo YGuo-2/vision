@@ -108,7 +108,7 @@ def test_issue44_does_not_modify_core_dtw_or_baselines():
     for path in diff_paths:
         assert path.exists()
     assert offline_matching_profile.subsequence_dtw.__module__ == "core.pose_features"
-    assert offline_matching_profile.POSE33_BASELINE == 2.0
+    assert offline_matching_profile.POSE33_BASELINE == 3.0  # 2026-07-11 校准更新
 
 
 def _fake_pose33_features():

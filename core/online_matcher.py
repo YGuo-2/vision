@@ -31,7 +31,8 @@ from .feature_layout import POSE33_V3
 from .pose_features import subsequence_dtw
 
 # pose33_v3 已标定 baseline：score=1.0@avg_cost=0，score=0.5@avg_cost=baseline。
-_POSE33_V3_BASELINE = 2.0
+# 2026-07-11 校准：2.0 → 3.0（同人自复现 avg_cost≈0.333 锚到 ~0.90 分）。
+_POSE33_V3_BASELINE = 3.0
 
 
 @dataclass(frozen=True)

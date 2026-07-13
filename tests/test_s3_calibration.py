@@ -52,8 +52,8 @@ def test_body_core_baseline_calibrated_in_layout():
     assert BODY_CORE_V1.default_baseline is not None
     # 闭环 baseline 取自 layout，与之一致。
     assert BODY_CORE_V1_CALIBRATED_BASELINE == CALIB_BASELINE
-    # pose33_v3 的已标定 baseline 不被本次改动影响。
-    assert POSE33_V3.default_baseline == 2.0
+    # pose33_v3 的 baseline 已于 2026-07-11 从 2.0 校准到 3.0（同人自复现锚点）。
+    assert POSE33_V3.default_baseline == 3.0
 
 
 # --------------------------------------------------------------------------- #

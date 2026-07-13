@@ -74,6 +74,12 @@ npm --prefix frontend run tauri dev
 .\.venv\Scripts\python.exe batch/batch_dual_compare.py --standard_dir "标准样本" --student_dir "学员样本" --pose full --out_dir "输出目录" --rules --action both
 ```
 
+### Exam flow simulation (无摄像头，验证考试编排)
+
+```powershell
+.\.venv\Scripts\python.exe scripts/sim_exam_flow.py
+```
+
 ## Build, Test & Verify
 
 本仓库已有 pytest 契约/回归套件（`tests/`），不再是「无测试」状态。按改动范围选择验证门。
@@ -90,6 +96,12 @@ npm --prefix frontend run tauri dev
 .\.venv\Scripts\python.exe -m pytest tests/test_pose33_v3_golden.py tests/test_valid_mask_migration.py -q
 .\.venv\Scripts\python.exe -m pytest tests/test_backend_routing_contract.py tests/test_yolo_backend_contract.py tests/test_yolo_landmark_mapping.py tests/test_tech_eval_contract.py tests/test_rule_availability.py -q
 .\.venv\Scripts\python.exe -m pytest tests/test_windows_packaging_smoke.py -q
+```
+
+考试系统回归（状态机 / 名单 / 裁剪 / 占用闸门 / 后处理透传）：
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/test_exam_session.py tests/test_exam_roster.py tests/test_exam_clip.py tests/test_presence_gate.py tests/test_recording_postprocess.py -q
 ```
 
 ### 桌面栈一键验证（前端 build + behavior smoke + Tauri cargo check + py_compile + 桌面回归）
@@ -134,6 +146,11 @@ npm run package:windows
 - **core/rule_scoring.py**: 规则扣分引擎，基于原始 Pose33 关键点计算违规比例与扣分；缺失能力进入 skipped/missing，不贡献正式扣分
 - **core/parallel_pose_engine.py**: 多核并行姿态推理引擎（IMAGE 模式）
 - **core/recording_controller.py**: 录制/暂停运行时控制状态机（与 Tkinter 解耦，可独立单元/属性测试）
+- **core/exam_session.py**: 考试编排**纯状态机**（无 Tk / 无 OpenCV），按 `ExamPhase`（idle/ready/calling/wait_enter/recording/finishing/completed/paused/aborted）产出 `ExamCommand`（ANNOUNCE / ARM_OCCUPANCY / BEGIN_SEGMENT / …），由 `apps/exam_panel.py` 消费执行。契约见 `docs/exam_system_design.md` §6.6
+- **core/exam_roster.py**: 考生名单导入（固定表头 Excel，学号文本化、拒绝合并单元格）、成绩台账 `ExamScorebook`（增量落盘、多 sink、同学号重考以最后一次成功为准）与 Excel 导出。**分数口径：内部 front/side/combined_score 为 0..1，导出正/侧 ×100（一位小数）、综合用 `combined_percent`（0–100 整数）**
+- **core/presence_gate.py**: ROI 占用去抖闸门（无 UI / 无 MediaPipe），仅消费布尔 `present` 序列输出「进场稳定 / 空场稳定」事件（默认 enter 0.8s / empty 2.0s / min_record 3.0s）；`force_finish` 不经过本闸门
+- **core/exam_clip.py**: 派发比对前的正侧帧截齐 + 走位/动作段裁剪（流式，禁止把整段双路帧装进 list）；不改 `DualRecordingPostProcessor` 现网 `frame_count_mismatch` 语义
+- **core/exam_announcer.py**: 异步考试播报队列（默认 Windows TTS），失败静默降级由 UI 展示文案
 - **core/model_manager.py**: 模型清单（`MODEL_SPECS`）与下载管理。MediaPipe 模型可自动下载；YOLO26n/s/L/X 为分档元数据 + 手动安装（不可自动下载）
 - **core/paths.py**: 仓库级 artifact 根目录统一解析（含 PyInstaller 冻结模式锚定到 exe 同级目录）
 - **core/video_writer.py**: 编解码器自适应视频输出，回退链 H.264 → MJPEG → XVID
@@ -141,7 +158,9 @@ npm run package:windows
 ### Apps 入口
 
 - **apps/main.py**: CLI 入口，支持摄像头/视频源 + 可选导出；摄像头 + `--workers>1` 走多核并行实时路径
-- **apps/app_ui.py**: Tkinter GUI（主预览窗 + 单视频「动作分析」对话框 + 设置/模型管理），线程化非阻塞处理
+- **apps/app_ui.py**: Tkinter GUI（主预览窗 + 单视频「动作分析」对话框 + 设置/模型管理 + 双摄录制 + 「考试模式…」入口），线程化非阻塞处理；双摄侧含 occupancy 采样路径与 begin/end 录制原语供考试编排调用
+- **apps/exam_panel.py**: Tk 考试面板（名单导入 / ROI 标定 / 开考控制 / 成绩导出）；编排状态机在 `core/exam_session.py`，占用去抖在 `core/presence_gate.py`。关面板后台账仍经 `_exam_scorebook_sinks` 接收后台比对回填（可多场并存，禁止单例覆盖）
+- **apps/recording_postprocess.py**: 双摄录制后处理链（转码 → 校验 → 比对），透传考生元数据；考试路径复用此链完成自动比对回填台账
 - **apps/ui_backend.py**: Vue/Tauri 桌面前端的 JSON bridge 契约层，调用既有 Python 后端（模型管理、会话、作业、分析、模板等）；含 latest-frame 二进制通道与 router 路由透传
 - **apps/camera_enum.py**: 摄像头枚举与输入源状态模型（Windows DirectShow 友好名、`open_camera()` 高帧率协商）
 - **apps/make_template.py / match_template.py**: 模板创建/匹配 CLI
@@ -194,6 +213,21 @@ Landmarks 11-32（排除脸部）→ 以髋部中心平移 → 按躯干长度�
 6. 可选规则扣分（`rule_scoring.py`）
 
 批处理的默认模式仍按上述单学员单视频自动拆分。显式 `batch_dual_compare.py --paired` 时，`student_dir` 内同一目录下同一学员的正面/侧面文件按 `_FRONT_KEYS` / `_SIDE_KEYS` 关键词配对，并与标准正/侧模板一起送入 `compare_dual_streams(front_tpl, side_tpl, front_video, side_video)`；CSV `video` 列写学员 id，`--export_raw` 在 paired 模式跳过并提示，`body_core_v1` 调试路径不接 paired。
+
+### Exam System（Tkinter 双摄自动考场，纯 Python）
+
+现场考务编排，把「双摄录制 + 后台动作比对」串成可重复流程。设计与验收门（S1–S7 + S2 可测门闩）见 `docs/exam_system_design.md`（v0.2）。**仅 Python / Tkinter，不涉及 `frontend/`**。
+
+流程：导入 Excel 名单 → 按序播报姓名 → 学生进 ROI（`presence_gate` 进场稳定）→ 播报开考 + 自动双路开录 → 学生离场（ROI 连续无人 2.0s）→ 播报结束 + 自动停录 → `exam_clip` 截齐裁剪后走 `recording_postprocess` 后台比对 → 成绩回填台账；下一位叫号不必等上一位比对完成（S4）。名单走完导出成绩 Excel。
+
+关键契约：
+
+- **v1 成绩仅为黑盒动作相似度综合分**（正/侧 DTW 加权百分制），不含规则扣分 / tech_eval 细项 / 主观分；对考官须说清
+- 全局单一模板：现场须事先备好正/侧 heavy `pose33_v3`（`templates/standard_front_heavy.npz` + `standard_side_heavy.npz`）
+- 分数口径统一：内部 0..1，导出 ×100；综合列用 `combined_percent`
+- 状态机（`exam_session`）纯逻辑无副作用，产出命令由 `exam_panel` 执行；`force_finish` / 人工确认到场离场为半自动降级路径，不经 `presence_gate`
+- 已完成行增量落盘不丢（S5）；同学号可重考，导出以最后一次成功为准
+- **不破坏现有手动双摄录制 / 一条龙比对路径**：非考试会话零推理快路径不变（S6）
 
 ### Desktop Bridge Contracts（要点，权威版见 `AGENTS.md`）
 

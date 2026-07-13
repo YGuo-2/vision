@@ -120,6 +120,12 @@ class RecordingController:
             self._size = size
             return True
 
+    @property
+    def session_size(self) -> Tuple[int, int]:
+        """当前会话登记的输出尺寸（writer 目标宽高）。"""
+        with self._lock:
+            return self._size
+
     def request_toggle(self) -> RecordingState:
         """UI 线程调用：idle→recording / recording→paused / paused→recording 循环切换。
 

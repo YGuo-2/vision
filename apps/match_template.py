@@ -182,7 +182,8 @@ def _match_pose33_v3(args) -> None:
     cost, start, end = subsequence_dtw(query, seq)
     avg_cost = cost / max(1, query.shape[0])
     # Baseline normalization: score=1.0 when avg_cost=0, score=0.5 when avg_cost=baseline
-    baseline = 2.0
+    # 2026-07-11 校准：2.0 → 3.0（同人自复现 avg_cost≈0.333 锚到 ~0.90 分）。
+    baseline = 3.0
     score = float(baseline / (baseline + avg_cost))
 
     print(f"Template: {args.template}")
