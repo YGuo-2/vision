@@ -47,17 +47,33 @@ def align_frame_counts(front_n: int, side_n: int) -> tuple[int, list[str]]:
     return n, warnings
 
 
+def _smooth_1d(values: np.ndarray, win: int) -> np.ndarray:
+    """轻量移动平均，防单帧能量毛刺；样本不足 win 则原样返回。"""
+    if win < 2 or values.size < win:
+        return values
+    kernel = np.ones(win, dtype=np.float32) / float(win)
+    return np.convolve(values, kernel, mode="same")
+
+
 def estimate_action_range(
     frame_count: int,
     *,
     fps: float = 30.0,
     energy: np.ndarray | None = None,
+    smart_crop: bool = False,
     trim_head_s: float = 0.5,
     trim_tail_s: float = 0.8,
+    tail_quiet_pct: float = 40.0,
 ) -> tuple[int, int, list[str]]:
     """返回 [start, end) 帧区间（end 不含）。
 
-    优先用 motion energy 活跃段；过平则 fallback 首尾时间裁剪。
+    考试默认路径（smart_crop=False）：进场已由 presence_gate 挡干净，头部只固定掐
+    trim_head_s；中段一律不裁（整段评，见隔离实验）；尾部**不按时间硬掐**，而是按
+    能量从末尾回扫到最后一次动作——正常离场留下的 ~2s 空场能量低会被切掉，force_finish
+    强停时尾部仍是动作则一帧不切。任何异常/区间过短一律回退整段，绝不 raise。
+
+    smart_crop=True 保留旧的 find_active_range 活跃段 + 时间裁剪逻辑（sim / 单测显式开），
+    find_active_range 本体不动（pose33_v3 golden 不漂）。
     """
     warnings: list[str] = []
     n = int(frame_count)
@@ -65,25 +81,42 @@ def estimate_action_range(
         return 0, 0, ["empty"]
     fps = float(fps or 30.0)
 
-    if energy is not None and energy.size >= 5:
-        # find_active_range 基于 T-1 的 energy，返回含端点；转半开
-        s, e_incl = find_active_range(np.asarray(energy, dtype=np.float32), pad=10)
-        # energy 长度 T-1 → 帧索引约 s..e_incl+1
-        start = max(0, int(s))
-        end = min(n, int(e_incl) + 2)
-        if end - start >= max(8, int(0.5 * fps)):
-            return start, end, warnings
-        warnings.append("motion_range_too_short_fallback_time_trim")
+    if smart_crop:
+        if energy is not None and energy.size >= 5:
+            # find_active_range 基于 T-1 的 energy，返回含端点；转半开
+            s, e_incl = find_active_range(np.asarray(energy, dtype=np.float32), pad=10)
+            # energy 长度 T-1 → 帧索引约 s..e_incl+1
+            start = max(0, int(s))
+            end = min(n, int(e_incl) + 2)
+            if end - start >= max(8, int(0.5 * fps)):
+                return start, end, warnings
+            warnings.append("motion_range_too_short_fallback_time_trim")
 
-    head = int(round(trim_head_s * fps))
-    tail = int(round(trim_tail_s * fps))
-    start = min(head, max(0, n // 4))
-    end = max(start + 1, n - tail)
-    if end <= start:
+        head = int(round(trim_head_s * fps))
+        tail = int(round(trim_tail_s * fps))
+        start = min(head, max(0, n // 4))
+        end = max(start + 1, n - tail)
+        if end <= start:
+            start, end = 0, n
+            warnings.append("trim_collapsed_use_full")
+        else:
+            warnings.append(f"time_trim: drop head~{head}f tail~{tail}f -> [{start},{end})")
+        return start, end, warnings
+
+    # —— 考试默认路径：掐头固定，掐尾按能量回扫到最后一次动作 ——
+    start = min(int(round(trim_head_s * fps)), max(0, n // 4))
+    end = n
+    if energy is not None and energy.size >= 5:
+        e = _smooth_1d(np.asarray(energy, dtype=np.float32), max(3, int(round(0.30 * fps))))
+        thr = float(np.percentile(e, tail_quiet_pct))
+        active = np.nonzero(e > thr)[0]
+        if active.size:
+            # energy idx → 帧 +1；末动作后留 0.3s 收势余量
+            end = min(n, int(active[-1]) + 2 + int(round(0.3 * fps)))
+            warnings.append(f"tail_scan: end={end} (thr@p{tail_quiet_pct:.0f})")
+    if end - start < max(15, int(0.5 * fps)):
         start, end = 0, n
-        warnings.append("trim_collapsed_use_full")
-    else:
-        warnings.append(f"time_trim: drop head~{head}f tail~{tail}f -> [{start},{end})")
+        warnings.append("clip_too_short_use_full")
     return start, end, warnings
 
 
@@ -352,6 +385,7 @@ def estimate_action_range_from_feature_seq(
         features.shape[0],
         fps=fps,
         energy=energy,
+        smart_crop=True,
         trim_head_s=trim_head_s,
         trim_tail_s=trim_tail_s,
     )

@@ -17,6 +17,7 @@ from apps.recording_postprocess import (
     PostprocessError,
     PostprocessUpdate,
     default_template_paths,
+    validate_auto_compare_templates,
     validate_template_pair,
 )
 
@@ -37,7 +38,11 @@ def _job(
     side = segment_dir / f"side{suffix}"
     front.write_bytes(b"front-video")
     side.write_bytes(b"side-video")
-    front_template, side_template = default_template_paths()
+    # 用临时 heavy 正/侧模板，避免依赖仓库 templates/ 是否齐全（仅一侧存在会走真实单流比对）。
+    front_template = segment_dir / "front_template.npz"
+    side_template = segment_dir / "side_template.npz"
+    _write_template(front_template)
+    _write_template(side_template)
     return DualRecordingJob(
         segment_id=segment_id,
         segment_dir=segment_dir,
@@ -52,28 +57,41 @@ def _job(
     )
 
 
-def _result(percent: int = 86):
+def _result(score: float = 0.86):
+    """单模板比对结果（CompareResult 形状）：score + 匹配窗口。"""
     return SimpleNamespace(
-        front_score=0.82,
-        side_score=0.89,
-        combined_score=percent / 100.0,
-        combined_percent=percent,
-        front_matches=(),
-        side_matches=(),
-        front_segment=(0, 10),
-        side_segment=(0, 11),
+        score=score,
+        start_frame=0,
+        end_frame=10,
     )
+
+
+def _pool_result(template_paths, score: float = 0.86):
+    """池级比对结果：与 template_paths 同序的 CompareResult 列表。"""
+    return [_result(score) for _ in template_paths]
 
 
 def _wait(event: threading.Event) -> None:
     assert event.wait(3.0), "postprocess worker did not reach a terminal state"
 
 
-def test_fixed_templates_are_delivered_and_compatible() -> None:
+def test_fixed_templates_default_paths_and_auto_compare_contract(tmp_path: Path) -> None:
+    """默认路径名固定；一条龙仅当两侧都缺才 template_missing。"""
     front, side = default_template_paths()
-    assert front.is_file()
-    assert side.is_file()
-    validate_template_pair(front, side)
+    assert front.name == "standard_front_heavy.npz"
+    assert side.name == "standard_side_heavy.npz"
+    # 两侧都缺 → 报错
+    with pytest.raises(PostprocessError) as both_missing:
+        validate_auto_compare_templates(
+            tmp_path / "no_front.npz", tmp_path / "no_side.npz"
+        )
+    assert both_missing.value.code == "template_missing"
+    # 仅一侧可用 → 通过
+    only = tmp_path / "only_side.npz"
+    _write_template(only)
+    f, s = validate_auto_compare_templates(tmp_path / "no_front.npz", only)
+    assert f is None
+    assert s == only
 
 
 def test_fifo_single_consumer_and_atomic_completed_results(tmp_path: Path) -> None:
@@ -84,26 +102,21 @@ def test_fifo_single_consumer_and_atomic_completed_results(tmp_path: Path) -> No
     max_concurrency = 0
     lock = threading.Lock()
 
-    def compare(_ft, _st, front, _side, **kwargs):
+    def compare(template_paths, video, **kwargs):
         nonlocal concurrency, max_concurrency
         assert kwargs == {
             "pose_variant": "heavy",
             "workers": 1,
-            "w_front": 0.4,
-            "w_side": 0.6,
-            "baseline": 2.0,
-            "enable_rules": False,
-            "enable_error_analysis": False,
             "stop_evt": kwargs["stop_evt"],
         }
         with lock:
             concurrency += 1
             max_concurrency = max(max_concurrency, concurrency)
-        order.append(Path(front).parent.name)
+        order.append(Path(video).parent.name)
         time.sleep(0.03)
         with lock:
             concurrency -= 1
-        return _result()
+        return _pool_result(template_paths)
 
     def on_update(update: PostprocessUpdate) -> None:
         updates.append(update)
@@ -127,7 +140,8 @@ def test_fifo_single_consumer_and_atomic_completed_results(tmp_path: Path) -> No
     finally:
         processor.close(1.0)
 
-    assert order == ["record_first", "record_second"]
+    # 每个 job 正/侧各一池 → 各调一次池比对；FIFO 保证 first 两次全部先于 second。
+    assert order == ["record_first", "record_first", "record_second", "record_second"]
     assert max_concurrency == 1
     assert [item.segment_id for item in updates if item.status == "queued"] == [
         "record_first",
@@ -155,6 +169,7 @@ def test_fifo_single_consumer_and_atomic_completed_results(tmp_path: Path) -> No
             "warnings",
             "result",
             "error",
+            "exam",
         }
         assert payload["status"] == "completed"
         assert payload["segment_id"] == job.segment_id
@@ -176,11 +191,14 @@ def test_fifo_single_consumer_and_atomic_completed_results(tmp_path: Path) -> No
             "side_matches",
             "front_segment",
             "side_segment",
+            "action_scores",
         }
-        assert payload["result"]["front_score"] == pytest.approx(0.82)
-        assert payload["result"]["side_score"] == pytest.approx(0.89)
+        # 正/侧各 1 模板，各出 0.86 → 加权综合仍 0.86 → 86
+        assert payload["result"]["front_score"] == pytest.approx(0.86)
+        assert payload["result"]["side_score"] == pytest.approx(0.86)
         assert payload["result"]["combined_percent"] == 86
         assert payload["result"]["front_segment"] == {"start": 0, "end": 10}
+        assert len(payload["result"]["action_scores"]) == 2
         assert payload["error"] is None
         assert list(job.segment_dir.glob(".result.*.tmp")) == []
 
@@ -205,9 +223,9 @@ def test_submit_reserves_resolved_segment_directory_for_processor_lifetime(
         side_template=first.side_template,
     )
 
-    def compare(_ft, _st, front, _side, **_kwargs):
-        compare_ids.append(Path(front).parent.name)
-        return _result()
+    def compare(template_paths, video, **_kwargs):
+        compare_ids.append(Path(video).parent.name)
+        return _pool_result(template_paths)
 
     def on_update(update: PostprocessUpdate) -> None:
         updates.append(update)
@@ -233,7 +251,8 @@ def test_submit_reserves_resolved_segment_directory_for_processor_lifetime(
     finally:
         processor.close(1.0)
 
-    assert compare_ids == [first.segment_id]
+    # 正/侧各一模板 → 比对两次，均属 first
+    assert compare_ids == [first.segment_id, first.segment_id]
     assert {update.segment_id for update in updates} == {first.segment_id}
     assert result_path.read_text(encoding="utf-8") == original_result
     assert json.loads(original_result)["segment_id"] == first.segment_id
@@ -264,7 +283,7 @@ def test_submit_reserves_windows_extended_path_directory_identity(
     def compare(*_args, **_kwargs):
         nonlocal compare_calls
         compare_calls += 1
-        return _result()
+        return _pool_result(_args[0])
 
     processor = DualRecordingPostProcessor(
         on_update=lambda update: completed.set()
@@ -286,7 +305,7 @@ def test_submit_reserves_windows_extended_path_directory_identity(
     finally:
         processor.close(1.0)
 
-    assert compare_calls == 1
+    assert compare_calls == 2  # 正/侧各一模板，各比对一次
     assert result_path.read_text(encoding="utf-8") == original_result
     assert json.loads(original_result)["segment_id"] == first.segment_id
 
@@ -321,7 +340,7 @@ def test_submit_reserves_windows_alias_when_filesystem_has_no_inode(
     def compare(*_args, **_kwargs):
         nonlocal compare_calls
         compare_calls += 1
-        return _result()
+        return _pool_result(_args[0])
 
     processor = DualRecordingPostProcessor(
         on_update=lambda update: completed.set()
@@ -343,7 +362,7 @@ def test_submit_reserves_windows_alias_when_filesystem_has_no_inode(
     finally:
         processor.close(1.0)
 
-    assert compare_calls == 1
+    assert compare_calls == 2  # 正/侧各一模板，各比对一次
     assert result_path.read_text(encoding="utf-8") == original_result
     assert json.loads(original_result)["segment_id"] == first.segment_id
 
@@ -416,7 +435,7 @@ def test_submit_reserves_directory_when_identity_mode_changes(
         compare_calls += 1
         compare_started.set()
         assert release_compare.wait(2.0)
-        return _result()
+        return _pool_result(_args[0])
 
     processor = DualRecordingPostProcessor(
         on_update=lambda update: completed.set()
@@ -441,7 +460,7 @@ def test_submit_reserves_directory_when_identity_mode_changes(
         release_compare.set()
         processor.close(1.0)
 
-    assert compare_calls == 1
+    assert compare_calls == 2  # 正/侧各一模板，各比对一次
     assert result_path.read_text(encoding="utf-8") == original_result
     assert json.loads(original_result)["segment_id"] == first.segment_id
 
@@ -461,7 +480,7 @@ def test_submit_returns_before_blocking_queued_callback_runs(tmp_path: Path) -> 
     processor = DualRecordingPostProcessor(
         on_update=on_update,
         transcode=lambda path, _stop: path,
-        compare=lambda *_args, **_kwargs: _result(),
+        compare=lambda tpls, _video, **_kwargs: _pool_result(tpls),
         video_validator=lambda _path: True,
         model_available=lambda: True,
     )
@@ -503,7 +522,7 @@ def test_submit_returns_while_another_result_write_is_blocked(tmp_path: Path) ->
     processor = DualRecordingPostProcessor(
         on_update=on_update,
         transcode=lambda path, _stop: path,
-        compare=lambda *_args, **_kwargs: _result(),
+        compare=lambda tpls, _video, **_kwargs: _pool_result(tpls),
         video_validator=lambda _path: True,
         model_available=lambda: True,
     )
@@ -567,7 +586,7 @@ def test_cancel_all_returns_during_result_write_and_wins_publication_race(
     processor = DualRecordingPostProcessor(
         on_update=on_update,
         transcode=lambda path, _stop: path,
-        compare=lambda *_args, **_kwargs: _result(),
+        compare=lambda tpls, _video, **_kwargs: _pool_result(tpls),
         video_validator=lambda _path: True,
         model_available=lambda: True,
     )
@@ -769,7 +788,7 @@ def test_recording_source_outside_segment_fails_before_transcode(
     def compare(*_args, **_kwargs):
         nonlocal compare_calls
         compare_calls += 1
-        return _result()
+        return _pool_result(_args[0])
 
     processor = DualRecordingPostProcessor(
         on_update=lambda update: terminal.set() if update.status == "failed" else None,
@@ -852,7 +871,7 @@ def test_avi_fallback_is_compared_and_recorded_as_warning(tmp_path: Path) -> Non
     processor = DualRecordingPostProcessor(
         on_update=on_update,
         transcode=lambda path, _stop: path,
-        compare=lambda *_args, **_kwargs: _result(),
+        compare=lambda tpls, _video, **_kwargs: _pool_result(tpls),
         video_validator=lambda _path: True,
         model_available=lambda: True,
     )
@@ -881,7 +900,7 @@ def test_transcode_dependency_error_has_stage_specific_failure_code(
     def compare(*_args, **_kwargs):
         nonlocal compare_calls
         compare_calls += 1
-        return _result()
+        return _pool_result(_args[0])
 
     processor = DualRecordingPostProcessor(
         on_update=lambda update: terminal.set() if update.status == "failed" else None,
@@ -964,10 +983,10 @@ def test_unreadable_video_has_stable_failure_code(
 def test_compare_exception_fails_one_job_and_fifo_continues(tmp_path: Path) -> None:
     terminal = threading.Event()
 
-    def compare(_ft, _st, front, _side, **_kwargs):
-        if Path(front).parent.name == "record_compare_fails":
+    def compare(template_paths, video, **_kwargs):
+        if Path(video).parent.name == "record_compare_fails":
             raise RuntimeError("DTW crashed")
-        return _result()
+        return _pool_result(template_paths)
 
     processor = DualRecordingPostProcessor(
         on_update=lambda update: terminal.set()
@@ -1423,7 +1442,7 @@ def test_cancel_between_scoring_and_terminal_publish_still_finishes_cancelled(
     processor = DualRecordingPostProcessor(
         on_update=on_update,
         transcode=lambda path, _stop: path,
-        compare=lambda *_args, **_kwargs: _result(),
+        compare=lambda tpls, _video, **_kwargs: _pool_result(tpls),
         video_validator=lambda _path: True,
         model_available=lambda: True,
     )
@@ -1460,7 +1479,7 @@ def test_cancel_all_marks_task_while_compare_is_still_blocked(
         assert release_compare.wait(2.0)
         if compare_outcome == "raises":
             raise RuntimeError("late DTW failure")
-        return _result()
+        return _pool_result(_args[0])
 
     processor = DualRecordingPostProcessor(
         transcode=lambda path, _stop: path,
@@ -1488,6 +1507,7 @@ def test_cancel_all_marks_task_while_compare_is_still_blocked(
 
 
 def test_missing_template_has_stable_failure_code(tmp_path: Path) -> None:
+    """正/侧模板都缺时一条龙失败；仅缺一侧不走 template_missing。"""
     terminal = threading.Event()
 
     def on_update(update: PostprocessUpdate) -> None:
@@ -1499,6 +1519,9 @@ def test_missing_template_has_stable_failure_code(tmp_path: Path) -> None:
         **{
             **job.__dict__,
             "front_template": tmp_path / "missing-front.npz",
+            "side_template": tmp_path / "missing-side.npz",
+            "front_templates": (),
+            "side_templates": (),
         }
     )
     processor = DualRecordingPostProcessor(
@@ -1517,6 +1540,60 @@ def test_missing_template_has_stable_failure_code(tmp_path: Path) -> None:
     payload = json.loads((job.segment_dir / "result.json").read_text(encoding="utf-8"))
     assert payload["status"] == "failed"
     assert payload["error"]["code"] == "template_missing"
+
+
+def test_auto_compare_runs_with_only_side_template(tmp_path: Path, monkeypatch) -> None:
+    """仅侧面模板填入时仍可完成一条龙（单流比对）。"""
+    terminal = threading.Event()
+    updates: list[PostprocessUpdate] = []
+    single_calls: list[tuple[str, str]] = []
+
+    def on_update(update: PostprocessUpdate) -> None:
+        updates.append(update)
+        if update.status in {"completed", "failed", "skipped", "cancelled"}:
+            terminal.set()
+
+    side_tpl = tmp_path / "side_only.npz"
+    _write_template(side_tpl)
+    job = _job(tmp_path, "record_side_only")
+    job = DualRecordingJob(
+        **{
+            **job.__dict__,
+            "front_template": tmp_path / "missing-front.npz",
+            "side_template": side_tpl,
+            "front_templates": (),
+            "side_templates": (),
+        }
+    )
+
+    def fake_pool(template_paths, video_path, **kwargs):
+        for tp in template_paths:
+            single_calls.append((str(tp), str(video_path)))
+        return [
+            SimpleNamespace(score=0.77, start_frame=1, end_frame=10)
+            for _ in template_paths
+        ]
+
+    processor = DualRecordingPostProcessor(
+        on_update=on_update,
+        transcode=lambda path, _stop: path,
+        compare=fake_pool,
+        video_validator=lambda _path: True,
+        model_available=lambda: True,
+    )
+    try:
+        assert processor.submit(job)
+        _wait(terminal)
+    finally:
+        processor.close(1.0)
+
+    payload = json.loads((job.segment_dir / "result.json").read_text(encoding="utf-8"))
+    assert payload["status"] == "completed"
+    assert payload["result"]["front_score"] is None
+    assert payload["result"]["side_score"] == pytest.approx(0.77)
+    assert payload["result"]["combined_percent"] == 77
+    assert single_calls and "side" in single_calls[0][1]
+    assert any(u.status == "completed" for u in updates)
 
 
 def _write_template(
@@ -1580,7 +1657,7 @@ def test_result_write_failure_does_not_stop_fifo_worker(tmp_path: Path) -> None:
     processor = DualRecordingPostProcessor(
         on_update=on_update,
         transcode=lambda path, _stop: path,
-        compare=lambda *_args, **_kwargs: _result(),
+        compare=lambda tpls, _video, **_kwargs: _pool_result(tpls),
         video_validator=lambda _path: True,
         model_available=lambda: True,
     )
@@ -1616,7 +1693,7 @@ def test_one_shot_result_write_failure_has_stable_error_code(tmp_path: Path) -> 
     def compare(*_args, **_kwargs):
         nonlocal compare_calls
         compare_calls += 1
-        return _result()
+        return _pool_result(_args[0])
 
     processor = DualRecordingPostProcessor(
         on_update=lambda update: terminal.set() if update.status == "failed" else None,
@@ -1661,7 +1738,7 @@ def test_repeated_close_keeps_exit_sentinel(tmp_path: Path) -> None:
 
     processor = DualRecordingPostProcessor(
         transcode=transcode,
-        compare=lambda *_args, **_kwargs: _result(),
+        compare=lambda tpls, _video, **_kwargs: _pool_result(tpls),
         video_validator=lambda _path: True,
         model_available=lambda: True,
     )

@@ -15,7 +15,9 @@ import numpy as np
 
 from analysis.tech_eval import to_jsonable
 from core import action_compare, model_manager, video_writer
-from core.paths import templates_dir
+from core.kick_quality import score_kick_quality
+from core.paths import repo_root, templates_dir
+from core.rule_scoring import extract_pose_raw_series, slice_pose_raw_series
 
 PostprocessStatus = Literal[
     "queued",
@@ -33,6 +35,21 @@ _QUEUE_SENTINEL = object()
 # 黑盒检测（录制后自动比对）统一走精度最高的 heavy + pose33_v3 链路。
 _EXPECTED_TEMPLATE_LAYOUT = "pose33_v3"
 _EXPECTED_TEMPLATE_POSE_VARIANT = "heavy"
+_PREFS_FRONT_KEY = "auto_compare_front_template"
+_PREFS_SIDE_KEY = "auto_compare_side_template"
+# 多模板池（正对正、侧对侧,每边可多个动作模板）。缺省回落旧单值键。
+_PREFS_FRONT_LIST_KEY = "auto_compare_front_templates"
+_PREFS_SIDE_LIST_KEY = "auto_compare_side_templates"
+
+# 踢腿几何质量评分：动作名（模板 stem）→ kick_quality 类型。列出的动作并入几何分。
+# 低鞭腿不列入——实测其低/高鞭高度差不稳定,几何常误判,直接用纯 DTW 分。
+_KICK_KINDS = {
+    "高鞭腿": "high_whip",
+    "侧踹腿": "kick_up",
+    "正蹬腿": "kick_up",
+}
+# 踢腿动作子分 = 几何高度分 × w + DTW 相似度分 × (1-w)。校准旋钮。
+KICK_GEOM_WEIGHT = 0.5
 
 
 def utc_timestamp() -> str:
@@ -42,6 +59,99 @@ def utc_timestamp() -> str:
 def default_template_paths() -> tuple[Path, Path]:
     root = templates_dir()
     return root / "standard_front_heavy.npz", root / "standard_side_heavy.npz"
+
+
+def _prefs_path() -> Path:
+    return repo_root() / "user_prefs.json"
+
+
+def load_configured_template_paths() -> tuple[Path, Path]:
+    """读取 UI/偏好里填入的正/侧模板路径；缺省回落默认 fixed 路径。"""
+    front_default, side_default = default_template_paths()
+    try:
+        data = json.loads(_prefs_path().read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return front_default, side_default
+        front_raw = str(data.get(_PREFS_FRONT_KEY) or "").strip()
+        side_raw = str(data.get(_PREFS_SIDE_KEY) or "").strip()
+        front = Path(front_raw) if front_raw else front_default
+        side = Path(side_raw) if side_raw else side_default
+        return front, side
+    except (OSError, ValueError):
+        return front_default, side_default
+
+
+def save_configured_template_paths(
+    front: Path | str | None = None,
+    side: Path | str | None = None,
+) -> None:
+    """持久化一条龙模板路径（尽力而为，失败静默）。"""
+    path = _prefs_path()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            data = {}
+    except (OSError, ValueError):
+        data = {}
+    if front is not None:
+        data[_PREFS_FRONT_KEY] = str(front)
+    if side is not None:
+        data[_PREFS_SIDE_KEY] = str(side)
+    try:
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def load_configured_template_lists() -> tuple[list[Path], list[Path]]:
+    """读取多模板池；缺复数键则回落旧单值键（有则单元素）。均缺返回空列表。
+
+    返回空列表表示该边未配置任何模板（不再自动回落 default_template_paths()——
+    多模板语义下"未填"应显式为空,由调用方决定是否用默认；单模板旧行为仍由
+    ``load_configured_template_paths()`` 保持）。
+    """
+    try:
+        data = json.loads(_prefs_path().read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            data = {}
+    except (OSError, ValueError):
+        data = {}
+
+    def _read(list_key: str, single_key: str) -> list[Path]:
+        raw = data.get(list_key)
+        if isinstance(raw, list):
+            out = [Path(str(p).strip()) for p in raw if str(p).strip()]
+            if out:
+                return out
+        single = str(data.get(single_key) or "").strip()
+        return [Path(single)] if single else []
+
+    return (
+        _read(_PREFS_FRONT_LIST_KEY, _PREFS_FRONT_KEY),
+        _read(_PREFS_SIDE_LIST_KEY, _PREFS_SIDE_KEY),
+    )
+
+
+def save_configured_template_lists(
+    front_list: list[Path | str] | None = None,
+    side_list: list[Path | str] | None = None,
+) -> None:
+    """持久化多模板池（尽力而为，失败静默）。"""
+    path = _prefs_path()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            data = {}
+    except (OSError, ValueError):
+        data = {}
+    if front_list is not None:
+        data[_PREFS_FRONT_LIST_KEY] = [str(p) for p in front_list]
+    if side_list is not None:
+        data[_PREFS_SIDE_LIST_KEY] = [str(p) for p in side_list]
+    try:
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError:
+        pass
 
 
 @dataclass(frozen=True)
@@ -54,6 +164,9 @@ class DualRecordingJob:
     side_frames: int
     front_template: Path
     side_template: Path
+    # 多模板池（正对正、侧对侧）。为空时 __post_init__ 用单字段回填，保持旧构造兼容。
+    front_templates: tuple[Path, ...] = ()
+    side_templates: tuple[Path, ...] = ()
     record_skeleton: bool = False
     # True：录制后自动比对（检测一条龙）；False：仅录制/转码，跳过 DTW 比对。
     auto_compare: bool = True
@@ -71,6 +184,11 @@ class DualRecordingJob:
     def __post_init__(self) -> None:
         if not self.created_at:
             object.__setattr__(self, "created_at", utc_timestamp())
+        # 复数池为空时用单字段回填（旧构造兼容）；单字段用池首元素回填（透传/日志兼容）。
+        if not self.front_templates and self.front_template:
+            object.__setattr__(self, "front_templates", (Path(self.front_template),))
+        if not self.side_templates and self.side_template:
+            object.__setattr__(self, "side_templates", (Path(self.side_template),))
 
 @dataclass(frozen=True)
 class PostprocessUpdate:
@@ -81,6 +199,8 @@ class PostprocessUpdate:
     side_score: float | None = None
     combined_percent: int | None = None
     error_code: str | None = None
+    # 逐动作子分明细：({"name","view","score","start","end"}, ...)
+    action_scores: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass
@@ -160,44 +280,128 @@ def _segment_directory_key(path: Path) -> SegmentDirectoryKey:
     return _segment_directory_keys(path)[-1]
 
 
-def validate_template_pair(front_path: Path, side_path: Path) -> None:
-    def _load(path: Path) -> tuple[np.ndarray, dict[str, Any]]:
-        path = Path(path)
-        if not path.is_file() or path.stat().st_size <= 0:
-            raise PostprocessError("template_missing", f"固定模板不存在：{path}")
-        try:
-            with np.load(path, allow_pickle=True) as data:
-                if "features" not in data or "meta" not in data:
-                    raise ValueError("缺少 features/meta")
-                features = np.asarray(data["features"], dtype=np.float32)
-                meta = dict(data["meta"].item() or {})
-        except PostprocessError:
-            raise
-        except Exception as exc:
-            raise PostprocessError("template_invalid", f"无法读取固定模板 {path}：{exc}") from exc
-        if features.ndim != 3 or features.shape[0] <= 0 or features.shape[1:] != (22, 2):
-            raise PostprocessError(
-                "template_invalid",
-                f"固定模板特征形状无效：{path} -> {tuple(features.shape)}",
-            )
-        if not np.isfinite(features).all():
-            raise PostprocessError("template_invalid", f"固定模板包含非有限特征：{path}")
-        if str(meta.get("pose_variant") or "") != _EXPECTED_TEMPLATE_POSE_VARIANT:
-            raise PostprocessError(
-                "template_invalid",
-                f"固定模板必须使用 {_EXPECTED_TEMPLATE_POSE_VARIANT} 模型：{path}",
-            )
-        return features, meta
+def _load_heavy_template(path: Path) -> tuple[np.ndarray, dict[str, Any]]:
+    """加载并校验 heavy + pose33_v3 单模板；失败抛 PostprocessError。"""
+    path = Path(path)
+    if not path.is_file() or path.stat().st_size <= 0:
+        raise PostprocessError("template_missing", f"固定模板不存在：{path}")
+    try:
+        with np.load(path, allow_pickle=True) as data:
+            if "features" not in data or "meta" not in data:
+                raise ValueError("缺少 features/meta")
+            features = np.asarray(data["features"], dtype=np.float32)
+            meta = dict(data["meta"].item() or {})
+    except PostprocessError:
+        raise
+    except Exception as exc:
+        raise PostprocessError("template_invalid", f"无法读取固定模板 {path}：{exc}") from exc
+    if features.ndim != 3 or features.shape[0] <= 0 or features.shape[1:] != (22, 2):
+        raise PostprocessError(
+            "template_invalid",
+            f"固定模板特征形状无效：{path} -> {tuple(features.shape)}",
+        )
+    if not np.isfinite(features).all():
+        raise PostprocessError("template_invalid", f"固定模板包含非有限特征：{path}")
+    if str(meta.get("pose_variant") or "") != _EXPECTED_TEMPLATE_POSE_VARIANT:
+        raise PostprocessError(
+            "template_invalid",
+            f"固定模板必须使用 {_EXPECTED_TEMPLATE_POSE_VARIANT} 模型：{path}",
+        )
+    layout = str(meta.get("feature_layout") or "")
+    if layout and layout != _EXPECTED_TEMPLATE_LAYOUT:
+        raise PostprocessError(
+            "template_incompatible",
+            f"固定模板布局必须为 {_EXPECTED_TEMPLATE_LAYOUT}：{path} -> {layout}",
+        )
+    return features, meta
 
-    _front_features, front_meta = _load(front_path)
-    _side_features, side_meta = _load(side_path)
-    front_layout = str(front_meta.get("feature_layout") or "")
-    side_layout = str(side_meta.get("feature_layout") or "")
+
+def try_load_heavy_template(path: Path | str | None) -> Path | None:
+    """模板路径可用则返回规范化 Path，否则 None（缺文件/无效均视为未填入）。"""
+    if path is None:
+        return None
+    raw = str(path).strip()
+    if not raw:
+        return None
+    try:
+        _load_heavy_template(Path(raw))
+    except PostprocessError:
+        return None
+    return Path(raw)
+
+
+def validate_template_pair(front_path: Path, side_path: Path) -> None:
+    """考试等正式路径：正/侧模板必须同时可用且布局一致。"""
+    _front_features, front_meta = _load_heavy_template(Path(front_path))
+    _side_features, side_meta = _load_heavy_template(Path(side_path))
+    front_layout = str(front_meta.get("feature_layout") or "") or _EXPECTED_TEMPLATE_LAYOUT
+    side_layout = str(side_meta.get("feature_layout") or "") or _EXPECTED_TEMPLATE_LAYOUT
     if front_layout != side_layout or front_layout != _EXPECTED_TEMPLATE_LAYOUT:
         raise PostprocessError(
             "template_incompatible",
             f"正侧模板布局不兼容：front={front_layout or '?'} side={side_layout or '?'}",
         )
+
+
+def validate_auto_compare_templates(
+    front_path: Path | str | None,
+    side_path: Path | str | None,
+) -> tuple[Path | None, Path | None]:
+    """一条龙自动比对：至少一侧可用即可；两侧都缺才 ``template_missing``。
+
+    返回 ``(usable_front_or_None, usable_side_or_None)``。
+    两侧都可用时额外校验布局一致。
+    """
+    front = try_load_heavy_template(front_path)
+    side = try_load_heavy_template(side_path)
+    if front is None and side is None:
+        raise PostprocessError(
+            "template_missing",
+            "正/侧标准模板均未填入或不可用（heavy + pose33_v3）。"
+            "请在主界面「录制」区填入至少一侧模板。",
+        )
+    if front is not None and side is not None:
+        validate_template_pair(front, side)
+    return front, side
+
+
+def template_action_name(path: Path | str) -> str:
+    """动作名 = 模板文件 stem（如 直拳.npz → "直拳"）。"""
+    return Path(path).stem
+
+
+def validate_auto_compare_template_lists(
+    front_list: list[Path | str] | None,
+    side_list: list[Path | str] | None,
+) -> tuple[list[Path], list[Path]]:
+    """多模板池校验：过滤出可用的 heavy+pose33_v3 模板；两池都空才报错。
+
+    返回 ``(usable_front_list, usable_side_list)``，每个元素为规范化 Path，同序去重。
+    单个模板不可用则跳过（不整体失败），保证部分模板损坏不阻断其余动作评分。
+    """
+    def _filter(lst: list[Path | str] | None) -> list[Path]:
+        out: list[Path] = []
+        seen: set[str] = set()
+        for raw in lst or []:
+            usable = try_load_heavy_template(raw)
+            if usable is None:
+                continue
+            key = str(usable.resolve(strict=False))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(usable)
+        return out
+
+    front = _filter(front_list)
+    side = _filter(side_list)
+    if not front and not side:
+        raise PostprocessError(
+            "template_missing",
+            "正/侧模板池均为空或不可用（需 heavy + pose33_v3）。"
+            "请在主界面「录制」区至少为一侧添加模板。",
+        )
+    return front, side
 
 
 class DualRecordingPostProcessor:
@@ -206,13 +410,15 @@ class DualRecordingPostProcessor:
         *,
         on_update: UpdateCallback | None = None,
         transcode: TranscodeFn = _default_transcode,
-        compare: CompareFn = action_compare.compare_dual_streams,
+        compare: CompareFn = action_compare.compare_video_to_templates,
         video_validator: VideoValidator = _default_video_validator,
         model_available: ModelAvailable = _default_model_available,
     ) -> None:
         self._on_update = on_update
         self._transcode = transcode
-        self._compare = compare
+        # 池级比对函数（可注入测试）：(template_paths, video, ...) -> [CompareResult]。
+        # 视频姿态在其内部只提取一次,复用给池内每个模板做 DTW。
+        self._compare_pool = compare
         self._video_validator = video_validator
         self._model_available = model_available
         self._queue: queue.Queue[DualRecordingJob | object] = queue.Queue()
@@ -408,7 +614,9 @@ class DualRecordingPostProcessor:
             )
             return
 
-        validate_template_pair(job.front_template, job.side_template)
+        front_tpls, side_tpls = validate_auto_compare_template_lists(
+            list(job.front_templates), list(job.side_templates)
+        )
         if not self._model_available():
             raise PostprocessError(
                 "model_missing",
@@ -416,34 +624,40 @@ class DualRecordingPostProcessor:
             )
 
         self._raise_if_cancelled(stop_evt)
+        if front_tpls and side_tpls:
+            compare_msg = f"正在执行正侧多模板 DTW 比对（正{len(front_tpls)}/侧{len(side_tpls)}）"
+        elif front_tpls:
+            compare_msg = f"正在执行正面多模板 DTW 比对（{len(front_tpls)} 个，侧面池为空）"
+            context.warnings.append("侧面模板池为空，仅比对正面")
+        else:
+            compare_msg = f"正在执行侧面多模板 DTW 比对（{len(side_tpls)} 个，正面池为空）"
+            context.warnings.append("正面模板池为空，仅比对侧面")
         self._publish(
             job,
             "comparing",
-            "正在执行正侧双流 DTW 比对",
+            compare_msg,
             front_video=context.front_video,
             side_video=context.side_video,
             warnings=context.warnings,
         )
-        result = self._compare(
-            job.front_template,
-            job.side_template,
-            context.front_video,
-            context.side_video,
-            pose_variant=_EXPECTED_TEMPLATE_POSE_VARIANT,
-            workers=1,
-            w_front=0.4,
-            w_side=0.6,
-            baseline=2.0,
-            enable_rules=False,
-            enable_error_analysis=False,
+        result = self._run_auto_compare(
+            front_tpls=front_tpls,
+            side_tpls=side_tpls,
+            front_video=context.front_video,
+            side_video=context.side_video,
             stop_evt=stop_evt,
         )
         self._raise_if_cancelled(stop_evt)
         result_payload = self._result_payload(result)
+        done_msg = (
+            "后台多模板比对完成"
+            if front_tpls and side_tpls
+            else "后台单侧多模板比对完成"
+        )
         self._publish_terminal(
             job,
             "completed",
-            message="后台双流比对完成",
+            message=done_msg,
             front_video=context.front_video,
             side_video=context.side_video,
             warnings=context.warnings,
@@ -515,6 +729,110 @@ class DualRecordingPostProcessor:
         if stop_evt.is_set():
             raise InterruptedError("后台比对已取消")
 
+    def _run_auto_compare(
+        self,
+        *,
+        front_tpls: list[Path],
+        side_tpls: list[Path],
+        front_video: Path,
+        side_video: Path,
+        stop_evt: threading.Event,
+    ) -> Any:
+        """正对正池、侧对侧池：每个模板各跑一次 subsequence DTW 出一个动作子分。
+
+        # ponytail: 弃用 compare_dual_streams 自动正侧拆分——考试双机位视角固定
+        # （正机位只拍正、侧机位只拍侧），逐模板 subsequence DTW 更直接,正对正/侧对侧天然成立。
+        每边综合 = 该池子分平均（供成绩表正/侧列）；combined = 所有动作子分直接平均。
+        """
+        from types import SimpleNamespace
+
+        def _run_pool(tpls: list[Path], video: Path, view: str) -> tuple[list[dict], float | None]:
+            if not tpls:
+                return [], None
+            self._raise_if_cancelled(stop_evt)
+            # 视频姿态只提取一次,复用给池内每个模板做 DTW（避免逐模板重复提取）。
+            results = self._compare_pool(
+                tpls,
+                video,
+                pose_variant=_EXPECTED_TEMPLATE_POSE_VARIANT,
+                workers=1,
+                stop_evt=stop_evt,
+            )
+            names = [template_action_name(tpl) for tpl in tpls]
+
+            # 踢腿几何质量分：仅当池内含踢腿动作时,对该视频提一次 raw Pose33 复用。
+            raw_series = None
+            if any(n in _KICK_KINDS for n in names):
+                self._raise_if_cancelled(stop_evt)
+                raw_series = extract_pose_raw_series(
+                    video, pose_variant=_EXPECTED_TEMPLATE_POSE_VARIANT
+                )
+
+            details: list[dict] = []
+            for name, res in zip(names, results):
+                dtw_score = float(res.score)
+                start, end = int(res.start_frame), int(res.end_frame)
+                geom_score: float | None = None
+                geom_detail = ""
+                if raw_series is not None and name in _KICK_KINDS:
+                    lm_win, meta_win = slice_pose_raw_series(
+                        raw_series, start_frame=start, end_frame=end
+                    )
+                    geom_score, geom_detail = score_kick_quality(
+                        lm_win,
+                        meta_win["valid_mask"],
+                        _KICK_KINDS[name],
+                        width=meta_win.get("width"),
+                        height=meta_win.get("height"),
+                    )
+                if geom_score is not None:
+                    final = KICK_GEOM_WEIGHT * geom_score + (1.0 - KICK_GEOM_WEIGHT) * dtw_score
+                else:
+                    final = dtw_score
+                details.append(
+                    {
+                        "name": name,
+                        "view": view,
+                        "score": float(final),
+                        "dtw_score": dtw_score,
+                        "geom_score": geom_score,
+                        "geom_detail": geom_detail,
+                        "start": start,
+                        "end": end,
+                    }
+                )
+            pool_mean = (
+                float(np.mean([d["score"] for d in details])) if details else None
+            )
+            return details, pool_mean
+
+        front_details, front_score = _run_pool(front_tpls, front_video, "front")
+        side_details, side_score = _run_pool(side_tpls, side_video, "side")
+
+        action_scores = front_details + side_details
+        # combined：所有动作子分直接平均（正侧模板各自出分,不再套池权重）。
+        all_scores = [d["score"] for d in action_scores]
+        combined = float(np.mean(all_scores)) if all_scores else 0.0
+        pct = int(np.clip(int(round(combined * 100.0)), 0, 100))
+        # 兼容旧字段：front/side_segment 取各池首个匹配窗口（若有）
+        front_seg = (
+            (front_details[0]["start"], front_details[0]["end"]) if front_details else None
+        )
+        side_seg = (
+            (side_details[0]["start"], side_details[0]["end"]) if side_details else None
+        )
+        return SimpleNamespace(
+            front_score=front_score,
+            side_score=side_score,
+            combined_score=combined,
+            combined_percent=pct,
+            front_matches=(),
+            side_matches=(),
+            front_segment=front_seg,
+            side_segment=side_seg,
+            action_scores=tuple(action_scores),
+        )
+
     @staticmethod
     def _result_payload(result: Any) -> dict[str, Any]:
         def _segment(value: Any) -> dict[str, int] | None:
@@ -522,15 +840,21 @@ class DualRecordingPostProcessor:
                 return None
             return {"start": int(value[0]), "end": int(value[1])}
 
+        def _opt_float(value: Any) -> float | None:
+            if value is None:
+                return None
+            return float(value)
+
         return {
-            "front_score": float(result.front_score),
-            "side_score": float(result.side_score),
+            "front_score": _opt_float(getattr(result, "front_score", None)),
+            "side_score": _opt_float(getattr(result, "side_score", None)),
             "combined_score": float(result.combined_score),
             "combined_percent": int(result.combined_percent),
-            "front_matches": to_jsonable(result.front_matches),
-            "side_matches": to_jsonable(result.side_matches),
-            "front_segment": _segment(result.front_segment),
-            "side_segment": _segment(result.side_segment),
+            "front_matches": to_jsonable(getattr(result, "front_matches", ())),
+            "side_matches": to_jsonable(getattr(result, "side_matches", ())),
+            "front_segment": _segment(getattr(result, "front_segment", None)),
+            "side_segment": _segment(getattr(result, "side_segment", None)),
+            "action_scores": to_jsonable(getattr(result, "action_scores", ())),
         }
 
     def _publish(
@@ -738,6 +1062,7 @@ class DualRecordingPostProcessor:
             side_score=result.get("side_score"),
             combined_percent=result.get("combined_percent"),
             error_code=error.get("code"),
+            action_scores=tuple(result.get("action_scores") or ()),
         )
 
     def _notify(self, update: PostprocessUpdate) -> None:

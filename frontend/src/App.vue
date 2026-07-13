@@ -882,7 +882,25 @@ function applyAnalysisPayload(payload: JsonRecord): void {
   analysisResult.value = payload;
   if (typeof payload.templatePath === "string" && payload.templatePath) {
     templatePath.value = payload.templatePath;
-    analysisStatus.value = "模板已生成";
+    const meta = payload.templateMeta;
+    if (meta && typeof meta === "object" && !Array.isArray(meta)) {
+      const record = meta as JsonRecord;
+      const start = typeof record.start_frame === "number" ? record.start_frame : undefined;
+      const end = typeof record.end_frame === "number" ? record.end_frame : undefined;
+      const fps = typeof record.fps === "number" && record.fps > 0 ? record.fps : 30;
+      const ratio = typeof record.selected_retained_ratio === "number"
+        ? record.selected_retained_ratio
+        : undefined;
+      if (start !== undefined && end !== undefined) {
+        const duration = Math.max(1, end - start + 1) / fps;
+        const ratioText = ratio === undefined ? "" : ` · 保留 ${(ratio * 100).toFixed(1)}%`;
+        analysisStatus.value = `模板已生成 · 帧 ${start}..${end} · ${duration.toFixed(2)}s${ratioText}`;
+      } else {
+        analysisStatus.value = "模板已生成";
+      }
+    } else {
+      analysisStatus.value = "模板已生成";
+    }
   }
   if (payload.compare || payload.techEval) {
     analysisStatus.value = "分析结果已更新";

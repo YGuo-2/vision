@@ -1,3 +1,336 @@
+## 2026-07-13: [fix] 综合分改直接平均 + 低鞭腿去几何 + 低鞭腿夹角评分（试验后弃用）
+
+### 问题描述
+
+1. 同一人打同一套模板考出 38~60 分且波动大。综合分原口径 `combined=0.4×正面池均值+0.6×侧面池均值` 多套了一层池权重，用户要求改为**所有动作子分直接平均**。
+2. 低鞭腿几何分（原「站立腿大腿高度三角峰」）实测异常：真实考试录像里所有踢腿动作张开角都在 95~127°（踢到水平以上），低鞭腿 DTW 窗口峰值帧算出 104°，按「踢过头」判 0，把该动作子分从 0.77(纯DTW) 拖到 0.38。根因是这次录像低/高鞭高度没拉开 + 高度基准（站立腿膝/髋）定位不稳。
+
+### 修改内容
+
+- **`apps/recording_postprocess.py`**：
+  - `_run_auto_compare` 综合分改为 `combined = mean(所有动作子分)`（正+侧，含踢腿几何混合分），不再套 `w_front/w_side`。删除 `w_front/w_side` 参数。`front_score`/`side_score` 仍算各池均值供成绩表正/侧列。
+  - `_KICK_KINDS` 移除「低鞭腿」——低鞭腿现自动只走纯 DTW（`name not in _KICK_KINDS` 则跳过几何）。高鞭腿/侧踹腿/正蹬腿仍几何+DTW 各半。
+- **`core/kick_quality.py`**：低鞭腿 `_score_low_whip` 从「高度三角峰」重写为「两腿张开夹角梯形」（保留在库，`_KICK_KINDS` 不再引用，供后续需要时启用）。实测三张标准低鞭腿摆拍夹角 = 64/73/84°（画骨架量出），定 64~84° 满分平台、>90° 归零、<40° 归零。夹角用真实像素反归一化（`width`/`height` 来自 raw meta）抵消横竖画幅畸变，顶点用髋中点、不依赖踢腿/站立腿判定（比高度法稳）。`score_kick_quality` 新增 `width`/`height` 参数。旋钮 `LOW_WHIP_FULL_MIN/MAX=64/84`、`LOW_WHIP_ZERO_HIGH/LOW=90/40`。
+
+### 验证方法
+
+- `core/kick_quality.py` 自检：低鞭腿夹角 64/73/84°→1.0、87°→~0.5、≥90°/40°→0；高鞭/侧踹/正蹬高度映射不变。self-check OK。
+- 画骨架核对：三张手机摆拍低鞭腿 MediaPipe heavy 检测准确，夹角 64/73/84°；record_024815 侧面视频低鞭腿 DTW 窗口峰值帧（绝对帧#403）实为踢到水平的动作（104°），确认「这次踢太高」非算法误判。
+- `pytest tests/test_recording_postprocess.py -q`：51 passed。
+
+---
+
+## 2026-07-13: [fix] 考试录像自动裁剪把 34.8s 砍成 1.9s，评分崩坏（38 分事故根因）
+
+### 问题描述
+
+同一人打同一套散打模板考 3 遍，8 个动作分数在 25~80 之间乱蹦（本该都在 0.8 上下），综合分 38~60 不可信。只读排查确诊：原始考试录像 side.avi = 1044 帧 / 34.8s（完整 8 动作），经 `core/exam_clip.py` 的 `estimate_action_range` 裁剪后 side_exam.mp4 只剩 56 帧 / 1.9s——95% 的帧被当「走位/静止」删掉。8 个模板（46~149 帧）被硬塞进 56 帧里跑 subsequence DTW，多数模板比视频还长，窗口互相重叠乱锁，分数随机。
+
+根因是 `estimate_action_range` 优先走 `find_active_range`，后者只取**最长单个连续活跃段**，对「连续打 8 个动作」的录像只保留能量最高的一小段。隔离实验：用裁剪前完整 34.8s 视频跑同样 7 个侧面模板，DTW 全部落在 0.75~0.83、窗口按动作时序干净铺开不互抢——证明评分方法/归一化/DTW 都没问题，唯一问题就是裁剪。（与上一条「建模板」防线是**不同链路**：那条防 `create_template_from_video`，本条防考试录像 `exam_clip`。）
+
+### 修改内容
+
+- **`core/exam_clip.py`**：`estimate_action_range` 加 `smart_crop: bool = False`（考试生产默认）与 `tail_quiet_pct: float = 40.0`。
+  - `smart_crop=False`（考试默认）：进场已由 `presence_gate` 挡干净，头部只固定掐 `trim_head_s`（0.5s）；**中段一律不裁**（整段评，隔离实验结论）；尾部**不按时间硬掐、按能量从末尾回扫到最后一次超阈动作**，末动作后留 0.3s 余量。正常离场留下的 ~2s 空场能量低会被切掉；`force_finish` 强停时尾部仍是动作则一帧不切。区间过短（<max(15,0.5fps)）一律回退整段，绝不 raise。
+  - `smart_crop=True`：完整保留旧的 `find_active_range` 活跃段 + 时间裁剪逻辑，供 `estimate_action_range_from_feature_seq`（sim/单测）显式使用。`find_active_range` 本体一字不动（pose33_v3 golden 不漂）。
+  - 新增 `_smooth_1d`（移动平均，防单帧能量毛刺）。
+- **`tests/test_exam_clip.py`**：旧的 `estimate_action_range` 时间裁剪测试显式传 `smart_crop=True`；新增考试默认路径 3 例（无 energy 保留整尾、尾部空场被回扫切掉、force_finish 末动作不被吞）。
+
+### 校准旋钮（默认值，现场可调）
+
+- `trim_head_s=0.5`（掐头固定）
+- `tail_quiet_pct=40.0`（尾部回扫安静阈分位；越低越保守越少切尾）
+- 末动作后余量 `0.3s`（硬编码）
+- `smart_crop=False`（生产默认；sim/test 显式开旧逻辑）
+
+### 验证方法
+
+- 真实 34.8s / 1044 帧 side.avi + front.avi 跑 `prepare_exam_pair`（生产默认）：裁后 front_frames=1004 / trim=[15,1019] / **保留 96.2%**（不再砍到 56）；裁后 side_exam 跑 7 个侧面模板 DTW 全部 0.759~0.833（对齐隔离实验 0.75~0.83），窗口按动作时序铺开不互抢。
+- `pytest tests/test_exam_clip.py tests/test_recording_postprocess.py tests/test_exam_session.py tests/test_presence_gate.py tests/test_pose33_v3_golden.py -q`：88 passed（golden 不漂）。
+
+---
+
+## 2026-07-13: [fix] 长视频生成模板时拦截异常短自动裁剪
+
+### 问题描述
+
+`find_active_range` 的既有语义是从运动能量高于 P70 的区间中只保留最长连续段。单动作视频可借此提取一次代表动作，但 80.73s 的整套动作视频包含多个活动组，默认结果仅为 1759..1825（67 帧 / 2.23s / 2.8%），会静默生成语义错误的模板。当前评分链和多模板池按“每个动作一个模板”工作，不能把整套长视频直接塞入单个 DTW 模板。
+
+### 修改内容
+
+- **`core/action_compare.py`**：新增 `TemplateAutoCropAnalysis`、`analyze_template_auto_crop` 和 `TemplateAutoCropReviewRequired`。保持 `find_active_range` 与原自动主段完全不变，仅增加模板专用诊断：按 0.3s 平滑、0.15s 最短活动、2s 间隔合并、0.5s 候选 padding 形成活动组。仅当输入不少于 30s、存在多个活动组且自动主段不超过 `max(5s, 原片10%)` 时阻止无边界生成，并返回输入/保留时长、比例和候选帧区间。显式 `start/end` 继续优先并可通过人工确认。
+- 新模板 metadata 增加 `crop_selection`、`selected_retained_ratio`、`template_scope=single_action`、`auto_crop_strategy`、`auto_activity_group_count/groups`、`auto_review_required`，保留既有 `auto_start_frame/auto_end_frame`。
+- **`apps/make_template.py`**：CLI 复用同一诊断和保护；异常时以清晰消息退出，显式 `--start/--end` 可继续；metadata 与核心入口对齐。
+- **`apps/app_ui.py`**：Tkinter 模板生成完成后展示实际帧区间、时长和保留比例，并在原始结果中带回 template meta；长视频异常直接显示人工确认说明。
+- **`frontend/src/App.vue`**：Vue/Tauri 从 bridge 已返回的 `templateMeta` 展示实际帧区间、时长和保留比例；异步 `job.failed` 沿既有路径展示长视频人工确认错误。
+- **`tests/test_template_auto_crop.py`**：覆盖 120s 多活动视频拦截、短单动作旧行为、20s 双活动组不误拦、无显式边界不落错误模板、显式边界覆盖与诊断 metadata。
+- 未修改共享 `find_active_range`，因此考试裁剪、学员活跃段、body_core 和既有评分行为不变。
+
+### 验证方法
+
+- `pytest tests/test_template_auto_crop.py tests/test_template_metadata.py tests/test_pose33_v3_golden.py tests/test_ui_backend_analysis.py -q`：39 passed。
+- `pytest tests/test_template_auto_crop.py tests/test_template_metadata.py tests/test_pose33_v3_golden.py tests/test_batch_backend_args.py -q`：47 passed。
+- `pytest tests/test_recording_postprocess.py -q`：51 passed。
+- `npm --prefix frontend run build` 与 `npm --prefix frontend run test`：通过。
+- `py_compile core/action_compare.py apps/make_template.py apps/app_ui.py`：通过；`git diff --check` 无空白错误（仅 Windows 行尾提示）。
+- 真实缓存 `outputs/_tpl_energy_cache.npz`：80.73s / 自动 2.23s / 2.8% / 9 个活动组，`review=True`，正确阻止静默生成。
+- `E:\测试视频\20260711` 的 8 个 1280x720@30fps 连续视频以 heavy 实测：输入 17.53..23.33s、自动主段 1.20..2.40s、活动组 1..2，全部 `review=False`，未误拦单动作连续素材。
+- 扩展 Tkinter 基线 `pytest tests/test_app_ui_lifecycle.py tests/test_app_controls.py tests/test_app_ui_dual_camera.py -q` 为 135 passed / 18 failed；失败均位于开始本任务前已有的多模板池、录制控件和双摄 pipeline 未提交改动（测试桩缺 `_current_template_lists` / `_sync_record_stop_enabled` 等），与本次模板生成路径无关，未越界修改。
+
+## 2026-07-13: [feat] 四个腿法(低/高鞭腿、侧踹腿、正蹬腿)踢腿高度几何质量评分并入动作子分
+
+### 问题描述
+
+考试逐动作出分原只有 DTW 黑盒相似度,不评"踢得够不够高"。为四个踢腿动作加几何质量评分并入该动作子分:
+- **低鞭腿**:踢到膝盖高=及格(0.6),大腿中点=满分(1.0),往上到髋关节递减回0.6,再高继续降(三角峰,端点 `Q_BOUND=0.6`)。
+- **高鞭腿**:两腿夹角90°/踢到腰(髋)平=合格,踢到头(鼻)平=优秀。
+- **侧踹腿 / 正蹬腿**:提到髋平=合格(0.6),越往上越高,到头(下巴)平=满分。同高鞭高度映射,但无分腿夹角门(伸腿动作,两踝张开角对其无意义)。
+
+### 修改内容
+
+- **新增 `core/kick_quality.py`**(纯几何,含 `__main__` assert 自检):`score_kick_quality(landmarks_window, valid_mask, kind)` → (0..1 或 None, detail)。步骤:定位踢腿(窗口内踝帧间位移大者)→ 峰值帧(踝 y 最小)→ 按 kind 评分。三种 kind:`low_whip` 三角峰(中点1.0/大腿端点 `Q_BOUND=0.85`);`high_whip` 高度映射(膝→0、髋=`Q_PASS=0.6`、鼻→1.0)+夹角90°提示门;`kick_up`(侧踹/正蹬)同高度映射但无夹角门。高度映射抽为共享 `_height_map_score`。用 raw Pose33(非 DTW 归一化特征——后者排除鼻子且旋转对齐扭曲高度);高度用 y 比值不受横拍长宽比影响。校准旋钮 `Q_BOUND/Q_PASS/PASS_ANGLE_DEG` 显式常量。
+- **`apps/recording_postprocess.py`**:`_run_pool` 里 side 池含踢腿模板(动作名∈`_KICK_KINDS`={低鞭腿:low_whip,高鞭腿:high_whip,侧踹腿:kick_up,正蹬腿:kick_up})时,`extract_pose_raw_series` 对该视频提一次 raw 复用;每踢腿模板用其 DTW 窗口 `slice_pose_raw_series` 切片 → `score_kick_quality` → `blended = KICK_GEOM_WEIGHT*geom + (1-KICK_GEOM_WEIGHT)*dtw`(`KICK_GEOM_WEIGHT=0.5`);geom=None 退回纯 DTW。action_scores 每项增 `dtw_score`/`geom_score`/`geom_detail`,`score`=blended。非踢腿动作不变。
+- 透传/成绩表**无需改**:`_result_payload` 整 dict `to_jsonable`、`PostprocessUpdate.action_scores` 已透传、exam_panel 读 `d["score"]`(=blended)、宽表用 blended。
+
+### 验证方法
+
+- `core/kick_quality.py` 自检通过(合成峰值帧:low中点→1.0、髋高→Q_BOUND、鼻高→1.0、膝下→0、帧不足→None;kick_up 髋→Q_PASS、鼻→1.0)。
+- 真实侧面视频(record_20260713_013406_368237/side.mp4)跑 `_run_auto_compare`:高鞭腿几何1.00(头平)→0.879;侧踹腿几何1.00(头平)→0.889;正蹬腿几何0.916(过腰近头)→0.847;低鞭腿几何0.594(踝在大腿185%即踢过髋、偏离中点)→0.673;非踢腿动作几何列空、纯 DTW 不变。
+- `pytest tests/test_recording_postprocess.py -q` 51 passed(action_scores 新增字段不破坏现有断言)。
+- 待观察:低鞭"185%"提示这次低鞭踢偏高或侧面视角下踢腿/站立腿定位待复核;`KICK_GEOM_WEIGHT/Q_BOUND/Q_PASS` 为校准旋钮,待真实数据标定。
+
+## 2026-07-12: [feat] 考试/一条龙支持正/侧多模板池 + 逐动作出分
+
+### 问题描述
+
+散打规定套路考核里学员连贯打一套多个动作（直拳/摆拳/勾拳/高低鞭腿/侧踹/正蹬=侧面机位，摇闪=正面机位）。原考试/一条龙链路每边只支持一个模板（`front_template`/`side_template` → `compare_dual_streams` 出单一正/侧/综合分），无法为"一条视频含多个动作"的套路各动作分别出分。需求：UI 给正/侧两个独立模板列表各可加多个模板；检测时正对正池、侧对侧池；每模板各出一个动作子分；各动作分入成绩表（宽表每动作一列）；考试+一条龙都改。
+
+### 修改内容
+
+核心原则：把"每边一个 Path"泛化为"每边一个 Path 列表"，列表长度 1 时行为等同旧单模板；旧 prefs 单值键、旧 job 单字段保留读取兼容。
+
+- **`apps/recording_postprocess.py`**：
+  - 新增复数 prefs 键 `auto_compare_front_templates`/`auto_compare_side_templates`；`load_configured_template_lists()`/`save_configured_template_lists()`/`validate_auto_compare_template_lists()`（每路径过 `_load_heavy_template` 校验，单个坏模板跳过不整体失败，两池都空才 `template_missing`）；`template_action_name()`（动作名=文件 stem）。
+  - `DualRecordingJob` 增 `front_templates`/`side_templates` tuple，`__post_init__` 用单字段回填复数（旧构造兼容）。
+  - **`_run_auto_compare` 重写**：正对正池、侧对侧池，每模板各跑一次 `self._compare`(=`compare_video_to_template`) 出一个子分；`front_score`/`side_score`=各池均值，`combined`=w_front0.4/w_side0.6 加权（仅一侧非空则退化为该侧）；结果新增 `action_scores` 逐动作明细。**弃用 `compare_dual_streams` 自动正侧拆分**——考试双机位视角固定，逐模板 subsequence DTW 更直接（行为变更，已验证单模板场景不劣化）。
+  - 可注入比对 seam `compare` 默认从 `compare_dual_streams` 改为 `compare_video_to_template`（单模板形状）。
+  - `_result_payload`/`PostprocessUpdate` 增 `action_scores` 字段并透传。
+- **`core/exam_roster.py`**：`ExamResultRow` 增 `action_scores: dict`；`collect_action_names()` 按首次出现顺序去重；`write_scorebook_xlsx` 动作列追加表尾（表头 `<动作>分`，×100 一位小数，缺失留空），`row_to_export_values` 接动作名列表参数。
+- **`apps/exam_panel.py`**：`apply_postprocess_update_to_scorebook` completed 分支把 `update.action_scores` 转 `{name:score}` 写入 row；更新说明文案。
+- **`apps/app_ui.py`**：录制区两单行输入框改**正/侧两个 Listbox + 添加/移除按钮**（`_build_template_pool_ui`/`_add_pool_templates`/`_remove_pool_selected`/`_persist_template_pools`/`_current_template_lists`）；变更即落复数 prefs；提交 job 填 `front_templates`/`side_templates`；`_exam_preflight` 改用 `validate_auto_compare_template_lists`（至少一侧非空即可，不再强制正侧齐全）。
+- **`scripts/match_segments_probe.py`**：新增诊断探针（提取一次特征复用给多模板，打印分辨率自检+逐动作窗口+重叠检测）。
+
+测试同步（`tests/test_recording_postprocess.py`）：`compare` mock 与 `_result()` 改为单模板形状；`compare_calls==1`→`==2`（正/侧各一模板各比对一次）；FIFO order 断言含双模板；result key set 增 `action_scores`；模板覆盖重构点同步清空复数字段。
+
+### 验证方法
+
+- `pytest tests/test_recording_postprocess.py tests/test_exam_roster.py tests/test_exam_session.py -q` 全通过（51+26）。
+- 成绩宽表导出：构造两行不同动作集 → 动作列追加表尾、按首现顺序、缺失留空、×100，验证通过。
+- 多模板逐动作出分闭环：侧面池[直拳,侧踹腿] vs 直拳视频 → 直拳 0.879 / 侧踹腿 0.524，有区分度；正面池空则 front_score=None、综合退化侧面均值，验证通过。
+- 全量 `py_compile` 通过。
+- **性能优化（同批）**：新增 `core/action_compare.py:compare_video_to_templates`（一条视频 vs 多模板，**视频姿态只提取一次**复用给池内每个模板做 DTW）；`DualRecordingPostProcessor` 比对 seam 从单模板 `compare_video_to_template` 改为池级 `compare_video_to_templates`（`_run_auto_compare._run_pool` 每视角调一次）。实测 7 模板侧面池从"逐模板重复提取超 2 分钟" → **15.3s**。测试 mock 同步改池形状（`_pool_result`）。
+- app_ui 5 个 UI 测试为改动前既有失败（`_sync_record_stop_enabled` 等，与本改动无关，已 stash 复核）。
+
+## 2026-07-11: [feat] pose33_v3 评分 baseline 从 2.0 校准为 3.0
+
+### 问题描述
+
+baseline=2.0 是当初随手设定、未经真人数据校准的刻度常数。用同一人连打同一套两遍做实测，系统只给 84% 左右，而人工判断应在 90%。4 组"同人连打两遍"数据显示 avg_cost 中位数 ≈ 0.333，baseline=2.0 时对应 ~85.8%，需要上调。
+
+### 修改内容
+
+校准依据：4 组独立"同人两遍"样本（avg_cost：0.335 / 0.300 / 0.333 / 0.372），中位数 0.333；
+要让该中位数映射到 0.90 分，需 baseline = 0.333 × 0.90 / 0.10 ≈ 3.0（取整、好解释）。
+
+改动文件（pose33_v3 评分主路径，全部从 2.0 改为 3.0）：
+
+- **`core/feature_layout.py`**：`POSE33_V3.default_baseline` 2.0 → 3.0（权威来源，补校准注释）
+- **`core/online_matcher.py`**：`_POSE33_V3_BASELINE` 2.0 → 3.0
+- **`core/action_compare.py`**：4 处（`_multi_subsequence_matches` 默认参数、单次 DTW 局部赋值、`compare_action_to_template` 默认参数、`compare_dual_streams` 默认参数）
+- **`apps/match_template.py`**：局部 `baseline = 2.0` → 3.0
+- **`apps/recording_postprocess.py`**：`compare_dual_streams` 调用处显式参数 2.0 → 3.0
+- **`analysis/offline_matching_profile.py`**：`POSE33_BASELINE` 2.0 → 3.0（同步离线分析口径）
+
+测试同步更新：
+
+- `tests/test_s3_calibration.py`：`assert POSE33_V3.default_baseline == 3.0`
+- `tests/test_recording_postprocess.py`：比对调用 kwargs 断言 `baseline: 3.0`
+- `tests/test_s5_offline_profile.py`：`assert offline_matching_profile.POSE33_BASELINE == 3.0`
+- `tests/fixtures/pose33_v3/golden.json`：重新生成（single_template score 0.837→0.885，dual combined_percent 38→46）
+
+不动的：`analysis/calibrate_body_core.py`（body_core 历史标定参照，独立口径）。
+
+### 验证方法
+
+- 核心套件 130 passed（`test_s3_calibration` / `test_recording_postprocess` / `test_body_core_layout` / `test_s5_offline_profile` / `test_pose33_v3_golden` / `test_rule_availability` / `test_tech_eval_contract`）全绿。
+- 剩余失败均为改动前预存（`test_app_ui_lifecycle` / `test_yolo_backend_contract` / `test_ui_backend_sessions` 等，用 git stash 前后对比确认）。
+- 新刻度下同人两遍中位数得分：`3.0/(3.0+0.333) ≈ 90%`，符合预期。
+
+## 2026-07-11: [chore] 生成整套动作 heavy 标准模板（record_20260711_191628_631417）
+
+### 问题描述
+
+需要把 `E:\测试视频\20260711\record_20260711_191628_631417.mp4` 处理为 heavy + pose33_v3 标准模板，且要求纳入「整套动作」的有效帧（从整套开始到结束），仅裁掉前后准备/静止时间——而非某个单一动作段。
+
+### 修改内容
+
+- 无代码改动，仅用既有 `apps/make_template.py` 生成模板产物（gitignored，不入库）。
+- 首跑默认自动分段（`find_active_range`）只取到「能量最高的最长连续段」1759..1825（67 帧 ≈2.2s），属单个动作而非整套，不满足需求。
+- 逐帧计算 `motion_energy` 曲线（heavy + `normalize_pose_xy_v3`）定位整套边界：视频共 2422 帧/80.7s；帧 0–79 站定静止（能量 ≈0.001），帧 80 起运动爬升；结尾动作持续到 ≈2360，帧 2370 起归零。
+- 以 `--pose heavy --start 80 --end 2370` 手动覆盖范围生成模板：
+  `templates/record_20260711_191628_631417_heavy.npz`（features `(2291, 22, 2)`，`start_frame=80`/`end_frame=2370`/`fps=30`/`feature_layout=pose33_v3`/`backend=mediapipe`/`normalizer_version=v3`），并出 `*.preview.mp4`（codec avc1）供人工核对。
+
+### 验证方法
+
+- 载入 npz 校验 `features.shape=(2291,22,2)` 与 meta 字段（pose_variant=heavy、feature_layout=pose33_v3、start/end=80/2370）均正确。
+- 导出带骨架标注预览视频，用于人工确认整套动作首尾裁剪合理。
+- 未改动任何源码，`pose33_v3` 默认路径行为不变。
+
+## 2026-07-11: [feat] 一条龙正/侧模板填入 UI；仅双缺报错
+
+### 问题描述
+
+自动比对（检测一条龙）硬编码 `standard_*_heavy.npz`，主界面无法填入/查看模板；缺一侧即失败，侧摄线不够时无法单侧试跑。
+
+### 修改内容
+
+- **UI**（`apps/app_ui.py` 录制区）：「正面模板 / 侧面模板」两条路径 +「填入…」；状态行显示 ✓/✗；路径持久化 `user_prefs`（`auto_compare_front_template` / `auto_compare_side_template`）。
+- **一条龙契约**（`recording_postprocess`）：`validate_auto_compare_templates` — **仅正/侧都不可用** 才 `template_missing`；仅一侧可用则单流 DTW（`compare_video_to_template`），另一侧分显示 `-`。
+- 考试 preflight 仍要求两侧齐全（`validate_template_pair`）。
+- 提交 job 改用 UI 当前路径；比分展示支持单侧 `None`。
+
+### 验证方法
+
+- `pytest tests/test_recording_postprocess.py -q` → **51 passed**
+- 定向：`test_auto_compare_runs_with_only_side_template`、双缺 `template_missing`
+
+---
+
+## 2026-07-11: [templates] 从实测视频生成 standard_front_heavy
+
+### 问题描述
+
+考试黑盒需 heavy+pose33_v3 标准正模板；用户提供 `E:\测试视频\20260711\record_20260711_191628_631417.mp4`。
+
+### 修改内容
+
+- `make_template.py --pose heavy --preview` 生成 `templates/standard_front_heavy.npz`
+- 自动动作段：帧 1759..1825（len=67，fps=30）；预览 `templates/standard_front_heavy.preview.mp4`
+- 侧模板 `standard_side_heavy.npz` 仍缺，双摄比对/考试需另补侧面标准视频
+
+### 验证方法
+
+- 命令 exit 0；npz 落盘；meta 含 pose heavy / pose33_v3
+
+---
+
+## 2026-07-11: [docs] 导入直拳+摆拳+踢腿场地实测数据
+
+### 问题描述
+
+场地本子测好的机位 / 考台尺寸此前只在手绘图 `直拳+摆拳+踢腿场地.jpg`，系统内无结构化记录，装机与 ROI 标定缺少可查数字。
+
+### 修改内容
+
+- 新增 `docs/venue_直拳摆拳踢腿.json`：考台上/下边界 102、左/右边界 89；**正摄正对上边界**（高 100 / 距台 216 / 投影距右边界 35.6）；**侧摄正对侧边界**（高 83 / 距台 249 / 投影距上边界 21.5）。
+- `user_prefs.json` 写入同套 `venue_layout` 摘要 + 文档路径（本地偏好，gitignore）。
+- 语义按用户确认：草图正/侧均旋转画法；21.5 / 35.6 为投影落点到框边距离；**不**从厘米推导 `exam_roi_norm`。
+- 纠错：曾误把上边当 89、右边当 102，且正/侧机位对边反了；侧摄再纠为**左侧**边界（非右侧）。
+- 再纠：机位距离=到对应边界的**直线垂直距离**；正摄→上边界 **216**；侧摄→左边界 **241**（草图曾误读为 249）。
+- 「高」语义固定为**摄像机镜头对地垂直高度**（正 100 / 侧 83），非到考台斜距。
+- 记忆与 JSON 强调：**源图正/侧位置均旋转画法，禁止按图面方向装机**，只认 `docs/venue_直拳摆拳踢腿.json`。
+
+### 验证方法
+
+- 通读 JSON 字段与源图标注一致；`python -c "json.load(...)"` 可解析。
+
+---
+
+## 2026-07-11: [ui] 删除主界面两路「旋转」下拉
+
+### 问题描述
+
+旋转已改为点击预览 +90°，摄像头行旁的两个旋转下拉多余且占位。
+
+### 修改内容
+
+- 移除 `rotate_combo` / `rotate_combo_2` 及「旋转：」标签与 combobox 事件。
+- 保留内部 `rotate_var*` 与 `_runtime_rotate*`（点击预览仍同步角度，供 collect_state / 考试 ROI）。
+- `_set_running_controls` 不再联动旋转控件；控件测试去掉对应断言。
+
+### 验证方法
+
+- `pytest tests/test_app_controls.py tests/test_app_ui_dual_camera.py -q`（相关子集）
+
+---
+
+## 2026-07-11: [feat] 预览点击旋转 / 自动比对滑块 / 黑盒固定 heavy
+
+### 问题描述
+
+1. 旋转依赖下拉且会话运行中锁定，必须停止才能改角度。
+2. 「录制后自动比对」仅 Checkbutton，运行中锁定，切换不便。
+3. 预览模型档与后端黑盒评分档语义混用。
+
+### 修改内容
+
+- **点击预览旋转**：主/侧预览 `Button-1` 各自顺时针 +90°（互不干扰）；`_runtime_rotate*` 线程安全，worker 每帧读取；下拉同步且运行中可改；录制 writer 未建时 `update_session_size`，已建则写盘 `resize` 适配。
+- **自动比对滑块**：`仅录制 ⟷ 自动比对` Scale；运行中可快速切换；主线程写入 `_dual_auto_compare` 缓存，片段开录/提交读取；考试仍强制开并禁用滑块。
+- **模型分轨**：主界面文案改为「预览姿态模型」；`CompareWindow` 模板生成/比对/tech_eval 强制 `heavy`；双摄后处理本已 heavy，保持契约。
+- `RecordingController.session_size` 属性供写盘适配读取。
+
+### 验证方法
+
+- `py_compile apps/app_ui.py core/recording_controller.py` 通过。
+- 定向回归（排除 5 条既有基线失败）：`test_app_ui_dual_camera` + `test_app_controls` + `test_app_ui_lifecycle` → **148 passed, 5 deselected**。
+- 新增：`_next_rotate_cw` / `_fit_frame_to_size` / runtime 两路隔离单测。
+
+---
+
+## 2026-07-11: [feat] 全局骨架开关：默认关，预览与录制均不带骨架
+
+### 问题描述
+
+录制区「双摄录像写入骨架」仅在双摄路径生效；单摄始终叠骨架推理，且文案暗示只影响双摄写盘。需要统一为**全局骨架开关**：默认关闭，关闭时预览与录制都不带骨架。
+
+### 修改内容
+
+- 勾选文案改为「开启骨架（预览与录制；双摄开启后不自动比对）」。
+- `_collect_state`：`record_skeleton` 单摄/双摄/文件源一律透传 UI 勾选（默认 `False`）；`auto_compare` 仍仅双摄有效。
+- 单摄串行 worker：摄像头且未开骨架时不建 MediaPipe、不在线匹配，预览与录像写裸帧（仅 FPS 字）；离线文件仍始终 annotate。
+- 单摄多 worker：仅「开骨架」时才走 `ParallelPoseEngine`；关骨架落入串行裸帧路径。
+- 双摄既有门控保持不变（关骨架双路裸帧 + 不自动比对语义仍在「开骨架」时优先 `annotated_recording`）。
+- 考试 preflight 文案同步为「开启骨架」。
+
+### 验证方法
+
+- `py_compile apps/app_ui.py` 通过。
+- 骨架相关定向：`test_collect_state_captures_*_skeleton*`、`test_app_initializes_dual_record_skeleton_toggle_disabled`、`test_exam_preflight_rejects_skeleton_session` + 控件回归（排除既有 toggle 基线失败）→ **15 passed**。
+- 双摄/生命周期全量（排除 2 条既有基线失败：`creates_two_mediapipe_pipelines` 计 occupancy 第三处构造、`pipeline_loading_keeps_raw_pair` write 断言）→ 预期通过。
+- 既有基线失败与本改无关：`test_app_controls` 三条 `_sync_record_stop_enabled` stub 缺失、上述双摄两条。
+
+---
+
+## 2026-07-11: [docs] CLAUDE.md 同步考试系统与近期 commit
+
+### 问题描述
+
+考试系统（PR #72，`exam_*` 五模块 + `exam_panel` + `presence_gate` + `recording_postprocess` 透传）及双流评分等近期改动落地后，CLAUDE.md 未记录，新会话无法感知考务编排入口与硬约束。
+
+### 修改内容
+
+1. Core 模块职责补 `exam_session` / `exam_roster` / `exam_clip` / `exam_announcer` / `presence_gate` 五项。
+2. Apps 入口补 `exam_panel.py`、`recording_postprocess.py`，并在 `app_ui.py` 说明「考试模式…」入口与 occupancy/begin-end 录制原语。
+3. Architecture 新增「Exam System」小节：编排流程 + v1 成绩含义 / 全局模板 / 0..1 分数口径 / 增量落盘 / 不破坏手动录制快路径等契约（依据 `docs/exam_system_design.md` v0.2 S1–S7）。
+4. Common Commands 增 `sim_exam_flow.py`；测试区增考试系统回归命令。
+
+依据：`docs/exam_system_design.md` v0.2、commit `bf8c908` 及其后审查修复链（`be3a7fc`→`a4fab22`）、`requirements.txt` 新增 `openpyxl`。
+
+### 验证方法
+
+- `py_compile` 全部考试模块 + `sim_exam_flow.py` → OK。
+- `pytest tests/test_exam_session.py tests/test_exam_roster.py -q` → **26 passed**。
+
 ## 2026-07-11: [fix] 考试系统审查第五轮（关窗停播报 / 纯#零值）
 
 ### 问题描述

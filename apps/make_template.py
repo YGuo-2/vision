@@ -11,9 +11,12 @@ from core.vision_pipeline import MediaPipePipeline, PipelineConfig
 from core.pose_features import (
     DEFAULT_VALID_CONF_THR,
     MEDIAPIPE_VALIDITY_POLICY,
-    find_active_range,
     motion_energy,
     normalize_pose_xy_v3,
+)
+from core.action_compare import (
+    TemplateAutoCropReviewRequired,
+    analyze_template_auto_crop,
 )
 from core.feature_layout import POSE33_V3
 from core.paths import models_dir, templates_dir
@@ -54,7 +57,10 @@ def main() -> None:
     if args.feature_layout == "body_core_v1" or args.backend == "yolo":
         _make_body_core_template(args)
         return
-    _make_pose33_v3_template(args)
+    try:
+        _make_pose33_v3_template(args)
+    except TemplateAutoCropReviewRequired as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 def _make_body_core_template(args) -> None:
@@ -118,7 +124,10 @@ def _make_pose33_v3_template(args) -> None:
     feat_arr = np.stack(feats, axis=0)  # (T, 22, 2)
     seq = feat_arr.reshape(feat_arr.shape[0], -1)  # (T, 44)
     energy = motion_energy(seq)
-    auto_start, auto_end = find_active_range(energy, pad=10)
+    auto_crop = analyze_template_auto_crop(energy, fps=fps)
+    auto_start, auto_end = auto_crop.start_frame, auto_crop.end_frame
+    if args.start is None and args.end is None and auto_crop.requires_review:
+        raise TemplateAutoCropReviewRequired(auto_crop)
     start = int(args.start) if args.start is not None else int(auto_start)
     end = int(args.end) if args.end is not None else int(auto_end)
     start = max(0, min(start, feat_arr.shape[0] - 1))
@@ -133,6 +142,8 @@ def _make_pose33_v3_template(args) -> None:
         "frame_count": n_frames,
         "start_frame": int(start),
         "end_frame": int(end),
+        "auto_start_frame": int(auto_start),
+        "auto_end_frame": int(auto_end),
         "pose_variant": args.pose,
         "feature_layout": POSE33_V3.name,
         "running_mode": "video",
@@ -144,6 +155,10 @@ def _make_pose33_v3_template(args) -> None:
         "confidence_kind": "visibility",
         "validity_policy": MEDIAPIPE_VALIDITY_POLICY,
         "valid_conf_thr": float(DEFAULT_VALID_CONF_THR),
+        "crop_selection": "manual" if args.start is not None or args.end is not None else "auto",
+        "selected_retained_ratio": float((end - start + 1) / feat_arr.shape[0]),
+        "template_scope": "single_action",
+        **auto_crop.to_meta(),
     }
 
     np.savez_compressed(

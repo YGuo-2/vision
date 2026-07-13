@@ -75,6 +75,8 @@ class ExamResultRow:
     error_code: str | None = None
     error_message: str | None = None
     warnings: list[str] = field(default_factory=list)
+    # 逐动作子分：动作名 → 0..1 相似度分（宽表导出为「<动作>分」列，×100 一位小数）
+    action_scores: dict[str, float] = field(default_factory=dict)
     called_at: str | None = None
     record_started_at: str | None = None
     record_ended_at: str | None = None
@@ -455,11 +457,25 @@ def _format_front_side_export(score: float | None) -> str | float:
     return round(float(score) * 100.0, 1)
 
 
-def row_to_export_values(row: ExamResultRow) -> list[Any]:
+def collect_action_names(rows: Iterable[ExamResultRow]) -> list[str]:
+    """按各行首次出现顺序收集所有动作名（去重保序）→ 宽表动作列顺序。"""
+    names: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        for name in row.action_scores:
+            if name not in seen:
+                seen.add(name)
+                names.append(name)
+    return names
+
+
+def row_to_export_values(
+    row: ExamResultRow, action_names: list[str] | None = None
+) -> list[Any]:
     err = ""
     if row.error_code or row.error_message:
         err = f"{row.error_code or ''}: {row.error_message or ''}".strip(": ")
-    return [
+    values: list[Any] = [
         row.candidate.order,
         row.candidate.student_id,
         row.candidate.name,
@@ -478,6 +494,10 @@ def row_to_export_values(row: ExamResultRow) -> list[Any]:
         row.attempt_index,
         "是" if row.is_scoring_row else "否",
     ]
+    # 动作分列追加表尾：×100 一位小数，缺失动作留空
+    for name in action_names or []:
+        values.append(_format_front_side_export(row.action_scores.get(name)))
+    return values
 
 
 def write_scorebook_xlsx(path: Path | str, rows: Iterable[ExamResultRow]) -> None:
@@ -486,12 +506,14 @@ def write_scorebook_xlsx(path: Path | str, rows: Iterable[ExamResultRow]) -> Non
 
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    rows = list(rows)
+    action_names = collect_action_names(rows)
     wb = Workbook()
     ws = wb.active
     ws.title = "成绩"
-    ws.append(list(EXPORT_HEADERS))
+    ws.append(list(EXPORT_HEADERS) + [f"{n}分" for n in action_names])
     for row in rows:
-        ws.append(row_to_export_values(row))
+        ws.append(row_to_export_values(row, action_names))
 
     # 临时文件用 ASCII 名，避免部分环境下中文文件名 + 前导点的怪异行为
     tmp = path.parent / f"_scorebook_{time.time_ns()}.tmp.xlsx"

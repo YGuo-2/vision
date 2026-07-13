@@ -9,7 +9,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from queue import Empty, Queue
-from tkinter import BooleanVar, Canvas, DoubleVar, IntVar, Scrollbar, StringVar, TclError, Text, Tk, Toplevel, filedialog, messagebox, ttk
+from tkinter import BooleanVar, Canvas, DoubleVar, IntVar, Listbox, Scrollbar, StringVar, TclError, Text, Tk, Toplevel, filedialog, messagebox, ttk
 
 import cv2
 import numpy as np
@@ -37,6 +37,13 @@ from apps.recording_postprocess import (
     DualRecordingPostProcessor,
     PostprocessUpdate,
     default_template_paths,
+    load_configured_template_lists,
+    load_configured_template_paths,
+    save_configured_template_lists,
+    save_configured_template_paths,
+    template_action_name,
+    try_load_heavy_template,
+    validate_auto_compare_template_lists,
     validate_template_pair,
 )
 
@@ -80,6 +87,18 @@ def _parse_rotate(text: str) -> int:
     return degrees if degrees in _VALID_ROTATIONS else 0
 
 
+def _degrees_to_rotate_label(degrees: int) -> str:
+    """度数 → 下拉文案；非法值回退 0°。"""
+    d = int(degrees) if int(degrees) in _VALID_ROTATIONS else 0
+    return f"{d}°"
+
+
+def _next_rotate_cw(degrees: int) -> int:
+    """顺时针旋转 90°（0→90→180→270→0）。"""
+    d = int(degrees) if int(degrees) in _VALID_ROTATIONS else 0
+    return (d + 90) % 360
+
+
 def _apply_rotation(frame: np.ndarray, degrees: int) -> np.ndarray:
     """按度数旋转帧；0（或非 90 倍数）时原样返回（不复制）。"""
     code = _ROTATE_CODES.get(degrees)
@@ -91,6 +110,17 @@ def _rotated_size(width: int, height: int, degrees: int) -> tuple[int, int]:
     if degrees in (90, 270):
         return height, width
     return width, height
+
+
+def _fit_frame_to_size(frame: np.ndarray, size: tuple[int, int]) -> np.ndarray:
+    """将帧缩放到 writer 固定尺寸；尺寸一致时原样返回。"""
+    tw, th = int(size[0]), int(size[1])
+    if tw <= 0 or th <= 0:
+        return frame
+    h, w = frame.shape[:2]
+    if w == tw and h == th:
+        return frame
+    return cv2.resize(frame, (tw, th), interpolation=cv2.INTER_LINEAR)
 
 
 def _choose_dual_preview_layout(
@@ -110,7 +140,7 @@ def _select_dual_recording_frames(
     *,
     record_skeleton: bool,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """双摄预览始终带标注；仅由会话级开关决定 writer 收原始帧还是标注帧。"""
+    """会话级全局骨架开关：开启时录像写标注帧；关闭时写原始帧（与预览一致）。"""
     if record_skeleton:
         return annotated, annotated2
     return frame, frame2
@@ -241,6 +271,7 @@ class CompareWindow:
         self.template_var = StringVar(value="")
         self.target_video_var = StringVar(value="")
 
+        # 动作分析为后端黑盒链路：统一 heavy，与主界面「预览姿态模型」分离。
         self.pose_var = StringVar(value="heavy")
         self.workers_var = IntVar(value=1)
         self.start_var = StringVar(value="")
@@ -339,9 +370,15 @@ class CompareWindow:
         adv = self._advanced_section.content
         adv_row1 = ttk.Frame(adv)
         adv_row1.pack(fill="x", pady=(4, 0))
-        ttk.Label(adv_row1, text="Pose 模型：").pack(side="left")
-        ttk.Combobox(adv_row1, textvariable=self.pose_var, values=["lite", "full", "heavy"],
-                     state="readonly", width=8).pack(side="left", padx=(6, 14))
+        ttk.Label(adv_row1, text="Pose 模型（黑盒固定 heavy）：").pack(side="left")
+        self._pose_combo = ttk.Combobox(
+            adv_row1,
+            textvariable=self.pose_var,
+            values=["heavy"],
+            state="disabled",
+            width=8,
+        )
+        self._pose_combo.pack(side="left", padx=(6, 14))
         ttk.Label(adv_row1, text="线程数：").pack(side="left")
         ttk.Spinbox(adv_row1, from_=1, to=16, textvariable=self.workers_var, width=6).pack(side="left", padx=(6, 0))
 
@@ -672,9 +709,10 @@ class CompareWindow:
 
         def _run() -> None:
             try:
+                # 模板生成属后端黑盒链路，固定 heavy。
                 tpl_path = create_template_from_video(
                     base,
-                    pose_variant=self.pose_var.get(),
+                    pose_variant="heavy",
                     start=start,
                     end=end,
                     workers=int(self.workers_var.get() or 1),
@@ -683,9 +721,24 @@ class CompareWindow:
                     stop_evt=self._stop_evt,
                 )
                 self._win.after(0, lambda: self.template_var.set(str(tpl_path)))
+                with np.load(tpl_path, allow_pickle=True) as template_data:
+                    template_meta = dict(template_data["meta"].item() or {})
+                start_frame = int(template_meta.get("start_frame") or 0)
+                end_frame = int(template_meta.get("end_frame") or start_frame)
+                fps = float(template_meta.get("fps") or 30.0)
+                kept_frames = max(1, end_frame - start_frame + 1)
+                retained = float(template_meta.get("selected_retained_ratio") or 0.0)
+                summary = (
+                    f"模板：{tpl_path}\n"
+                    f"区间：{start_frame}..{end_frame}（{kept_frames / fps:.2f}s，"
+                    f"保留 {retained * 100.0:.1f}%）"
+                )
                 self._set_status("模板生成完成")
-                self._set_result(f"模板：{tpl_path}")
-                payload = {"template_path": str(tpl_path)}
+                self._set_result(summary)
+                payload = {
+                    "template_path": str(tpl_path),
+                    "template_meta": template_meta,
+                }
                 self._set_raw(json.dumps(payload, ensure_ascii=False, indent=2))
             except Exception as e:
                 self._set_status("模板生成失败")
@@ -737,7 +790,9 @@ class CompareWindow:
                 preview_out = str(Path(tpl).with_suffix(".match.preview.avi"))
                 self.preview_out_var.set(preview_out)
 
-        pose_variant = self.pose_var.get().strip() or "full"
+        # 后端黑盒分析一律 heavy，与主界面预览档位无关。
+        pose_variant = "heavy"
+        self.pose_var.set("heavy")
         stance = self.stance_var.get().strip() or "left"
         view_hint = self.view_var.get().strip() or "auto"
         want_debug = do_tech and bool(self.debug_video_var.get())
@@ -1244,13 +1299,20 @@ class App:
         self.camera_choice_var_2 = StringVar(value=NO_SECOND_CAMERA)
         self.rotate_var = StringVar(value=ROTATE_CHOICES[0])
         self.rotate_var_2 = StringVar(value=ROTATE_CHOICES[0])
+        # 运行时旋转：主线程写、worker 每帧读；点击预览可顺时针 +90°，两路隔离。
+        self._runtime_rotate_lock = threading.Lock()
+        self._runtime_rotate = 0
+        self._runtime_rotate2 = 0
         self.source_hint_var = StringVar(value="当前输入源：未选择")
         self.pose_var = StringVar(value="full")
         self.workers_var = IntVar(value=default_workers())
         self.enable_hands_var = BooleanVar(value=True)
+        # 全局骨架开关（单/双摄共用）：默认关 → 预览与录制均不叠骨架、不跑姿态推理。
         self.record_skeleton_var = BooleanVar(value=False)
         # 双摄默认「录制+检测一条龙」；取消勾选后仅录制落盘/转码，不自动比对。
+        # 运行中可通过滑块快速切换；片段开录/提交时读取当前值。
         self.auto_compare_var = BooleanVar(value=True)
+        self.auto_compare_scale_var = DoubleVar(value=1.0)
         # 录制视频保存目录（默认上次持久化的目录，无记录时回退 outputs_dir()）。
         # 录制文件名仍由控制器按时间戳生成。
         _initial_record_dir = load_record_dir()
@@ -1470,13 +1532,7 @@ class App:
         self.camera_combo.bind("<<ComboboxSelected>>", self._on_camera_selected)
         self.refresh_btn = ttk.Button(cam_row, text="刷新", command=self._refresh_cameras)
         self.refresh_btn.pack(side="left", padx=(8, 0))
-        # 画面旋转：摄像头竖起来拍时手动转正。窄下拉附在摄像头选择行右侧。
-        ttk.Label(cam_row, text="旋转：").pack(side="left", padx=(8, 0))
-        self.rotate_combo = ttk.Combobox(
-            cam_row, textvariable=self.rotate_var, values=list(ROTATE_CHOICES),
-            state="readonly", width=5,
-        )
-        self.rotate_combo.pack(side="left")
+        # 画面旋转：不再用下拉；运行中点击对应预览窗顺时针 +90°（两路隔离）。
 
         # 1b) 第二摄像头（可选，双摄双面视图预览，issue #57）：默认「无」，不影响单摄路径。
         ttk.Label(primary, text="第二摄像头（侧面，可选）：").pack(anchor="w", pady=(10, 0))
@@ -1490,19 +1546,18 @@ class App:
         )
         self.camera_combo_2.pack(side="left", fill="x", expand=True)
         self.camera_combo_2.bind("<<ComboboxSelected>>", self._on_camera_2_selected)
-        ttk.Label(cam_row_2, text="旋转：").pack(side="left", padx=(8, 0))
-        self.rotate_combo_2 = ttk.Combobox(
-            cam_row_2, textvariable=self.rotate_var_2, values=list(ROTATE_CHOICES),
-            state="readonly", width=5,
-        )
-        self.rotate_combo_2.pack(side="left")
 
-        # 2) Model_Selector：人体姿态模型下拉（绑定 self.model_combo，供运行态联动引用）。
-        ttk.Label(primary, text="人体姿态模型：").pack(anchor="w", pady=(10, 0))
+        # 2) Model_Selector：仅驱动实时预览/骨架推理；黑盒评分固定 heavy。
+        ttk.Label(primary, text="预览姿态模型：").pack(anchor="w", pady=(10, 0))
         self.model_combo = ttk.Combobox(
             primary, textvariable=self.pose_var, values=["lite", "full", "heavy"], state="readonly"
         )
         self.model_combo.pack(fill="x", pady=(6, 0))
+        ttk.Label(
+            primary,
+            text="仅影响实时预览；录后黑盒评分固定 heavy",
+            foreground="#555555",
+        ).pack(anchor="w", pady=(2, 0))
 
         # 3) Start_Control：开始/停止（保留分离的 start/stop 双按钮与既有 _start/_stop 接线）。
         start_row = ttk.Frame(primary)
@@ -1528,18 +1583,50 @@ class App:
             record_group, text="结束录制", command=self._on_record_stop, state="disabled"
         )
         self.record_stop_btn.pack(fill="x", pady=(6, 0))
-        self.auto_compare_check = ttk.Checkbutton(
-            record_group,
-            text="录制后自动比对（检测一条龙）",
-            variable=self.auto_compare_var,
+        # 自动比对滑块：运行中可快速切换；片段开录/提交时读取。
+        auto_row = ttk.Frame(record_group)
+        auto_row.pack(fill="x", pady=(8, 0))
+        ttk.Label(auto_row, text="仅录制").pack(side="left")
+        self.auto_compare_scale = ttk.Scale(
+            auto_row,
+            from_=0,
+            to=1,
+            orient="horizontal",
+            length=96,
+            variable=self.auto_compare_scale_var,
+            command=self._on_auto_compare_scale,
         )
-        self.auto_compare_check.pack(anchor="w", pady=(8, 0))
+        self.auto_compare_scale.pack(side="left", padx=(6, 6), fill="x", expand=True)
+        # 兼容既有控件名（考试锁/运行态联动仍引用 auto_compare_check）。
+        self.auto_compare_check = self.auto_compare_scale
+        ttk.Label(auto_row, text="自动比对").pack(side="left")
+        self.auto_compare_hint_var = StringVar(value="录制后自动比对（检测一条龙）")
+        ttk.Label(record_group, textvariable=self.auto_compare_hint_var).pack(
+            anchor="w", pady=(2, 0)
+        )
+        # 一条龙/考试标准模板：正/侧各一个多模板池（正对正、侧对侧，每边可多个动作模板）。
+        # 至少一侧非空即可跑比对。旧单值 StringVar 保留（兼容既有引用），运行时以 Listbox 为准。
+        _front_list, _side_list = load_configured_template_lists()
+        self.front_template_var = StringVar(
+            value=str(_front_list[0]) if _front_list else ""
+        )
+        self.side_template_var = StringVar(
+            value=str(_side_list[0]) if _side_list else ""
+        )
+        self.template_status_var = StringVar(value="")
+        self._build_template_pool_ui(record_group, _front_list, _side_list)
+        self._sync_template_status()
         self.record_skeleton_check = ttk.Checkbutton(
             record_group,
-            text="双摄录像写入骨架（开启后不自动比对）",
+            text="开启骨架（预览与录制；双摄开启后不自动比对）",
             variable=self.record_skeleton_var,
         )
         self.record_skeleton_check.pack(anchor="w", pady=(4, 0))
+        self._sync_auto_compare_hint()
+        try:
+            self.auto_compare_var.trace_add("write", self._on_auto_compare_var_write)
+        except Exception:
+            pass
 
         # 录制视频保存目录选择行：默认 outputs_dir()，可改到任意目录。
         ttk.Label(record_group, text="保存目录：").pack(anchor="w", pady=(8, 0))
@@ -1622,17 +1709,19 @@ class App:
         right.rowconfigure(1, weight=0)
         right.columnconfigure(1, weight=0)
 
-        self.preview = ttk.Label(right)
+        self.preview = ttk.Label(right, cursor="hand2")
         self.preview.grid(row=0, column=0, sticky="nsew")
         self.preview.bind("<Configure>", self._on_preview_configure)
+        self.preview.bind("<Button-1>", self._on_preview_click_rotate)
 
         # 第二路预览（双摄像头双面视图，issue #58）：默认隐藏，仅 source2 选中真实摄像头时显示。
         self._preview_right = right
         self._dual_preview_visible = False
         self._dual_preview_layout = "stacked"
-        self.preview2 = ttk.Label(right)
+        self.preview2 = ttk.Label(right, cursor="hand2")
         self.preview2.grid(row=1, column=0, sticky="nsew")
         self.preview2.bind("<Configure>", self._on_preview2_configure)
+        self.preview2.bind("<Button-1>", self._on_preview2_click_rotate)
         self._set_dual_preview_visible(False)
 
     def _on_preview_configure(self, event) -> None:
@@ -1642,6 +1731,292 @@ class App:
     def _on_preview2_configure(self, event) -> None:
         """第二路预览 Label 尺寸变化（主线程），与 _on_preview_configure 同构。"""
         self._preview_wh2 = (event.width, event.height)
+
+    def _get_runtime_rotate(self, which: str = "primary") -> int:
+        lock = getattr(self, "_runtime_rotate_lock", None)
+        if lock is None:
+            if which == "secondary":
+                return int(getattr(self, "_runtime_rotate2", 0))
+            return int(getattr(self, "_runtime_rotate", 0))
+        with lock:
+            if which == "secondary":
+                return int(getattr(self, "_runtime_rotate2", 0))
+            return int(getattr(self, "_runtime_rotate", 0))
+
+    def _set_runtime_rotate(
+        self,
+        degrees: int,
+        *,
+        which: str = "primary",
+        sync_combo: bool = True,
+        announce: bool = True,
+    ) -> int:
+        """设置一路运行时旋转（0/90/180/270），可选同步内部角度缓存与状态提示。"""
+        d = int(degrees) if int(degrees) in _VALID_ROTATIONS else 0
+        lock = getattr(self, "_runtime_rotate_lock", None)
+        if lock is None:
+            if which == "secondary":
+                self._runtime_rotate2 = d
+            else:
+                self._runtime_rotate = d
+        else:
+            with lock:
+                if which == "secondary":
+                    self._runtime_rotate2 = d
+                else:
+                    self._runtime_rotate = d
+        if sync_combo:
+            # 无下拉控件；仍同步内部 StringVar，供 _collect_state / 考试 ROI 读数。
+            label = _degrees_to_rotate_label(d)
+            try:
+                if which == "secondary" and hasattr(self, "rotate_var_2"):
+                    if self.rotate_var_2.get() != label:
+                        self.rotate_var_2.set(label)
+                elif which != "secondary" and hasattr(self, "rotate_var"):
+                    if self.rotate_var.get() != label:
+                        self.rotate_var.set(label)
+            except Exception:
+                pass
+        if announce:
+            side = "侧摄" if which == "secondary" else "主摄"
+            msg = f"{side}旋转 → {d}°（点击预览可继续顺时针 90°）"
+            if which != "secondary" and bool(getattr(self, "_exam_active", False)):
+                msg += "；考试 ROI 可能失效，请重新标定"
+            try:
+                self.status_var.set(msg)
+            except Exception:
+                pass
+        return d
+
+    def _bump_runtime_rotate_cw(self, which: str = "primary") -> int:
+        cur = self._get_runtime_rotate(which)
+        return self._set_runtime_rotate(_next_rotate_cw(cur), which=which)
+
+    def _on_preview_click_rotate(self, _event=None) -> None:
+        self._bump_runtime_rotate_cw("primary")
+
+    def _on_preview2_click_rotate(self, _event=None) -> None:
+        if not bool(getattr(self, "_dual_preview_visible", False)):
+            return
+        self._bump_runtime_rotate_cw("secondary")
+
+    def _current_template_paths(self) -> tuple[Path, Path]:
+        """主线程读取 UI 填入的正/侧模板路径；空串回落默认 fixed 路径。"""
+        front_default, side_default = default_template_paths()
+        try:
+            front_raw = (
+                str(self.front_template_var.get()).strip()
+                if hasattr(self, "front_template_var")
+                else ""
+            )
+        except Exception:
+            front_raw = ""
+        try:
+            side_raw = (
+                str(self.side_template_var.get()).strip()
+                if hasattr(self, "side_template_var")
+                else ""
+            )
+        except Exception:
+            side_raw = ""
+        front = Path(front_raw) if front_raw else front_default
+        side = Path(side_raw) if side_raw else side_default
+        return front, side
+
+    def _build_template_pool_ui(
+        self, parent, front_list: list[Path], side_list: list[Path]
+    ) -> None:
+        """正/侧两个模板池 Listbox + 添加/移除按钮。动作名 = 文件 stem。"""
+        for view, label, seed in (
+            ("front", "正面模板池", front_list),
+            ("side", "侧面模板池", side_list),
+        ):
+            frame = ttk.Frame(parent)
+            frame.pack(fill="x", pady=(6, 0))
+            head = ttk.Frame(frame)
+            head.pack(fill="x")
+            ttk.Label(head, text=label).pack(side="left")
+            ttk.Button(
+                head, text="添加…", width=6,
+                command=lambda v=view: self._add_pool_templates(v),
+            ).pack(side="right")
+            ttk.Button(
+                head, text="移除选中", width=8,
+                command=lambda v=view: self._remove_pool_selected(v),
+            ).pack(side="right", padx=(0, 4))
+            lb = Listbox(frame, height=4, selectmode="extended", exportselection=False)
+            lb.pack(fill="x", pady=(2, 0))
+            for p in seed:
+                lb.insert("end", str(p))
+            setattr(self, f"_{view}_template_listbox", lb)
+        self.template_status_var = getattr(self, "template_status_var", StringVar(value=""))
+        ttk.Label(
+            parent,
+            textvariable=self.template_status_var,
+            wraplength=320,
+            foreground="#555",
+        ).pack(anchor="w", pady=(2, 0))
+
+    def _pool_listbox(self, view: str):
+        return getattr(self, f"_{view}_template_listbox", None)
+
+    def _pool_paths(self, view: str) -> list[Path]:
+        lb = self._pool_listbox(view)
+        if lb is None:
+            return []
+        return [Path(str(lb.get(i)).strip()) for i in range(lb.size()) if str(lb.get(i)).strip()]
+
+    def _current_template_lists(self) -> tuple[list[Path], list[Path]]:
+        """主线程读取正/侧模板池（正对正、侧对侧）。"""
+        return self._pool_paths("front"), self._pool_paths("side")
+
+    def _add_pool_templates(self, view: str) -> None:
+        lb = self._pool_listbox(view)
+        if lb is None:
+            return
+        paths = filedialog.askopenfilenames(
+            title="添加正面模板" if view == "front" else "添加侧面模板",
+            filetypes=[("模板文件", "*.npz"), ("所有文件", "*.*")],
+        )
+        if not paths:
+            return
+        existing = {str(p) for p in self._pool_paths(view)}
+        rejected: list[str] = []
+        for path in paths:
+            usable = try_load_heavy_template(path)
+            if usable is None:
+                rejected.append(Path(path).name)
+                continue
+            if str(usable) in existing:
+                continue
+            lb.insert("end", str(usable))
+            existing.add(str(usable))
+        self._persist_template_pools()
+        self._sync_template_status()
+        if rejected:
+            messagebox.showerror(
+                "部分模板无效",
+                "以下文件不是可用的 heavy + pose33_v3 模板，已跳过：\n"
+                + "\n".join(rejected)
+                + "\n请用 make_template.py --pose heavy 生成后再添加。",
+                parent=self.root,
+            )
+
+    def _remove_pool_selected(self, view: str) -> None:
+        lb = self._pool_listbox(view)
+        if lb is None:
+            return
+        for i in reversed(lb.curselection()):
+            lb.delete(i)
+        self._persist_template_pools()
+        self._sync_template_status()
+
+    def _persist_template_pools(self) -> None:
+        front, side = self._current_template_lists()
+        # 同步旧单值 StringVar（兼容既有引用），运行时以池为准
+        try:
+            self.front_template_var.set(str(front[0]) if front else "")
+            self.side_template_var.set(str(side[0]) if side else "")
+        except Exception:
+            pass
+        try:
+            save_configured_template_lists(front_list=front, side_list=side)
+        except Exception:
+            pass
+
+    def _sync_template_status(self) -> None:
+        var = getattr(self, "template_status_var", None)
+        if var is None:
+            return
+        front, side = self._current_template_lists()
+        fn = len(front)
+        sn = len(side)
+        if fn and sn:
+            text = f"模板池：正面 {fn} 个 · 侧面 {sn} 个（正对正、侧对侧，逐动作出分）"
+        elif fn:
+            text = f"模板池：正面 {fn} 个 · 侧面 0 个（仅比对正面；两侧都空才报错）"
+        elif sn:
+            text = f"模板池：正面 0 个 · 侧面 {sn} 个（仅比对侧面；两侧都空才报错）"
+        else:
+            text = "模板池：正/侧均为空 — 开启自动比对将失败"
+        try:
+            var.set(text)
+        except Exception:
+            pass
+
+    def _sync_auto_compare_hint(self) -> None:
+        on = bool(self.auto_compare_var.get()) if hasattr(self, "auto_compare_var") else True
+        hint = (
+            "录制后自动比对（检测一条龙）"
+            if on
+            else "仅录制落盘，不自动比对"
+        )
+        var = getattr(self, "auto_compare_hint_var", None)
+        if var is not None:
+            try:
+                var.set(hint)
+            except Exception:
+                pass
+
+    def _on_auto_compare_scale(self, value) -> None:
+        try:
+            on = float(value) >= 0.5
+        except (TypeError, ValueError):
+            on = True
+        # 吸附到两端
+        try:
+            self.auto_compare_scale_var.set(1.0 if on else 0.0)
+        except Exception:
+            pass
+        if hasattr(self, "auto_compare_var"):
+            try:
+                if bool(self.auto_compare_var.get()) != on:
+                    self.auto_compare_var.set(on)
+            except Exception:
+                pass
+        self._dual_auto_compare = bool(on)
+        self._sync_auto_compare_hint()
+
+    def _on_auto_compare_var_write(self, *_args) -> None:
+        on = bool(self.auto_compare_var.get())
+        try:
+            target = 1.0 if on else 0.0
+            if abs(float(self.auto_compare_scale_var.get()) - target) > 1e-6:
+                self.auto_compare_scale_var.set(target)
+        except Exception:
+            pass
+        self._dual_auto_compare = on
+        self._sync_auto_compare_hint()
+
+    def _current_auto_compare(self, *, prefer_ui: bool = False) -> bool:
+        """片段级自动比对开关。
+
+        - 考试中强制 True。
+        - 默认读主线程维护的 ``_dual_auto_compare`` 缓存（worker 可安全读取）。
+        - ``prefer_ui=True`` 时（仅主线程）从滑块/BooleanVar 刷新缓存。
+        """
+        if bool(getattr(self, "_exam_active", False)) or getattr(
+            self, "_exam_pending_row", None
+        ) is not None:
+            return True
+        if prefer_ui and hasattr(self, "auto_compare_var"):
+            try:
+                on = bool(self.auto_compare_var.get())
+                self._dual_auto_compare = on
+                return on
+            except Exception:
+                pass
+        return bool(getattr(self, "_dual_auto_compare", True))
+
+    def _write_rec_frame(self, rec, frame) -> None:
+        """写录制帧；若运行中旋转导致尺寸与 writer 不一致则 resize 适配。"""
+        try:
+            size = getattr(rec, "session_size", None)
+            if size is not None and hasattr(frame, "shape"):
+                frame = _fit_frame_to_size(frame, size)
+        except Exception:
+            pass
+        rec.write_frame(frame)
 
     def _set_dual_preview_visible(self, visible: bool) -> None:
         """显示/隐藏第二预览，并同步清理不再使用的 grid 轨道。"""
@@ -1947,7 +2322,10 @@ class App:
         next_base_dir = getattr(self, "_record_base_dir", outputs_dir())
         if record_dir_var is not None:
             base = record_dir_var.get().strip()
-            next_base_dir = Path(base) if base else outputs_dir()
+            # 空串多为 Tk 读取时序异常，非"用户要默认目录"。保持上次已缓存的目录，
+            # 不回退 outputs_dir()，避免下方 save_record_dir 把持久化路径覆盖成默认。
+            if base:
+                next_base_dir = Path(base)
 
         new_dual_segment_id: str | None = None
         with self._record_pair_lock:
@@ -2004,9 +2382,12 @@ class App:
                 return False
 
         if new_dual_segment_id is not None:
-            auto_compare = bool(getattr(self, "_dual_auto_compare", True))
-            if exam_row is not None:
-                auto_compare = True
+            auto_compare = (
+                True
+                if exam_row is not None
+                else App._current_auto_compare(self, prefer_ui=True)
+            )
+            self._dual_auto_compare = bool(auto_compare)
             status_text = (
                 "自动比对：录制中" if auto_compare else "仅录制：录制中"
             )
@@ -2087,9 +2468,12 @@ class App:
 
     def _exam_primary_rotate(self) -> int:
         try:
-            return _parse_rotate(self.rotate_var.get())
+            return int(self._get_runtime_rotate("primary"))
         except Exception:
-            return 0
+            try:
+                return _parse_rotate(self.rotate_var.get())
+            except Exception:
+                return 0
 
     def _exam_set_roi(self, roi: tuple[float, float, float, float]) -> None:
         with self._exam_lock:
@@ -2125,11 +2509,14 @@ class App:
                     w.configure(state="disabled")
                 else:
                     # 恢复由会话态控制
-                    if name == "record_skeleton_check" or name == "auto_compare_check":
+                    if name == "record_skeleton_check":
                         if not getattr(self, "_worker", None) or (
                             self._worker is not None and not self._worker.is_alive()
                         ):
                             w.configure(state="normal")
+                    elif name == "auto_compare_check":
+                        # 自动比对滑块：非考试时始终可调；考试锁定期间禁用。
+                        w.configure(state="normal")
                     elif name == "record_btn":
                         if getattr(self, "_dual_recording_ready", False) or (
                             self._worker is not None and self._worker.is_alive()
@@ -2141,6 +2528,9 @@ class App:
             try:
                 self.record_skeleton_var.set(False)
                 self.auto_compare_var.set(True)
+                self.auto_compare_scale_var.set(1.0)
+                self._dual_auto_compare = True
+                self._sync_auto_compare_hint()
             except Exception:
                 pass
 
@@ -2160,16 +2550,17 @@ class App:
         if skeleton_on:
             return (
                 False,
-                "考试模式不支持「录制骨架」会话（占用检测会被跳过）。"
-                "请取消骨架录制后重新「开始」双摄，再开考。",
+                "考试模式不支持「开启骨架」会话（占用检测会被跳过）。"
+                "请取消骨架后重新「开始」双摄，再开考。",
             )
-        front_t, side_t = default_template_paths()
+        # 多模板池：正对正、侧对侧，至少一侧非空且模板可用（heavy+pose33_v3）即可开考。
+        front_list, side_list = self._current_template_lists()
         try:
-            validate_template_pair(front_t, side_t)
+            validate_auto_compare_template_lists(front_list, side_list)
         except Exception as exc:
             return (
                 False,
-                f"正/侧 heavy 模板不可用（请先生成 templates/standard_front_heavy.npz 与 standard_side_heavy.npz）：{exc}",
+                f"正/侧模板池不可用（须至少一侧含可用 heavy+pose33_v3 模板，请在主界面录制区添加）：{exc}",
             )
         heavy = next(
             (m for m in model_manager.MEDIAPIPE_MODELS if m.key == "pose_heavy"),
@@ -2204,8 +2595,14 @@ class App:
     def _write_recording_pair(self, frame: np.ndarray, frame2: np.ndarray) -> None:
         """把双摄同一轮的两帧写入放在同一片段边界内。"""
         with self._record_pair_lock:
-            self._rec.write_frame(frame)
-            self._rec2.write_frame(frame2)
+            for rec, fr in ((self._rec, frame), (self._rec2, frame2)):
+                try:
+                    size = getattr(rec, "session_size", None)
+                    if size is not None and hasattr(fr, "shape"):
+                        fr = _fit_frame_to_size(fr, size)
+                except Exception:
+                    pass
+                rec.write_frame(fr)
 
     def _close_primary_recording_session(self) -> Path | None:
         """关闭主路会话，并保留 Tk 尚未消费的 writer 错误。"""
@@ -2253,7 +2650,9 @@ class App:
             dual_active = bool(getattr(self, "_dual_active", False))
             stamp = getattr(self, "_record_stamp", None)
             record_skeleton = bool(getattr(self, "_dual_record_skeleton", False))
-            auto_compare = bool(getattr(self, "_dual_auto_compare", True))
+            # worker 线程只读缓存（主线程滑块已写入 _dual_auto_compare）。
+            # 用 unbound 调用，兼容 lifecycle 测试里的 SimpleNamespace stub。
+            auto_compare = App._current_auto_compare(self, prefer_ui=False)
             segment_dir = None
             if dual_active and stamp:
                 base = Path(getattr(self, "_record_base_dir", outputs_dir()))
@@ -2325,7 +2724,9 @@ class App:
         if bool(getattr(self, "_exam_discard_next", False)):
             return
 
-        front_template, side_template = default_template_paths()
+        front_templates, side_templates = self._current_template_lists()
+        front_template = front_templates[0] if front_templates else Path("")
+        side_template = side_templates[0] if side_templates else Path("")
         front_source = finalization.front_path or (finalization.segment_dir / "front.mp4")
         side_source = finalization.side_path or (finalization.segment_dir / "side.mp4")
         front_frames = int(finalization.front_frames)
@@ -2353,6 +2754,8 @@ class App:
             side_frames=side_frames,
             front_template=front_template,
             side_template=side_template,
+            front_templates=tuple(front_templates),
+            side_templates=tuple(side_templates),
             record_skeleton=finalization.record_skeleton,
             auto_compare=auto_compare,
             front_error=finalization.front_error,
@@ -2567,11 +2970,16 @@ class App:
                     f"自动比对：{status_labels.get(update.status, update.status)}"
                 )
                 if update.status == "completed":
-                    front = float(update.front_score or 0.0) * 100.0
-                    side = float(update.side_score or 0.0) * 100.0
+                    def _pct(score: float | None) -> str:
+                        if score is None:
+                            return "-"
+                        return f"{float(score) * 100.0:.1f}%"
+
                     combined = int(update.combined_percent or 0)
                     self.compare_score_var.set(
-                        f"正面：{front:.1f}%　侧面：{side:.1f}%　综合：{combined}%"
+                        f"正面：{_pct(update.front_score)}　"
+                        f"侧面：{_pct(update.side_score)}　"
+                        f"综合：{combined}%"
                     )
                     self.compare_error_var.set("")
                 elif update.status in {"failed", "skipped", "cancelled"}:
@@ -2703,22 +3111,24 @@ class App:
             except Exception:
                 pass
 
-        # 旋转角度会在启动时写入不可变 UiState；运行中锁定，避免界面值变化却不生效。
-        for name in ("rotate_combo", "rotate_combo_2"):
-            rotate_combo = getattr(self, name, None)
-            if rotate_combo is not None:
-                try:
-                    rotate_combo.configure(state="disabled" if running else "readonly")
-                except Exception:
-                    pass
+        # 旋转：已去掉下拉，仅点击预览 +90°，无控件需联动。
 
-        for check_name in ("record_skeleton_check", "auto_compare_check"):
-            check = getattr(self, check_name, None)
-            if check is not None:
-                try:
-                    check.configure(state="disabled" if running else "normal")
-                except Exception:
-                    pass
+        # 骨架开关仍在会话启动时锁定；自动比对滑块运行中可快速切换。
+        skeleton_check = getattr(self, "record_skeleton_check", None)
+        if skeleton_check is not None:
+            try:
+                skeleton_check.configure(state="disabled" if running else "normal")
+            except Exception:
+                pass
+        auto_compare_check = getattr(self, "auto_compare_check", None)
+        if auto_compare_check is not None:
+            try:
+                exam_locked = bool(getattr(self, "_exam_manual_locked", False))
+                auto_compare_check.configure(
+                    state="disabled" if exam_locked else "normal"
+                )
+            except Exception:
+                pass
 
         # 刷新控件：复用既有联动（枚举中 / 运行中禁用）。
         self._set_refresh_enabled()
@@ -3237,9 +3647,10 @@ class App:
             ),
             rotate=_parse_rotate(self.rotate_var.get()) if hasattr(self, "rotate_var") else 0,
             rotate2=_parse_rotate(self.rotate_var_2.get()) if hasattr(self, "rotate_var_2") else 0,
+            # 全局骨架开关：单摄/双摄共用；默认关 → 预览与录制均不叠骨架。
             record_skeleton=(
                 bool(self.record_skeleton_var.get())
-                if source2 is not None and hasattr(self, "record_skeleton_var")
+                if hasattr(self, "record_skeleton_var")
                 else False
             ),
             auto_compare=(
@@ -3378,6 +3789,26 @@ class App:
         # （state.source2 非空 ⇒ _collect_state 已保证 source 是摄像头），显示/隐藏/
         # 分流三处用同一个信号，不再各自重复判断。
         self._set_dual_preview_visible(bool(state.source2))
+
+        # 启动时把 UI 旋转同步到 runtime，供点击预览/worker 共用。
+        App._set_runtime_rotate(
+            self,
+            int(getattr(state, "rotate", 0) or 0),
+            which="primary",
+            sync_combo=True,
+            announce=False,
+        )
+        App._set_runtime_rotate(
+            self,
+            int(getattr(state, "rotate2", 0) or 0),
+            which="secondary",
+            sync_combo=True,
+            announce=False,
+        )
+        try:
+            self._dual_auto_compare = App._current_auto_compare(self)
+        except Exception:
+            self._dual_auto_compare = bool(getattr(state, "auto_compare", True))
 
         self._worker = threading.Thread(target=self._worker_loop, args=(state,), daemon=True)
         self._worker.start()
@@ -3618,9 +4049,15 @@ class App:
             self._worker_loop_dual_camera(state)
             return
 
-        # 摄像头 + 多 worker：让「打开摄像头」与「各 worker 加载模型」并行发生，而不是
-        # 串行等摄像头开好再建模型（缩短点击→首帧）。open 下放到分支内部，故此处提前分流。
-        if (not is_file) and (not state.source2) and state.workers > 1:
+        # 摄像头 + 多 worker + 开启骨架：让「打开摄像头」与「各 worker 加载模型」并行发生，
+        # 而不是串行等摄像头开好再建模型（缩短点击→首帧）。骨架关闭时无需并行引擎，
+        # 落入下方串行裸帧路径。open 下放到分支内部，故此处提前分流。
+        if (
+            (not is_file)
+            and (not state.source2)
+            and state.workers > 1
+            and bool(state.record_skeleton)
+        ):
             self._worker_loop_parallel_camera(state)
             return
 
@@ -3650,36 +4087,45 @@ class App:
             return
 
         # 仅实时摄像头使用旋转选项；离线视频保持原尺寸和既有处理行为。
-        session_size = (w, h) if is_file else _rotated_size(w, h, state.rotate)
+        # 旋转读 runtime（点击预览可运行中改），不再冻结 UiState.rotate。
+        session_size = (
+            (w, h)
+            if is_file
+            else _rotated_size(w, h, self._get_runtime_rotate("primary"))
+        )
         self._rec.begin_session(fps=fps_for_ts, size=session_size)
+        # 全局骨架开关：摄像头默认关 → 预览/录制裸帧、跳过推理；离线文件仍始终跑 annotate。
+        draw_skeleton = bool(is_file or state.record_skeleton)
         matcher = (
             self._build_online_matcher()
-            if (not is_file and state.online_match_enabled)
+            if (draw_skeleton and (not is_file) and state.online_match_enabled)
             else None
         )
-        smoother = PreviewLandmarkSmoother() if not is_file else None
+        smoother = PreviewLandmarkSmoother() if (draw_skeleton and not is_file) else None
 
+        pipe = None
         try:
-            try:
-                models_dir_path = models_dir()
-                pipe = MediaPipePipeline(
-                    models_dir=models_dir_path,
-                    cfg=PipelineConfig(
-                        pose_variant=state.pose_variant,
-                        running_mode="video",
-                        enable_hands=state.enable_hands,
-                    ),
-                )
-            except Exception as e:
-                cap.release()
-                self._post_status(f"初始化失败：{e}")
-                self._post_done()
-                return
+            if draw_skeleton:
+                try:
+                    models_dir_path = models_dir()
+                    pipe = MediaPipePipeline(
+                        models_dir=models_dir_path,
+                        cfg=PipelineConfig(
+                            pose_variant=state.pose_variant,
+                            running_mode="video",
+                            enable_hands=state.enable_hands,
+                        ),
+                    )
+                except Exception as e:
+                    cap.release()
+                    self._post_status(f"初始化失败：{e}")
+                    self._post_done()
+                    return
 
             t0 = time.monotonic()
             frame_count = 0
             actual_size_checked = is_file
-            self._post_status("运行中…")
+            self._post_status("运行中…" if draw_skeleton else "运行中…（裸帧预览）")
             self._post_progress(0, total)
 
             while not self._stop_evt.is_set():
@@ -3691,27 +4137,33 @@ class App:
 
                 if not is_file:
                     # 在推理前转正，保证 landmarks、预览和录制使用同一坐标系。
-                    frame = _apply_rotation(frame, state.rotate)
-                    if not actual_size_checked:
-                        self._rec.update_session_size(
-                            size=(int(frame.shape[1]), int(frame.shape[0]))
-                        )
-                        actual_size_checked = True
-
-                ts = pipe.next_timestamp_ms(is_file=is_file, fps_for_ts=fps_for_ts)
-                if is_file:
-                    # 文件 VIDEO 模式保留 annotate()，包括其内部 frame index 自增语义。
-                    annotated, actions = pipe.annotate(frame, timestamp_ms=ts)
-                else:
-                    pose_landmarks, hands = pipe.infer(frame, timestamp_ms=ts)
-                    self._feed_online_matcher(matcher, pose_landmarks, ts, frame_count)
-                    smoothed = smoother.feed(pose_landmarks, timestamp_ms=ts)
-                    annotated, actions = pipe.draw(
-                        frame,
-                        smoothed,
-                        hands,
-                        action_pose_landmarks=pose_landmarks,
+                    frame = _apply_rotation(
+                        frame, self._get_runtime_rotate("primary")
                     )
+                    self._rec.update_session_size(
+                        size=(int(frame.shape[1]), int(frame.shape[0]))
+                    )
+                    actual_size_checked = True
+
+                if draw_skeleton and pipe is not None:
+                    ts = pipe.next_timestamp_ms(is_file=is_file, fps_for_ts=fps_for_ts)
+                    if is_file:
+                        # 文件 VIDEO 模式保留 annotate()，包括其内部 frame index 自增语义。
+                        annotated, actions = pipe.annotate(frame, timestamp_ms=ts)
+                    else:
+                        pose_landmarks, hands = pipe.infer(frame, timestamp_ms=ts)
+                        self._feed_online_matcher(
+                            matcher, pose_landmarks, ts, frame_count
+                        )
+                        smoothed = smoother.feed(pose_landmarks, timestamp_ms=ts)
+                        annotated, actions = pipe.draw(
+                            frame,
+                            smoothed,
+                            hands,
+                            action_pose_landmarks=pose_landmarks,
+                        )
+                else:
+                    annotated, actions = frame.copy(), []
 
                 frame_count += 1
                 if is_file and total > 0 and (frame_count % 5 == 0 or frame_count == total):
@@ -3738,7 +4190,7 @@ class App:
                     cv2.LINE_AA,
                 )
 
-                self._rec.write_frame(annotated)
+                self._write_rec_frame(self._rec, annotated)
 
                 if actions:
                     actions_text = ", ".join(ACTION_LABELS_ZH.get(a, a) for a in actions)
@@ -3754,6 +4206,11 @@ class App:
             self._post_done()
         finally:
             # 覆盖正常结束 / 停止 / 异常：释放 writer 并复位录制状态。
+            if pipe is not None:
+                try:
+                    pipe.close()
+                except Exception:
+                    pass
             if matcher is not None:
                 matcher.close()
             self._transcode_async(self._close_primary_recording_session())
@@ -3784,8 +4241,12 @@ class App:
         occupancy_pipe = None
 
         def post_raw_pair(pair) -> bool:
-            frame = _apply_rotation(pair[0].frame, state.rotate)
-            frame2 = _apply_rotation(pair[1].frame, state.rotate2)
+            frame = _apply_rotation(
+                pair[0].frame, self._get_runtime_rotate("primary")
+            )
+            frame2 = _apply_rotation(
+                pair[1].frame, self._get_runtime_rotate("secondary")
+            )
             return self._post_dual_frame_pair(
                 frame,
                 "-",
@@ -3816,12 +4277,28 @@ class App:
                 raise CameraWarmupStopped("camera warmup was stopped")
 
             size = (
-                int(_apply_rotation(pair[0].frame, state.rotate).shape[1]),
-                int(_apply_rotation(pair[0].frame, state.rotate).shape[0]),
+                int(
+                    _apply_rotation(
+                        pair[0].frame, self._get_runtime_rotate("primary")
+                    ).shape[1]
+                ),
+                int(
+                    _apply_rotation(
+                        pair[0].frame, self._get_runtime_rotate("primary")
+                    ).shape[0]
+                ),
             )
             size2 = (
-                int(_apply_rotation(pair[1].frame, state.rotate2).shape[1]),
-                int(_apply_rotation(pair[1].frame, state.rotate2).shape[0]),
+                int(
+                    _apply_rotation(
+                        pair[1].frame, self._get_runtime_rotate("secondary")
+                    ).shape[1]
+                ),
+                int(
+                    _apply_rotation(
+                        pair[1].frame, self._get_runtime_rotate("secondary")
+                    ).shape[0]
+                ),
             )
             self._post_dual_preview_layout(_choose_dual_preview_layout(size, size2))
             if not state.record_skeleton:
@@ -3905,15 +4382,17 @@ class App:
             with self._record_pair_lock:
                 self._dual_active = True
                 self._dual_record_skeleton = bool(state.record_skeleton)
-                self._dual_auto_compare = bool(
-                    getattr(state, "auto_compare", True)
-                )
+                self._dual_auto_compare = self._current_auto_compare()
                 recording_pair_started = True
                 self._rec.begin_session(
-                    fps=30.0, size=_rotated_size(w, h, state.rotate)
+                    fps=30.0,
+                    size=_rotated_size(w, h, self._get_runtime_rotate("primary")),
                 )
                 self._rec2.begin_session(
-                    fps=30.0, size=_rotated_size(w2, h2, state.rotate2)
+                    fps=30.0,
+                    size=_rotated_size(
+                        w2, h2, self._get_runtime_rotate("secondary")
+                    ),
                 )
             self._set_dual_startup_outcome(generation, "running")
             self._emit_dual_startup_metrics(generation)
@@ -3921,7 +4400,7 @@ class App:
 
             phase = "runtime"
             t0 = time.monotonic()
-            actual_layout_checked = False
+            last_layout: str | None = None
             self._post_status("运行中…（双摄像头）")
             self._post_progress(0, 0)
 
@@ -3932,18 +4411,22 @@ class App:
                     self._stop_evt.set()
                     break
 
-                frame = _apply_rotation(frame, state.rotate)
-                frame2 = _apply_rotation(frame2, state.rotate2)
-                if not actual_layout_checked:
-                    actual_size = (int(frame.shape[1]), int(frame.shape[0]))
-                    actual_size2 = (int(frame2.shape[1]), int(frame2.shape[0]))
-                    with self._record_pair_lock:
-                        self._rec.update_session_size(size=actual_size)
-                        self._rec2.update_session_size(size=actual_size2)
-                    self._post_dual_preview_layout(
-                        _choose_dual_preview_layout(actual_size, actual_size2)
-                    )
-                    actual_layout_checked = True
+                frame = _apply_rotation(
+                    frame, self._get_runtime_rotate("primary")
+                )
+                frame2 = _apply_rotation(
+                    frame2, self._get_runtime_rotate("secondary")
+                )
+                actual_size = (int(frame.shape[1]), int(frame.shape[0]))
+                actual_size2 = (int(frame2.shape[1]), int(frame2.shape[0]))
+                with self._record_pair_lock:
+                    # writer 未建时可随旋转更新；已建则写盘路径 resize。
+                    self._rec.update_session_size(size=actual_size)
+                    self._rec2.update_session_size(size=actual_size2)
+                layout = _choose_dual_preview_layout(actual_size, actual_size2)
+                if layout != last_layout:
+                    self._post_dual_preview_layout(layout)
+                    last_layout = layout
 
                 if state.record_skeleton:
                     ts = pipe.next_timestamp_ms(is_file=False, fps_for_ts=30.0)
@@ -4185,7 +4668,7 @@ class App:
                     annotated, actions = pending.pop(next_idx)
                     written += 1
 
-                    self._rec.write_frame(annotated)
+                    self._write_rec_frame(self._rec, annotated)
 
                     if total > 0 and (written % 5 == 0 or written == total):
                         self._post_progress(written, total)
@@ -4292,7 +4775,9 @@ class App:
             fps_for_ts = 30.0
             w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 1280)
             h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 720)
-            session_size = _rotated_size(w, h, state.rotate)
+            session_size = _rotated_size(
+                w, h, self._get_runtime_rotate("primary")
+            )
             self._rec.begin_session(fps=fps_for_ts, size=session_size)
 
             capture_t0 = time.monotonic()
@@ -4300,18 +4785,17 @@ class App:
             submitted_timestamps: dict[int, int] = {}
 
             def reader() -> None:
-                actual_size_checked = False
                 try:
                     while not self._stop_evt.is_set():
                         ok, frame = cap.read()
                         if not ok:
                             break
-                        frame = _apply_rotation(frame, state.rotate)
-                        if not actual_size_checked:
-                            self._rec.update_session_size(
-                                size=(int(frame.shape[1]), int(frame.shape[0]))
-                            )
-                            actual_size_checked = True
+                        frame = _apply_rotation(
+                            frame, self._get_runtime_rotate("primary")
+                        )
+                        self._rec.update_session_size(
+                            size=(int(frame.shape[1]), int(frame.shape[0]))
+                        )
                         timestamp_ms = int((time.monotonic() - capture_t0) * 1000.0)
                         submitted_index = engine.submit(frame)
                         if submitted_index is not None:
@@ -4380,7 +4864,7 @@ class App:
                     cv2.LINE_AA,
                 )
 
-                self._rec.write_frame(annotated)
+                self._write_rec_frame(self._rec, annotated)
 
                 if actions:
                     actions_text = ", ".join(ACTION_LABELS_ZH.get(a, a) for a in actions)

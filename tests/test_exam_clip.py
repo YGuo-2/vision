@@ -21,11 +21,41 @@ def test_align_frame_counts_min() -> None:
 
 def test_estimate_action_range_fallback_time() -> None:
     start, end, warnings = estimate_action_range(
-        90, fps=30.0, energy=None, trim_head_s=0.5, trim_tail_s=0.8
+        90, fps=30.0, energy=None, smart_crop=True, trim_head_s=0.5, trim_tail_s=0.8
     )
     assert start == 15  # 0.5*30
     assert end == 90 - 24  # 0.8*30
     assert end > start
+
+
+def test_exam_default_no_energy_keeps_full_tail() -> None:
+    # 考试默认（smart_crop=False）：无 energy → 不裁尾，只固定掐头
+    start, end, _ = estimate_action_range(90, fps=30.0, energy=None)
+    assert start == 15  # 0.5*30 掐头
+    assert end == 90  # 尾部不按时间掐
+
+
+def test_exam_default_tail_scan_drops_trailing_quiet() -> None:
+    # 尾部 2s 空场（能量低）应被回扫切掉，中段动作保留
+    fps = 30.0
+    n = 300  # 10s
+    rng = np.random.default_rng(0)
+    energy = np.full(n - 1, 0.001, dtype=np.float32)
+    # 1.5s~5s 动作，能量有起伏（真实动作非恒定），末尾 ~5s 空场
+    energy[45:150] = 0.3 + 0.2 * rng.random(105).astype(np.float32)
+    start, end, _ = estimate_action_range(n, fps=fps, energy=energy)
+    assert start == 15
+    # 末动作 idx ~149 → +2 +0.3s(9) ≈ 160；尾部 ~140 帧空场被切
+    assert 155 <= end <= 170
+
+
+def test_exam_default_force_finish_keeps_last_action() -> None:
+    # force_finish：尾部仍是动作（无空场）→ 回扫停在末帧附近，不吞末动作
+    fps = 30.0
+    n = 200
+    energy = np.full(n - 1, 0.5, dtype=np.float32)  # 全程动作
+    _, end, _ = estimate_action_range(n, fps=fps, energy=energy)
+    assert end >= n - int(round(0.3 * fps)) - 2  # 末动作不被吞
 
 
 def test_estimate_action_range_from_motion_features() -> None:

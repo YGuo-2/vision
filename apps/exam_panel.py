@@ -35,6 +35,12 @@ def apply_postprocess_update_to_scorebook(
     if row is None:
         return None
     if update.status == "completed":
+        # 逐动作子分：{name: 0..1}（同名后者覆盖前者，正常不重名）
+        action_scores = {
+            str(d.get("name")): float(d.get("score") or 0.0)
+            for d in getattr(update, "action_scores", ()) or ()
+            if d.get("name")
+        }
         scorebook.update_row(
             row,
             status="completed",
@@ -42,6 +48,7 @@ def apply_postprocess_update_to_scorebook(
             side_score=float(update.side_score or 0.0),
             combined_percent=int(update.combined_percent or 0),
             combined_score=float(update.combined_percent or 0) / 100.0,
+            action_scores=action_scores,
             error_code=None,
             error_message=None,
         )
@@ -202,8 +209,9 @@ class ExamPanel:
         self.tree.pack(fill="both", expand=True, pady=(10, 0))
 
         note = (
-            "说明：v1 仅输出黑盒动作相似度分（无规则扣分）。"
-            "占用判定用 primary 旋转后 ROI。须先双摄「开始」并备好 heavy 正/侧模板。"
+            "说明：v1 输出各动作黑盒相似度子分 + 综合分（无规则扣分）。"
+            "正对正池、侧对侧池，每边可填多个动作模板。"
+            "占用判定用 primary 旋转后 ROI。须先双摄「开始」并至少备好一侧 heavy 模板。"
         )
         ttk.Label(f, text=note, wraplength=480, foreground="#444").pack(
             anchor="w", pady=(8, 0)
