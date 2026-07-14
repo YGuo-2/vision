@@ -156,6 +156,21 @@ def _dual_preview_stub(*, generation: int = 1, record_skeleton: bool = False):
     app.status_var = _Var("就绪")
     app._photo = None
     app._photo2 = None
+    app._runtime_rotate_lock = threading.Lock()
+    app._runtime_rotate = 0
+    app._runtime_rotate2 = 0
+    app._dual_auto_compare = True
+    app._exam_active = False
+    app._exam_pending_row = None
+    app._exam_lock = threading.Lock()
+    app._exam_occupancy_armed = False
+    app._exam_roi = (0.1, 0.1, 0.9, 0.9)
+    app._exam_occupancy_stride = 3
+    app._exam_occupancy_queue = None
+    app._current_auto_compare = lambda prefer_ui=False: True
+    app._get_runtime_rotate = lambda which="primary": (
+        app._runtime_rotate if which == "primary" else app._runtime_rotate2
+    )
     app._drain_recording_compare_updates = lambda: None
     app._drain_dual_preview_layout = lambda: None
     app._drain_camera_enum_results = lambda: None
@@ -209,6 +224,56 @@ def test_parse_rotate_accepts_only_supported_choices(text, expected):
 @pytest.mark.parametrize("text", ["", "45°", "360°", "-90°", "abc", None])
 def test_parse_rotate_rejects_unsupported_values(text):
     assert app_ui._parse_rotate(text) == 0
+
+
+@pytest.mark.parametrize(
+    ("degrees", "expected"),
+    [(0, 90), (90, 180), (180, 270), (270, 0), (45, 90)],
+)
+def test_next_rotate_cw_steps_quarter_turns(degrees, expected):
+    assert app_ui._next_rotate_cw(degrees) == expected
+
+
+@pytest.mark.parametrize(
+    ("degrees", "expected"),
+    [(0, "0°"), (90, "90°"), (180, "180°"), (270, "270°"), (15, "0°")],
+)
+def test_degrees_to_rotate_label(degrees, expected):
+    assert app_ui._degrees_to_rotate_label(degrees) == expected
+
+
+def test_fit_frame_to_size_resizes_when_mismatch():
+    frame = np.zeros((4, 6, 3), dtype=np.uint8)
+    fitted = app_ui._fit_frame_to_size(frame, (3, 2))
+    assert fitted.shape[:2] == (2, 3)
+
+
+def test_fit_frame_to_size_returns_same_when_match():
+    frame = np.zeros((4, 6, 3), dtype=np.uint8)
+    assert app_ui._fit_frame_to_size(frame, (6, 4)) is frame
+
+
+def test_runtime_rotate_primary_and_secondary_are_isolated():
+    app = object.__new__(app_ui.App)
+    app._runtime_rotate_lock = __import__("threading").Lock()
+    app._runtime_rotate = 0
+    app._runtime_rotate2 = 0
+    app.rotate_var = _Var("0°")
+    app.rotate_var_2 = _Var("0°")
+    app.status_var = _Var("")
+    app._exam_active = False
+
+    app_ui.App._set_runtime_rotate(app, 90, which="primary", announce=False)
+    app_ui.App._set_runtime_rotate(app, 180, which="secondary", announce=False)
+
+    assert app_ui.App._get_runtime_rotate(app, "primary") == 90
+    assert app_ui.App._get_runtime_rotate(app, "secondary") == 180
+    assert app.rotate_var.get() == "90°"
+    assert app.rotate_var_2.get() == "180°"
+
+    app_ui.App._bump_runtime_rotate_cw(app, "primary")
+    assert app_ui.App._get_runtime_rotate(app, "primary") == 180
+    assert app_ui.App._get_runtime_rotate(app, "secondary") == 180
 
 
 @pytest.mark.parametrize(
@@ -384,11 +449,24 @@ def test_app_initializes_auto_compare_toggle_enabled():
     )
 
 
-def test_collect_state_ignores_record_skeleton_for_single_camera():
+def test_collect_state_captures_record_skeleton_for_single_camera():
+    """全局骨架开关：单摄同样透传勾选状态（默认关，勾选后预览/录制均带骨架）。"""
     app = _app_stub(
         source="0",
         second_label=app_ui.NO_SECOND_CAMERA,
         record_skeleton=True,
+    )
+
+    state = app_ui.App._collect_state(app)
+
+    assert state.record_skeleton is True
+
+
+def test_collect_state_defaults_record_skeleton_off_for_single_camera():
+    app = _app_stub(
+        source="0",
+        second_label=app_ui.NO_SECOND_CAMERA,
+        record_skeleton=False,
     )
 
     state = app_ui.App._collect_state(app)
@@ -427,7 +505,8 @@ def test_collect_state_ignores_second_camera_for_video_file_source():
 
     assert state.source == "input.mp4"
     assert state.source2 is None
-    assert state.record_skeleton is False
+    # 全局骨架开关与双摄无关；文件源同样透传勾选状态（离线路径仍始终 annotate）。
+    assert state.record_skeleton is True
 
 
 def test_collect_state_rejects_same_camera_for_both_views():
@@ -697,6 +776,7 @@ def test_dual_startup_metrics_expose_all_six_timing_points_once(capsys):
 
 
 def test_dual_camera_worker_creates_two_mediapipe_pipelines():
+    """双摄主预览两路 + 考试占用 lite 一路，源码中共 3 处 MediaPipePipeline 构造点。"""
     worker = _function_node("_worker_loop_dual_camera")
 
     calls = [
@@ -709,21 +789,28 @@ def test_dual_camera_worker_creates_two_mediapipe_pipelines():
         )
     ]
 
-    assert len(calls) == 2
+    assert len(calls) == 3
 
 
 @pytest.mark.parametrize(
     ("worker_name", "expected_args"),
     [
-        ("_worker_loop", [("frame", "state.rotate")]),
+        ("_worker_loop", [("frame", "self._get_runtime_rotate('primary')")]),
         (
             "_worker_loop_dual_camera",
-            [("frame", "state.rotate"), ("frame2", "state.rotate2")],
+            [
+                ("frame", "self._get_runtime_rotate('primary')"),
+                ("frame2", "self._get_runtime_rotate('secondary')"),
+            ],
         ),
-        ("_worker_loop_parallel_camera", [("frame", "state.rotate")]),
+        (
+            "_worker_loop_parallel_camera",
+            [("frame", "self._get_runtime_rotate('primary')")],
+        ),
     ],
 )
 def test_all_camera_capture_paths_apply_rotation(worker_name, expected_args):
+    """运行时旋转：worker 每帧从 runtime 读角度，不再冻结 UiState.rotate。"""
     calls = _named_calls(_function_node(worker_name), "_apply_rotation")
     actual_args = sorted(
         (ast.unparse(call.args[0]), ast.unparse(call.args[1])) for call in calls
@@ -731,8 +818,14 @@ def test_all_camera_capture_paths_apply_rotation(worker_name, expected_args):
 
     if worker_name == "_worker_loop_dual_camera":
         assert set(expected_args).issubset(set(actual_args))
-        assert ("pair[0].frame", "state.rotate") in actual_args
-        assert ("pair[1].frame", "state.rotate2") in actual_args
+        assert (
+            "pair[0].frame",
+            "self._get_runtime_rotate('primary')",
+        ) in actual_args
+        assert (
+            "pair[1].frame",
+            "self._get_runtime_rotate('secondary')",
+        ) in actual_args
     else:
         assert actual_args == sorted(expected_args)
 
@@ -856,10 +949,23 @@ def _exercise_dual_runtime_failure(monkeypatch, *, record_skeleton: bool, phase:
             self.release_calls += 1
 
     class _RecordingSession:
-        def begin_session(self, **_kwargs) -> None:
-            pass
+        def __init__(self) -> None:
+            self._size = (6, 4)
 
-        def update_session_size(self, **_kwargs) -> None:
+        def begin_session(self, **kwargs) -> None:
+            if "size" in kwargs:
+                self._size = kwargs["size"]
+
+        def update_session_size(self, **kwargs) -> None:
+            if "size" in kwargs:
+                self._size = kwargs["size"]
+            return True
+
+        @property
+        def session_size(self):
+            return self._size
+
+        def write_frame(self, _frame) -> None:
             pass
 
     class _Pipeline:
@@ -931,6 +1037,17 @@ def _exercise_dual_runtime_failure(monkeypatch, *, record_skeleton: bool, phase:
         _rec=_RecordingSession(),
         _rec2=_RecordingSession(),
         _stop_evt=threading.Event(),
+        _runtime_rotate_lock=threading.Lock(),
+        _runtime_rotate=0,
+        _runtime_rotate2=0,
+        _dual_auto_compare=True,
+        _exam_active=False,
+        _exam_pending_row=None,
+        _get_runtime_rotate=lambda which="primary": 0,
+        _current_auto_compare=lambda prefer_ui=False: True,
+        _write_rec_frame=lambda rec, frame: rec.write_frame(frame)
+        if hasattr(rec, "write_frame")
+        else None,
         _post_dual_preview_layout=lambda _layout: None,
         _post_status=lambda _status: None,
         _post_progress=lambda _current, _total: None,
@@ -997,16 +1114,17 @@ def test_pipeline_loading_keeps_raw_pair_flowing_without_writes(monkeypatch):
     done_calls: list[int] = []
 
     class _Capture:
-        def __init__(self) -> None:
+        def __init__(self, *, read_limit: int = 1) -> None:
             self.read_calls = 0
             self.release_calls = 0
+            self.read_limit = read_limit
 
         def get(self, prop) -> int:
             return 6 if prop == app_ui.cv2.CAP_PROP_FRAME_WIDTH else 4
 
         def read(self):
             self.read_calls += 1
-            if self.read_calls == 1:
+            if self.read_calls <= self.read_limit:
                 return True, frame.copy()
             return False, None
 
@@ -1041,10 +1159,23 @@ def test_pipeline_loading_keeps_raw_pair_flowing_without_writes(monkeypatch):
             pass
 
     class _RecordingSession:
-        def begin_session(self, **_kwargs) -> None:
-            pass
+        def __init__(self) -> None:
+            self._size = (6, 4)
 
-        def update_session_size(self, **_kwargs) -> None:
+        def begin_session(self, **kwargs) -> None:
+            if "size" in kwargs:
+                self._size = kwargs["size"]
+
+        def update_session_size(self, **kwargs) -> None:
+            if "size" in kwargs:
+                self._size = kwargs["size"]
+            return True
+
+        @property
+        def session_size(self):
+            return self._size
+
+        def write_frame(self, _frame) -> None:
             pass
 
     class _Pipeline:
@@ -1081,6 +1212,15 @@ def test_pipeline_loading_keeps_raw_pair_flowing_without_writes(monkeypatch):
     app._post_dual_preview_layout = lambda _layout: None
     app._post_status = lambda _status: None
     app._post_progress = lambda _done, _total: None
+    app._set_dual_startup_outcome = lambda *_args, **_kwargs: None
+    app._emit_dual_startup_metrics = lambda *_args, **_kwargs: None
+    app._mark_dual_startup_metric = lambda *_args, **_kwargs: None
+    # 必须真正推进 stage：annotated 帧只在 current stage 匹配时被 _post_dual_frame_pair 接受。
+    app._advance_dual_preview_stage = (
+        lambda generation, stage: app_ui.App._advance_dual_preview_stage(
+            app, generation, stage
+        )
+    )
     app._post_dual_recording_ready = ready_calls.append
     app._write_recording_pair = lambda *_frames: write_calls.append(True)
     app._close_recording_pair = lambda: None
@@ -1088,6 +1228,7 @@ def test_pipeline_loading_keeps_raw_pair_flowing_without_writes(monkeypatch):
         kwargs.get("session_generation")
     )
     app._finish_dual_startup_metrics = lambda *_args, **_kwargs: None
+    app._prepare_preview_rgb = lambda frame, _size: frame
     original_post = app_ui.App._post_dual_frame_pair
 
     def post_pair(*args, **kwargs):
@@ -1097,6 +1238,9 @@ def test_pipeline_loading_keeps_raw_pair_flowing_without_writes(monkeypatch):
         return accepted
 
     app._post_dual_frame_pair = post_pair
+    # 放行 pipeline 后主循环需持续可读，否则 claim 后立即 EOF 来不及出 annotated 帧。
+    front_cap.read_limit = 8
+    side_cap.read_limit = 8
     state = SimpleNamespace(
         source="0",
         source2="1",
@@ -1131,7 +1275,7 @@ def test_pipeline_loading_keeps_raw_pair_flowing_without_writes(monkeypatch):
     assert len(pipelines) == 2
     assert [pipeline.close_calls for pipeline in pipelines] == [1, 1]
     assert ready_calls == [1]
-    assert write_calls == [True]
+    assert write_calls
     assert "annotated" in accepted_stages
     first_annotated = accepted_stages.index("annotated")
     assert "raw" not in accepted_stages[first_annotated + 1 :]
@@ -1266,12 +1410,21 @@ def test_camera_paths_correct_writer_size_from_rotated_first_frame(worker_name, 
 @pytest.mark.parametrize(
     ("worker_name", "expected_args"),
     [
-        ("_worker_loop", [("w", "h", "state.rotate")]),
+        (
+            "_worker_loop",
+            [("w", "h", "self._get_runtime_rotate('primary')")],
+        ),
         (
             "_worker_loop_dual_camera",
-            [("w", "h", "state.rotate"), ("w2", "h2", "state.rotate2")],
+            [
+                ("w", "h", "self._get_runtime_rotate('primary')"),
+                ("w2", "h2", "self._get_runtime_rotate('secondary')"),
+            ],
         ),
-        ("_worker_loop_parallel_camera", [("w", "h", "state.rotate")]),
+        (
+            "_worker_loop_parallel_camera",
+            [("w", "h", "self._get_runtime_rotate('primary')")],
+        ),
     ],
 )
 def test_camera_writer_sizes_follow_rotation_before_session_start(worker_name, expected_args):

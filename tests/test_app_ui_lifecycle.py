@@ -154,6 +154,30 @@ def _enumeration_app():
     return app, applied
 
 
+def _camera_selection_app(
+    *, preferred_primary: int | None, preferred_secondary: int | None
+):
+    app = object.__new__(app_ui.App)
+    app._preferred_primary_camera_index = preferred_primary
+    app._preferred_secondary_camera_index = preferred_secondary
+    app._camera_entries = []
+    app._enum_busy = threading.Event()
+    app._enum_busy.set()
+    app._worker = None
+    app._closing = False
+    app.camera_combo = _Widget()
+    app.camera_combo_2 = _Widget()
+    app.camera_choice_var = _Var("")
+    app.camera_choice_var_2 = _Var(app_ui.NO_SECOND_CAMERA)
+    app.source_var = _Var("")
+    app.source_hint_var = _Var("")
+    app.status_var = _Var("")
+    app._source_state = app_ui.InputSourceState()
+    app._sync_camera_warmup = lambda: None
+    app._set_refresh_enabled = lambda: None
+    return app
+
+
 def test_preopen_late_generation_cannot_replace_newer_cap(monkeypatch):
     app = _preopen_app()
     pending = []
@@ -307,6 +331,73 @@ def test_camera_enumeration_result_is_applied_only_from_main_thread_queue(monkey
     assert applied == []
     app_ui.App._drain_camera_enum_results(app)
     assert applied == [(entries, True)]
+
+
+def test_camera_enumeration_restores_persisted_primary_and_secondary() -> None:
+    app = _camera_selection_app(preferred_primary=2, preferred_secondary=1)
+    entries = [
+        app_ui.CameraEntry(label="摄像头 0", index=0),
+        app_ui.CameraEntry(label="摄像头 1: Side", index=1),
+        app_ui.CameraEntry(label="摄像头 2: Front", index=2),
+    ]
+
+    app_ui.App._apply_camera_entries(app, entries, True)
+
+    assert app.camera_choice_var.get() == "摄像头 2: Front"
+    assert app.camera_choice_var_2.get() == "摄像头 1: Side"
+    assert app.source_var.get() == "2"
+
+
+def test_missing_preferred_cameras_fallback_without_forgetting_then_restore() -> None:
+    app = _camera_selection_app(preferred_primary=2, preferred_secondary=1)
+
+    app_ui.App._apply_camera_entries(
+        app,
+        [app_ui.CameraEntry(label="摄像头 0", index=0)],
+        True,
+    )
+
+    assert app.camera_choice_var.get() == "摄像头 0"
+    assert app.camera_choice_var_2.get() == app_ui.NO_SECOND_CAMERA
+    assert app._preferred_primary_camera_index == 2
+    assert app._preferred_secondary_camera_index == 1
+
+    app_ui.App._apply_camera_entries(
+        app,
+        [
+            app_ui.CameraEntry(label="摄像头 0", index=0),
+            app_ui.CameraEntry(label="摄像头 1", index=1),
+            app_ui.CameraEntry(label="摄像头 2", index=2),
+        ],
+        True,
+    )
+
+    assert app.camera_choice_var.get() == "摄像头 2"
+    assert app.camera_choice_var_2.get() == "摄像头 1"
+
+
+def test_explicit_camera_selections_are_persisted(monkeypatch) -> None:
+    app = _camera_selection_app(preferred_primary=0, preferred_secondary=None)
+    app._camera_entries = [
+        app_ui.CameraEntry(label="摄像头 0", index=0),
+        app_ui.CameraEntry(label="摄像头 1", index=1),
+    ]
+    saved: list[tuple[int | None, int | None]] = []
+    monkeypatch.setattr(
+        app_ui,
+        "save_camera_selection",
+        lambda primary, secondary: saved.append((primary, secondary)),
+    )
+
+    app.camera_choice_var.set("摄像头 1")
+    app_ui.App._on_camera_selected(app)
+    app.camera_choice_var_2.set("摄像头 0")
+    app_ui.App._on_camera_2_selected(app)
+    app.camera_choice_var_2.set(app_ui.NO_SECOND_CAMERA)
+    app_ui.App._on_camera_2_selected(app)
+
+    assert saved == [(1, None), (1, 0), (1, None)]
+    assert app.source_var.get() == "1"
 
 
 def test_camera_enumeration_return_after_close_does_not_touch_tk(monkeypatch):

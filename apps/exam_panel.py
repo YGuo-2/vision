@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from core.exam_announcer import ExamAnnouncer
 from core.exam_roster import (
+    ExamCandidate,
     ExamResultRow,
     ExamScorebook,
     RosterError,
@@ -25,6 +26,9 @@ from core.presence_gate import PresenceGate, PresenceGateConfig
 
 if TYPE_CHECKING:
     from apps.app_ui import App
+
+
+_EXAM_ROSTER_PATH_PREF_KEY = "exam_roster_path"
 
 
 def apply_postprocess_update_to_scorebook(
@@ -80,7 +84,13 @@ def save_exam_prefs(updates: dict[str, Any]) -> None:
     path = _prefs_path()
     data = load_exam_prefs()
     data.update(updates)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
 
 
 class ExamPanel:
@@ -128,6 +138,7 @@ class ExamPanel:
         self.roi_var = StringVar(value=self._roi_text())
 
         self._build()
+        self._restore_roster(prefs)
         self._tick_id = self.win.after(100, self._panel_tick)
         app._exam_panel = self  # type: ignore[attr-defined]
 
@@ -237,6 +248,13 @@ class ExamPanel:
         messagebox.showinfo("完成", f"已保存：{path}", parent=self.win)
 
     def _import_roster(self) -> None:
+        if self.session.phase not in {"idle", "ready", "completed", "aborted"}:
+            messagebox.showerror(
+                "无法导入",
+                f"当前阶段 {self.session.phase}，请先中止当前考试再更换名单",
+                parent=self.win,
+            )
+            return
         path = filedialog.askopenfilename(
             parent=self.win,
             title="导入考试名单",
@@ -245,24 +263,70 @@ class ExamPanel:
         if not path:
             return
         try:
-            cands = import_roster_xlsx(path)
+            count = self._load_roster_path(Path(path), persist=True)
         except RosterError as exc:
             messagebox.showerror("导入失败", exc.message, parent=self.win)
             return
+        self.status_var.set(f"已导入 {count} 人")
+
+    def _replace_roster(self, candidates: list[ExamCandidate]) -> None:
         # 新名单 = 新场次：关闭旧台账，避免与旧成绩混用
         if self.scorebook is not None:
+            old_scorebook = self.scorebook
             try:
-                self.scorebook.flush()
-                self.scorebook.close()
+                old_scorebook.flush()
             except Exception:
                 pass
+            has_processing = any(
+                row.status == "processing" for row in old_scorebook.rows
+            )
+            if has_processing:
+                try:
+                    self.app._register_exam_scorebook_sink(old_scorebook)  # type: ignore[attr-defined]
+                except Exception:
+                    sinks = getattr(self.app, "_exam_scorebook_sinks", None)
+                    if sinks is None:
+                        self.app._exam_scorebook_sinks = [old_scorebook]  # type: ignore[attr-defined]
+                    elif old_scorebook not in sinks:
+                        sinks.append(old_scorebook)
+            else:
+                try:
+                    old_scorebook.close()
+                except Exception:
+                    pass
             self.scorebook = None
-            self.run_dir = None
-        self.session.load_roster(cands)
+        self.run_dir = None
+        for method_name, args in (
+            ("_exam_arm_occupancy", (False,)),
+            ("_exam_set_active", (False,)),
+            ("_exam_lock_manual_record", (False,)),
+        ):
+            try:
+                getattr(self.app, method_name)(*args)
+            except Exception:
+                pass
+        self.session.load_roster(candidates)
         self._row_by_id = {r.row_id: r for r in self.session.rows}
         self._refresh_tree()
         self.phase_var.set(f"阶段：{self.session.phase}")
-        self.status_var.set(f"已导入 {len(cands)} 人")
+
+    def _load_roster_path(self, path: Path, *, persist: bool) -> int:
+        candidates = import_roster_xlsx(path)
+        self._replace_roster(candidates)
+        if persist:
+            save_exam_prefs({_EXAM_ROSTER_PATH_PREF_KEY: str(path.resolve())})
+        return len(candidates)
+
+    def _restore_roster(self, prefs: dict[str, Any]) -> None:
+        raw_path = str(prefs.get(_EXAM_ROSTER_PATH_PREF_KEY) or "").strip()
+        if not raw_path:
+            return
+        try:
+            count = self._load_roster_path(Path(raw_path), persist=False)
+        except RosterError as exc:
+            self.status_var.set(f"上次名单未能恢复：{exc.message}；请重新导入")
+            return
+        self.status_var.set(f"已恢复上次名单：{count} 人")
 
     def _save_roi(self) -> bool:
         try:
@@ -291,12 +355,28 @@ class ExamPanel:
         return True
 
     def _start_exam(self) -> None:
+        if not self.session.rows:
+            messagebox.showerror("无法开考", "请先导入名单", parent=self.win)
+            return
+        if self.session.phase != "ready":
+            if self.session.phase == "completed":
+                detail = "名单已全部完成，请先选择考生并点击重考"
+            elif self.session.phase == "aborted":
+                detail = "考试已中止，请先选择考生并点击重考"
+            else:
+                detail = f"当前阶段 {self.session.phase}，无法重复开始"
+            messagebox.showerror("无法开考", detail, parent=self.win)
+            return
+        if not any(row.status == "pending" for row in self.session.rows):
+            messagebox.showerror(
+                "无法开考",
+                "名单中没有待考考生，请先选择考生并点击重考",
+                parent=self.win,
+            )
+            return
         ok, msg = self.app._exam_preflight()  # type: ignore[attr-defined]
         if not ok:
             messagebox.showerror("无法开考", msg, parent=self.win)
-            return
-        if self.session.phase != "ready":
-            messagebox.showerror("无法开考", f"当前阶段 {self.session.phase}，请先导入名单", parent=self.win)
             return
         if not self._save_roi():
             return
@@ -338,25 +418,36 @@ class ExamPanel:
             messagebox.showinfo("重考", "请先在列表中选中一名考生", parent=self.win)
             return
         item = sel[0]
-        vals = self.tree.item(item, "values")
-        sid = str(vals[1])
-        cand = None
-        for r in self.session.rows:
-            if r.candidate.student_id == sid:
-                cand = r.candidate
-                break
-        if cand is None:
+        selected_row = self._row_by_id.get(str(item))
+        if selected_row is None:
+            vals = self.tree.item(item, "values")
+            sid = str(vals[1]) if len(vals) > 1 else ""
+            selected_row = next(
+                (
+                    row
+                    for row in self.session.rows
+                    if row.candidate.student_id == sid
+                ),
+                None,
+            )
+        if selected_row is None:
+            messagebox.showerror("重考", "选中的考生已失效，请重新选择", parent=self.win)
             return
+        cand = selected_row.candidate
         if self.scorebook is None:
             messagebox.showerror("重考", "请先开始一场考试或导入后开考", parent=self.win)
             return
         row = self.scorebook.append_retest(cand)
         self.session.rows = self.scorebook.rows
+        self.session.queue_retest_row(row)
         self._row_by_id[row.row_id] = row
-        if self.session.phase == "completed":
-            self.session.phase = "ready"
-            self.session.pointer = len(self.session.rows) - 1
         self._refresh_tree()
+        try:
+            self.tree.selection_set(row.row_id)
+            self.tree.focus(row.row_id)
+            self.tree.see(row.row_id)
+        except Exception:
+            pass
         self.status_var.set(f"已追加重考：{cand.name} 第{row.attempt_index}次（队尾）")
 
     def _export(self) -> None:
@@ -578,21 +669,28 @@ class ExamPanel:
         self.scorebook.bind_segment(row, segment_id=segment_id, segment_dir=segment_dir)
 
     def _refresh_tree(self) -> None:
-        for i in self.tree.get_children():
-            self.tree.delete(i)
+        existing = set(self.tree.get_children())
+        active: set[str] = set()
         for r in self.session.rows:
+            iid = r.row_id
+            active.add(iid)
             score = "" if r.combined_percent is None else str(r.combined_percent)
-            self.tree.insert(
-                "",
-                "end",
-                values=(
-                    r.candidate.order,
-                    r.candidate.student_id,
-                    r.candidate.name,
-                    r.status,
-                    score,
-                ),
+            values = (
+                r.candidate.order,
+                r.candidate.student_id,
+                r.candidate.name,
+                r.status,
+                score,
             )
+            if iid in existing:
+                self.tree.item(iid, values=values)
+                self.tree.move(iid, "", "end")
+            else:
+                self.tree.insert("", "end", iid=iid, values=values)
+            self._row_by_id[iid] = r
+        for stale in existing - active:
+            self.tree.delete(stale)
+            self._row_by_id.pop(str(stale), None)
         self.phase_var.set(f"阶段：{self.session.phase}")
 
     def _panel_tick(self) -> None:

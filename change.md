@@ -1,3 +1,30 @@
+## 2026-07-13: [fix] 持久化摄像头与考试名单，修复中止后重考无法启动
+
+### 问题描述
+
+1. Tkinter 主/次摄像头选择只存在内存中，重启应用后恢复默认；手动刷新时还会先把主摄下拉值覆盖为“正在检测摄像头…”，导致刷新结果必然回退第一项。
+2. 考试名单导入后只写入 `ExamSession.rows`，关闭考试面板或重启应用会重新得到空会话。
+3. 现场 `outputs/exam_20260713_045138/成绩汇总.xlsx` 已留下两条 `pending` 重考行，但主会话停止后阶段为 `aborted`；原逻辑仅处理 `completed -> ready`，所以点击重考虽已追加，随后仍无法开始。开考校验又把所有非 `ready` 状态误报为“请先导入名单”。
+4. 考试表格每次更新都会删除并重建全部行，后台占用/评分更新可能在“选择考生”和“点击重考”之间清掉选择。
+
+### 修改内容
+
+- **`core/paths.py` / `apps/app_ui.py`**：在 `user_prefs.json` 增加 `camera_selection`，按摄像头索引保存主/次选择；启动和刷新枚举时优先恢复偏好。设备暂时缺失只临时回退，不覆盖偏好，设备重新出现后自动选回；只有用户显式选择才写盘。刷新不再用状态文本覆盖主摄下拉值。
+- **`apps/exam_panel.py`**：成功导入后保存 `exam_roster_path`，面板创建时自动重新读取有效名单；源文件缺失或损坏时保持 `idle` 并显示“请重新导入”，不崩溃。开考提示区分“名单为空”“考试已中止”“名单已完成”等真实状态。
+- **名单替换安全**：考试处于叫号、等待、录制、收尾或暂停阶段时禁止更换名单；终态换名单时，仍有 `processing` 行的旧成绩簿先移交 App sink 接收晚到评分，无后台任务时才关闭，并统一解除旧场次 active/occupancy/manual-lock 状态。
+- **`core/exam_session.py` / `apps/exam_panel.py`**：新增统一的重考入队状态恢复；`completed` 重考从队尾新行开始，`aborted` 重考恢复 `ready` 但保留原指针，让剩余未考名单继续按序执行，重考仍按既有契约排队尾，避免跳过中间考生。
+- **`apps/exam_panel.py`**：Treeview 改用稳定 `row_id` 增量更新，不再删除重建全部行；后台刷新保留选择。重考成功后选中并滚动到新行，提供明确可见反馈。
+- **测试**：新增 `tests/test_user_prefs.py`、`tests/test_exam_panel.py`，并扩展 `tests/test_app_ui_lifecycle.py`、`tests/test_exam_session.py`，覆盖偏好合并/损坏降级、摄像头缺失后恢复、名单路径恢复、表格选择保持、`aborted -> retest -> ready -> start` 及不跳过剩余名单。
+
+### 验证方法
+
+- `pytest tests/test_exam_panel.py tests/test_exam_session.py tests/test_user_prefs.py -q` -> **passed**。
+- `pytest tests/test_app_controls.py tests/test_app_ui_dual_camera.py -q` -> **117 passed**（补齐录制 toggle / 双摄 worker 测试桩：`_sync_record_stop_enabled`、考试占用锁、runtime rotate、preview stage 推进）。
+- `pytest tests/test_app_ui_lifecycle.py -q -k "camera_enumeration_restores_persisted_primary_and_secondary or missing_preferred_cameras_fallback_without_forgetting_then_restore or explicit_camera_selections_are_persisted"` -> **3 passed**。
+- `python -m py_compile core/paths.py core/exam_session.py apps/exam_panel.py apps/app_ui.py` 通过。
+
+---
+
 ## 2026-07-13: [fix] 综合分改直接平均 + 低鞭腿去几何 + 低鞭腿夹角评分（试验后弃用）
 
 ### 问题描述

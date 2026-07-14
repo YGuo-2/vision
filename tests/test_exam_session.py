@@ -176,6 +176,32 @@ def test_retest_after_complete_does_not_reset_pointer_to_zero() -> None:
     assert any("名1" in (c.payload.get("text") or "") for c in cmds if c.kind == "ANNOUNCE")
 
 
+def test_retest_after_abort_resumes_remaining_queue_before_tail_retest() -> None:
+    """中止后补考应恢复 ready，但不能跳过原名单中仍 pending 的考生。"""
+    s = ExamSession(ExamSessionConfig(inter_student_gap_s=0.0, post_call_guard_s=0.0))
+    s.load_roster(_cands(2))
+    s.handle("start_exam", now=0.0)
+    s.handle("tick", now=0.0)
+    s.handle("enter_stable", now=1.0)
+    s.handle("abort_exam", now=2.0)
+    assert s.phase == "aborted"
+    assert s.rows[0].status == "skipped"
+    assert s.rows[1].status == "pending"
+
+    retest = s.append_retest_row(s.rows[0].candidate)
+
+    assert s.phase == "ready"
+    assert s.pointer == 0
+    assert retest.attempt_index == 2
+    assert s.rows[-1] is retest
+
+    cmds = s.handle("start_exam", now=3.0, run_id="resumed")
+    assert s.phase == "calling"
+    assert s.pointer == 1
+    assert s.current is s.rows[1]
+    assert any("名2" in (c.payload.get("text") or "") for c in cmds if c.kind == "ANNOUNCE")
+
+
 def test_complete_exports() -> None:
     s = ExamSession(ExamSessionConfig(inter_student_gap_s=0.0, post_call_guard_s=0.0))
     s.load_roster(_cands(1))

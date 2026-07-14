@@ -18,7 +18,14 @@ from PIL import Image, ImageTk
 from core.action_compare import compare_video_to_template, create_template_from_video
 from analysis.tech_eval import evaluate_video_assets, evaluate_video_detail, export_debug_video, to_jsonable
 from core.vision_pipeline import MediaPipePipeline, PipelineConfig, draw_pose_frame
-from core.paths import load_record_dir, models_dir, outputs_dir, save_record_dir
+from core.paths import (
+    load_camera_selection,
+    load_record_dir,
+    models_dir,
+    outputs_dir,
+    save_camera_selection,
+    save_record_dir,
+)
 from core import model_manager, online_matcher, paths, video_writer
 from core import pose_features as pf
 from core.parallel_pose_engine import ParallelPoseEngine, default_pipeline_factory
@@ -1294,6 +1301,10 @@ class App:
         # 控制区改为可滚动容器后，限制窗口最小尺寸，保证滚动条与预览区可用（需求 1.5/1.6）。
         self.root.minsize(800, 600)
 
+        (
+            self._preferred_primary_camera_index,
+            self._preferred_secondary_camera_index,
+        ) = load_camera_selection()
         self.source_var = StringVar(value="")
         self.camera_choice_var = StringVar(value="")
         self.camera_choice_var_2 = StringVar(value=NO_SECOND_CAMERA)
@@ -3209,7 +3220,6 @@ class App:
         self._enum_busy.set()
         self._set_refresh_enabled()
         self.camera_combo.configure(state="disabled")
-        self.camera_choice_var.set("正在检测摄像头…")
 
         def _run() -> None:
             ok = True
@@ -3274,9 +3284,14 @@ class App:
 
             labels = [e.label for e in entries]
             self.camera_combo.configure(values=labels, state="readonly")
-            # 保留已选摄像头（若仍在列表中），否则默认选第一项（需求 2.5）。
+            # 偏好设备暂时缺失时只做 UI 回退，不覆盖持久化值；设备恢复后可自动选回。
             current = self.camera_choice_var.get()
-            if current not in labels:
+            preferred = self._camera_label_for_index(
+                self._preferred_primary_camera_index
+            )
+            if preferred is not None:
+                current = preferred
+            elif current not in labels:
                 current = labels[0]
             self.camera_choice_var.set(current)
 
@@ -3284,7 +3299,12 @@ class App:
             labels_2 = [NO_SECOND_CAMERA] + labels
             self.camera_combo_2.configure(values=labels_2, state="readonly")
             current_2 = self.camera_choice_var_2.get()
-            if current_2 not in labels_2:
+            preferred_2 = self._camera_label_for_index(
+                self._preferred_secondary_camera_index
+            )
+            if preferred_2 is not None:
+                current_2 = preferred_2
+            elif current_2 not in labels_2:
                 current_2 = NO_SECOND_CAMERA
             self.camera_choice_var_2.set(current_2)
             # 两个选择都稳定后再统一同步预热，避免枚举刷新过程中先按旧的第二路选择
@@ -3301,6 +3321,20 @@ class App:
                 return e.index
         return None
 
+    def _camera_label_for_index(self, index: int | None) -> str | None:
+        if index is None:
+            return None
+        for entry in self._camera_entries:
+            if entry.index == index:
+                return entry.label
+        return None
+
+    def _persist_camera_selection(self) -> None:
+        save_camera_selection(
+            self._preferred_primary_camera_index,
+            self._preferred_secondary_camera_index,
+        )
+
     def _select_camera_by_label(self, label: str) -> None:
         """由显示文本反查编号并记录为摄像头输入源（需求 2.3、3.3）。
 
@@ -3315,9 +3349,21 @@ class App:
             self._sync_camera_warmup()
 
     def _on_camera_selected(self, event=None) -> None:
-        self._select_camera_by_label(self.camera_choice_var.get())
+        label = self.camera_choice_var.get()
+        index = self._camera_index_for_label(label)
+        if index is None:
+            return
+        self._preferred_primary_camera_index = index
+        self._select_camera_by_label(label)
+        self._persist_camera_selection()
 
     def _on_camera_2_selected(self, event=None) -> None:
+        label = self.camera_choice_var_2.get()
+        index = self._camera_index_for_label(label)
+        if label != NO_SECOND_CAMERA and index is None:
+            return
+        self._preferred_secondary_camera_index = index
+        self._persist_camera_selection()
         self._sync_camera_warmup()
 
     def _refresh_cameras(self) -> None:

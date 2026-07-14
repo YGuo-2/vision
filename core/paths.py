@@ -28,6 +28,10 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from typing import Any
+
+
+_CAMERA_SELECTION_PREF_KEY = "camera_selection"
 
 
 def repo_root() -> Path:
@@ -67,29 +71,65 @@ def _prefs_path() -> Path:
     return repo_root() / "user_prefs.json"
 
 
-def load_record_dir() -> Path:
-    """读取用户上次选择的录制保存目录；无记录或无效时回退 ``outputs_dir()``。"""
+def _load_user_prefs() -> dict[str, Any]:
     try:
         data = json.loads(_prefs_path().read_text(encoding="utf-8"))
-        saved = str(data.get("record_dir") or "")
-        if saved and Path(saved).is_dir():
-            return Path(saved)
+        return dict(data) if isinstance(data, dict) else {}
     except (OSError, ValueError):
+        return {}
+
+
+def _save_user_prefs(data: dict[str, Any]) -> None:
+    try:
+        _prefs_path().write_text(
+            json.dumps(data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except OSError:
         pass
+
+
+def _camera_index(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def load_camera_selection() -> tuple[int | None, int | None]:
+    """读取主/次摄像头索引；损坏或旧格式配置按未设置处理。"""
+    raw = _load_user_prefs().get(_CAMERA_SELECTION_PREF_KEY)
+    if not isinstance(raw, dict):
+        return None, None
+    return (
+        _camera_index(raw.get("primary_index")),
+        _camera_index(raw.get("secondary_index")),
+    )
+
+
+def save_camera_selection(
+    primary_index: int | None,
+    secondary_index: int | None,
+) -> None:
+    """持久化主/次摄像头索引并保留其他用户偏好。"""
+    data = _load_user_prefs()
+    data[_CAMERA_SELECTION_PREF_KEY] = {
+        "primary_index": _camera_index(primary_index),
+        "secondary_index": _camera_index(secondary_index),
+    }
+    _save_user_prefs(data)
+
+
+def load_record_dir() -> Path:
+    """读取用户上次选择的录制保存目录；无记录或无效时回退 ``outputs_dir()``。"""
+    data = _load_user_prefs()
+    saved = str(data.get("record_dir") or "")
+    if saved and Path(saved).is_dir():
+        return Path(saved)
     return outputs_dir()
 
 
 def save_record_dir(directory: Path | str) -> None:
     """持久化录制保存目录到 ``user_prefs.json``（尽力而为，失败静默）。"""
-    path = _prefs_path()
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            data = {}
-    except (OSError, ValueError):
-        data = {}
+    data = _load_user_prefs()
     data["record_dir"] = str(directory)
-    try:
-        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    except OSError:
-        pass
+    _save_user_prefs(data)

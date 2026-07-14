@@ -447,7 +447,24 @@ class ExamSession:
             attempt_index=next_attempt,
             is_scoring_row=True,
         )
-        self.rows.append(row)
-        if self.phase == "completed":
-            self.phase = "ready"
+        return self.queue_retest_row(row)
+
+    def queue_retest_row(self, row: ExamResultRow) -> ExamResultRow:
+        """登记补考行，并让已结束或中止的场次重新进入可开考状态。"""
+        if not any(existing.row_id == row.row_id for existing in self.rows):
+            self.rows.append(row)
+
+        previous_phase = self.phase
+        if previous_phase not in {"completed", "aborted"}:
+            return row
+
+        self.phase = "ready"
+        self.paused_from = None
+        self.call_guard_deadline = None
+        self.inter_gap_deadline = None
+        self.record_started_mono = None
+        self.locked = False
+        if previous_phase == "completed":
+            self.pointer = self.rows.index(row)
+        # aborted 可能仍有未考名单，保留 pointer，由 _first_pending_index 按原队列续考。
         return row

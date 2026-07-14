@@ -143,7 +143,12 @@ def _make_toggle_stub():
         _rec2=rec2,
         _record_pair_lock=threading.Lock(),
         _record_stamp=None,
+        _exam_manual_locked=False,
+        _dual_recording_ready=True,
+        _closing=False,
         record_btn=FakeWidget(text=RECORD_BTN_TEXT["idle"]),
+        _sync_record_stop_enabled=lambda _state: None,
+        _current_auto_compare=lambda prefer_ui=False: True,
     )
     return stub
 
@@ -247,8 +252,6 @@ def _make_controls_stub(worker_alive: bool = False):
     stub = types.SimpleNamespace(
         camera_combo=FakeWidget(state="readonly"),
         camera_combo_2=FakeWidget(state="readonly"),
-        rotate_combo=FakeWidget(state="readonly"),
-        rotate_combo_2=FakeWidget(state="readonly"),
         model_combo=FakeWidget(state="readonly"),
         record_skeleton_check=FakeWidget(state="normal"),
         auto_compare_check=FakeWidget(state="normal"),
@@ -277,12 +280,11 @@ def test_set_running_controls_when_running():
     # Camera_Selector 禁用（需求 2.5）。
     assert stub.camera_combo.cget("state") == "disabled"
     assert stub.camera_combo_2.cget("state") == "disabled"
-    assert stub.rotate_combo.cget("state") == "disabled"
-    assert stub.rotate_combo_2.cget("state") == "disabled"
     # Model_Selector 禁用（需求 3.5）。
     assert stub.model_combo.cget("state") == "disabled"
     assert stub.record_skeleton_check.cget("state") == "disabled"
-    assert stub.auto_compare_check.cget("state") == "disabled"
+    # 自动比对滑块运行中可快速切换（非考试锁定时）。
+    assert stub.auto_compare_check.cget("state") == "normal"
     # Record_Toggle 启用并置「开始录制」（需求 5.2）。
     assert stub.record_btn.cget("state") == "normal"
     assert stub.record_btn.cget("text") == RECORD_BTN_TEXT["idle"] == "开始录制"
@@ -343,8 +345,6 @@ def test_set_running_controls_when_not_running():
     # Camera_Selector 恢复 readonly（有可选列表时）。
     assert stub.camera_combo.cget("state") == "readonly"
     assert stub.camera_combo_2.cget("state") == "readonly"
-    assert stub.rotate_combo.cget("state") == "readonly"
-    assert stub.rotate_combo_2.cget("state") == "readonly"
     # Status_Area 显示「就绪」（需求 4.5）。
     assert stub.status_var.get() == "就绪"
     # 刷新控件：未运行启用。
