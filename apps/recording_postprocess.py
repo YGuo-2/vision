@@ -51,6 +51,27 @@ _KICK_KINDS = {
 # 踢腿动作子分 = 几何高度分 × w + DTW 相似度分 × (1-w)。校准旋钮。
 KICK_GEOM_WEIGHT = 0.5
 
+# DTW 分压缩映射（opt-in）：动作名（模板 stem）→ (下限, 上限)。
+# 实测某些动作 DTW 定位不可靠（如背后七颠：低位移提踵,归一化特征抹掉高度,
+# subsequence_dtw 开放边界退化匹配极短片段,虚高分与动作质量无关）。这类动作
+# 考察不严「是人就过」,把 DTW 分线性压到高分窄区间：人人及格偏上,但保留同一条
+# 视频恒定、可复现的微弱区分度(比固定分好、比随机数可复现且公平)。
+# 未登记动作不受影响(散打零回归)。
+_SCORE_SQUEEZE: dict[str, tuple[float, float]] = {
+    "背后七颠": (0.75, 0.90),  # DTW 不可靠,压到 [0.75,0.90] 人人过、弱区分、可复现
+}
+
+# 同一动作多视角（正面/侧面）按权重合并成一个动作子分（opt-in，八段锦用）。
+# key = 合并后动作名；value = {"front": 正面权重, "side": 侧面权重}（自动归一）。
+# 未登记的动作保持池级各自出分（散打行为不变：模板 stem 无 _正面/_侧面 后缀、不在表内）。
+# 触发条件：正池存在 "<key>_正面"、侧池存在 "<key>_侧面"，两者都在才合并。
+_VIEW_WEIGHTS: dict[str, dict[str, float]] = {
+    "两手攀足": {"side": 0.75, "front": 0.25},  # 实测正面看不清前俯深度,侧面为主
+    "攒拳怒目": {"side": 0.50, "front": 0.50},  # 正侧分接近,合并去重双计数
+}
+_VIEW_FRONT_SUFFIX = "_正面"
+_VIEW_SIDE_SUFFIX = "_侧面"
+
 
 def utc_timestamp() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
@@ -368,6 +389,61 @@ def validate_auto_compare_templates(
 def template_action_name(path: Path | str) -> str:
     """动作名 = 模板文件 stem（如 直拳.npz → "直拳"）。"""
     return Path(path).stem
+
+
+def merge_view_weighted_actions(action_details: list[dict]) -> list[dict]:
+    """把 ``_VIEW_WEIGHTS`` 登记的动作的正/侧子分按权重合并成单个动作子分。
+
+    - 仅当正面 ``<key>_正面`` 与侧面 ``<key>_侧面`` **都存在**时合并；缺一则原样保留
+      （不误合、不丢分）。
+    - 合并项 ``name`` = 无后缀的动作名（成绩表出一列）；``score`` = 归一权重加权和。
+    - 未登记动作与不成对的视角原样透传，保序（散打零影响：stem 无后缀/不在表内）。
+    """
+    by_name = {d.get("name"): d for d in action_details}
+    merged: list[dict] = []
+    consumed: set[int] = set()
+    for idx, d in enumerate(action_details):
+        if idx in consumed:
+            continue
+        name = str(d.get("name") or "")
+        base = None
+        if name.endswith(_VIEW_FRONT_SUFFIX):
+            base = name[: -len(_VIEW_FRONT_SUFFIX)]
+        elif name.endswith(_VIEW_SIDE_SUFFIX):
+            base = name[: -len(_VIEW_SIDE_SUFFIX)]
+        weights = _VIEW_WEIGHTS.get(base) if base else None
+        front_d = by_name.get(f"{base}{_VIEW_FRONT_SUFFIX}") if base else None
+        side_d = by_name.get(f"{base}{_VIEW_SIDE_SUFFIX}") if base else None
+        if weights is None or front_d is None or side_d is None:
+            merged.append(d)
+            continue
+        w_front = float(weights.get("front", 0.0))
+        w_side = float(weights.get("side", 0.0))
+        total = w_front + w_side
+        if total <= 0:
+            merged.append(d)
+            continue
+        w_front, w_side = w_front / total, w_side / total
+        score = w_front * float(front_d["score"]) + w_side * float(side_d["score"])
+        merged.append(
+            {
+                "name": base,
+                "view": "combined",
+                "score": float(score),
+                "front_score": float(front_d["score"]),
+                "side_score": float(side_d["score"]),
+                "view_weights": {"front": w_front, "side": w_side},
+                "front_start": int(front_d["start"]),
+                "front_end": int(front_d["end"]),
+                "side_start": int(side_d["start"]),
+                "side_end": int(side_d["end"]),
+            }
+        )
+        consumed.add(idx)
+        for j, o in enumerate(action_details):
+            if o is front_d or o is side_d:
+                consumed.add(j)
+    return merged
 
 
 def validate_auto_compare_template_lists(
@@ -789,6 +865,12 @@ class DualRecordingPostProcessor:
                     final = KICK_GEOM_WEIGHT * geom_score + (1.0 - KICK_GEOM_WEIGHT) * dtw_score
                 else:
                     final = dtw_score
+                # DTW 不可靠的动作（如背后七颠）：把分线性压到高分窄区间（人人过、
+                # 弱区分、可复现）。只对已登记动作生效,散打/其余八段锦不受影响。
+                squeeze = _SCORE_SQUEEZE.get(name)
+                if squeeze is not None:
+                    lo, hi = squeeze
+                    final = lo + (hi - lo) * float(np.clip(dtw_score, 0.0, 1.0))
                 details.append(
                     {
                         "name": name,
@@ -809,7 +891,10 @@ class DualRecordingPostProcessor:
         front_details, front_score = _run_pool(front_tpls, front_video, "front")
         side_details, side_score = _run_pool(side_tpls, side_video, "side")
 
-        action_scores = front_details + side_details
+        # 同动作多视角合并（_VIEW_WEIGHTS 登记的按权重合成一个子分；未登记原样透传）。
+        # front_score/side_score 仍为各池原始均值（供成绩表正/侧列），只影响 combined 与
+        # 逐动作 action_scores 列（避免正+侧双模板动作被双重计数）。
+        action_scores = merge_view_weighted_actions(front_details + side_details)
         # combined：所有动作子分直接平均（正侧模板各自出分,不再套池权重）。
         all_scores = [d["score"] for d in action_scores]
         combined = float(np.mean(all_scores)) if all_scores else 0.0
