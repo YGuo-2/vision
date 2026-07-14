@@ -15,8 +15,8 @@ import cv2
 import numpy as np
 from PIL import Image, ImageTk
 
-from core.action_compare import compare_video_to_template, create_template_from_video
-from analysis.tech_eval import evaluate_video_assets, evaluate_video_detail, export_debug_video, to_jsonable
+from core.action_compare import compare_video_to_templates, create_template_from_video
+from analysis.tech_eval import to_jsonable
 from core.vision_pipeline import MediaPipePipeline, PipelineConfig, draw_pose_frame
 from core.paths import (
     load_camera_selection,
@@ -268,14 +268,12 @@ class CollapsibleSection:
 class CompareWindow:
     def __init__(self, parent: Tk) -> None:
         self._win = Toplevel(parent)
-        self._win.title("动作分析（模板比对 + 直拳技术评估）")
+        self._win.title("动作分析（模板比对）")
         self._win.geometry("720x860")
         self._win.minsize(640, 720)
 
-        # Template mode: "existing" or "generate"
-        self.template_mode_var = StringVar(value="existing")
+        # 从视频生成模板用的基准视频路径。
         self.base_video_var = StringVar(value="")
-        self.template_var = StringVar(value="")
         self.target_video_var = StringVar(value="")
 
         # 动作分析为后端黑盒链路：统一 heavy，与主界面「预览姿态模型」分离。
@@ -284,24 +282,14 @@ class CompareWindow:
         self.start_var = StringVar(value="")
         self.end_var = StringVar(value="")
 
-        self.save_preview_var = BooleanVar(value=True)
-        self.preview_out_var = StringVar(value="")
-
-        # 模板比对开关：勾选才跑模板相似度匹配（需要模板）；不勾选则仅做直拳技术评估。
-        self.do_compare_var = BooleanVar(value=True)
-        # 直拳技术评估开关与参数（由原 TechEvalWindow 融合而来，针对单视频）。
-        self.do_tech_var = BooleanVar(value=True)
-        self.stance_var = StringVar(value="left")
-        self.view_var = StringVar(value="auto")
-        self.debug_video_var = BooleanVar(value=False)
-
         self.status_var = StringVar(value="就绪")
         self.result_var = StringVar(value="")
         self.progress_text_var = StringVar(value="")
-        # 直拳技术指标明细文本框（懒创建于 _build）。
-        self.detail_text: Text | None = None
 
-        # Store last comparison result for display
+        # 模板池 Listbox（懒创建于 _build）：池内每个 .npz 模板各出一个动作分。
+        self.template_listbox: Listbox | None = None
+
+        # 上次结果缓存（综合分 / 匹配信息）。
         self._last_score: float | None = None
         self._last_match_info: str = ""
 
@@ -326,77 +314,51 @@ class CompareWindow:
         outer = ttk.Frame(self._win, padding=12)
         outer.pack(fill="both", expand=True)
 
-        # ===== Step 1: Template Preparation（可选，仅模板比对需要）=====
-        step1 = ttk.Labelframe(outer, text="① 准备模板（仅模板比对需要）", padding=10)
+        # ===== Step 1: 模板池（池内每个 .npz 各出一个动作分，动作名 = 文件 stem）=====
+        step1 = ttk.Labelframe(outer, text="① 模板池（每个模板对应一个动作，各出一个成绩）", padding=10)
         step1.pack(fill="x")
 
-        # 启用模板比对开关：关闭时隐藏模板准备内容，仅做直拳技术评估。
-        ttk.Checkbutton(
-            step1, text="启用模板比对（与标准动作模板计算相似度）",
-            variable=self.do_compare_var, command=self._toggle_compare_section,
-        ).pack(anchor="w")
-
-        # 模板准备内容容器（受 do_compare_var 控制显隐）。
         self._template_body = ttk.Frame(step1)
-        self._template_body.pack(fill="x", pady=(8, 0))
+        self._template_body.pack(fill="x")
 
-        # Mode selection
-        mode_row = ttk.Frame(self._template_body)
-        mode_row.pack(fill="x")
-        ttk.Radiobutton(
-            mode_row, text="使用已有模板", variable=self.template_mode_var, value="existing",
-            command=self._toggle_template_mode
-        ).pack(side="left")
-        ttk.Radiobutton(
-            mode_row, text="从视频生成", variable=self.template_mode_var, value="generate",
-            command=self._toggle_template_mode
-        ).pack(side="left", padx=(16, 0))
+        # 模板池 Listbox + 添加/移除按钮。
+        pool_row = ttk.Frame(self._template_body)
+        pool_row.pack(fill="x")
+        lb_box = ttk.Frame(pool_row)
+        lb_box.pack(side="left", fill="both", expand=True)
+        self.template_listbox = Listbox(lb_box, height=5, selectmode="extended", exportselection=False)
+        self.template_listbox.pack(side="left", fill="both", expand=True)
+        pool_sb = Scrollbar(lb_box, command=self.template_listbox.yview)
+        pool_sb.pack(side="right", fill="y")
+        self.template_listbox.configure(yscrollcommand=pool_sb.set)
 
-        # Existing template frame
-        self._existing_frame = ttk.Frame(self._template_body)
-        self._existing_frame.pack(fill="x", pady=(8, 0))
-        ttk.Label(self._existing_frame, text="模板文件(.npz)：").grid(row=0, column=0, sticky="w")
-        ttk.Entry(self._existing_frame, textvariable=self.template_var).grid(row=0, column=1, sticky="ew", padx=(8, 0))
-        ttk.Button(self._existing_frame, text="选择…", command=self._browse_template).grid(row=0, column=2, padx=(8, 0))
-        self._existing_frame.columnconfigure(1, weight=1)
+        pool_btns = ttk.Frame(pool_row)
+        pool_btns.pack(side="left", fill="y", padx=(8, 0))
+        ttk.Button(pool_btns, text="添加模板…", command=self._add_templates).pack(fill="x")
+        ttk.Button(pool_btns, text="移除选中", command=self._remove_selected_templates).pack(fill="x", pady=(6, 0))
+        ttk.Button(pool_btns, text="清空", command=self._clear_templates).pack(fill="x", pady=(6, 0))
 
-        # Generate from video frame
-        self._generate_frame = ttk.Frame(self._template_body)
+        # 从视频生成模板（生成后自动加入池）。
+        gen_wrap = CollapsibleSection(self._template_body, "从视频生成模板", expanded=False)
+        gen_wrap.set_title("从视频生成模板")
+        gen_wrap.pack_header(fill="x", pady=(10, 0))
+        self._generate_frame = gen_wrap.content
+
         gen_row1 = ttk.Frame(self._generate_frame)
-        gen_row1.pack(fill="x")
+        gen_row1.pack(fill="x", pady=(4, 0))
         ttk.Label(gen_row1, text="基准视频：").grid(row=0, column=0, sticky="w")
         ttk.Entry(gen_row1, textvariable=self.base_video_var).grid(row=0, column=1, sticky="ew", padx=(8, 0))
         ttk.Button(gen_row1, text="选择…", command=self._browse_base).grid(row=0, column=2, padx=(8, 0))
         gen_row1.columnconfigure(1, weight=1)
 
-        # Advanced options (collapsible)
-        self._advanced_section = CollapsibleSection(self._generate_frame, "高级选项", expanded=False)
-        self._advanced_section.set_title("高级选项")
-        self._advanced_section.pack_header(fill="x", pady=(8, 0))
-
-        adv = self._advanced_section.content
-        adv_row1 = ttk.Frame(adv)
-        adv_row1.pack(fill="x", pady=(4, 0))
-        ttk.Label(adv_row1, text="Pose 模型（黑盒固定 heavy）：").pack(side="left")
-        self._pose_combo = ttk.Combobox(
-            adv_row1,
-            textvariable=self.pose_var,
-            values=["heavy"],
-            state="disabled",
-            width=8,
-        )
-        self._pose_combo.pack(side="left", padx=(6, 14))
-        ttk.Label(adv_row1, text="线程数：").pack(side="left")
-        ttk.Spinbox(adv_row1, from_=1, to=16, textvariable=self.workers_var, width=6).pack(side="left", padx=(6, 0))
-
-        adv_row2 = ttk.Frame(adv)
+        adv_row2 = ttk.Frame(self._generate_frame)
         adv_row2.pack(fill="x", pady=(6, 0))
         ttk.Label(adv_row2, text="起始帧：").pack(side="left")
         ttk.Entry(adv_row2, textvariable=self.start_var, width=8).pack(side="left", padx=(6, 14))
         ttk.Label(adv_row2, text="结束帧：").pack(side="left")
         ttk.Entry(adv_row2, textvariable=self.end_var, width=8).pack(side="left", padx=(6, 0))
 
-        self._gen_btn = ttk.Button(self._generate_frame, text="生成模板", command=self._gen_template)
+        self._gen_btn = ttk.Button(self._generate_frame, text="生成并加入池", command=self._gen_template)
         self._gen_btn.pack(fill="x", pady=(10, 0))
 
         # ===== Step 2: Target Video =====
@@ -409,40 +371,9 @@ class CompareWindow:
         ttk.Entry(tgt_row, textvariable=self.target_video_var).grid(row=0, column=1, sticky="ew", padx=(8, 0))
         ttk.Button(tgt_row, text="选择…", command=self._browse_target).grid(row=0, column=2, padx=(8, 0))
         tgt_row.columnconfigure(1, weight=1)
-
-        # 模板比对的「导出匹配片段预览」行（受 do_compare_var 控制显隐）。
-        self._preview_row = ttk.Frame(step2)
-        self._preview_row.pack(fill="x", pady=(8, 0))
-        ttk.Checkbutton(
-            self._preview_row, text="导出匹配片段预览", variable=self.save_preview_var, command=self._toggle_preview
-        ).pack(side="left")
-        self._preview_entry = ttk.Entry(self._preview_row, textvariable=self.preview_out_var, width=30)
-        self._preview_entry.pack(side="left", padx=(8, 0), fill="x", expand=True)
-        self._preview_btn = ttk.Button(self._preview_row, text="保存位置…", command=self._choose_preview_out)
-        self._preview_btn.pack(side="left", padx=(8, 0))
-
-        # ===== Step 2b: 直拳技术评估选项（融合自原「直拳检测」窗口，针对单视频）=====
-        tech = ttk.Labelframe(outer, text="② 直拳技术评估", padding=10)
-        tech.pack(fill="x", pady=(12, 0))
-        ttk.Checkbutton(
-            tech, text="启用直拳技术评估（重心 / 回收速度 / 发力顺序 / 拳面角度）",
-            variable=self.do_tech_var, command=self._toggle_tech_section,
-        ).pack(anchor="w")
-
-        self._tech_body = ttk.Frame(tech)
-        self._tech_body.pack(fill="x", pady=(8, 0))
-        tech_opt = ttk.Frame(self._tech_body)
-        tech_opt.pack(fill="x")
-        ttk.Label(tech_opt, text="站姿：").pack(side="left")
-        ttk.Combobox(tech_opt, textvariable=self.stance_var, values=["left", "right"], state="readonly", width=8).pack(
-            side="left", padx=(6, 14)
-        )
-        ttk.Label(tech_opt, text="视角：").pack(side="left")
-        ttk.Combobox(tech_opt, textvariable=self.view_var, values=["auto", "front", "side"], state="readonly", width=8).pack(
-            side="left", padx=(6, 0)
-        )
-        ttk.Checkbutton(self._tech_body, text="导出调试视频（叠加骨架与指标）", variable=self.debug_video_var).pack(
-            anchor="w", pady=(8, 0)
+        ttk.Label(tgt_row, text="线程数：").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ttk.Spinbox(tgt_row, from_=1, to=16, textvariable=self.workers_var, width=6).grid(
+            row=1, column=1, sticky="w", padx=(8, 0), pady=(8, 0)
         )
 
         # ===== Step 3: Execute =====
@@ -471,31 +402,24 @@ class CompareWindow:
         # Status line
         ttk.Label(result_frame, textvariable=self.status_var).pack(anchor="w")
 
-        # Large score display
+        # 综合分（各动作分平均）大号显示。
         self._score_frame = ttk.Frame(result_frame)
         self._score_frame.pack(fill="x", pady=(8, 0))
-
         self._score_label = ttk.Label(
             self._score_frame, text="—", font=("Helvetica", 36, "bold"), anchor="center"
         )
         self._score_label.pack()
-        self._score_hint = ttk.Label(self._score_frame, text="相似度", anchor="center")
+        self._score_hint = ttk.Label(self._score_frame, text="综合分（各动作平均）", anchor="center")
         self._score_hint.pack()
+
+        # 逐动作成绩列表：每个模板一行「动作名 …… 百分比」，颜色随分数。
+        self._action_frame = ttk.Labelframe(result_frame, text="各动作成绩", padding=8)
+        self._action_frame.pack(fill="x", pady=(8, 0))
+        self._action_rows: list[tuple[ttk.Label, ttk.Label]] = []
 
         # Match info
         self._match_label = ttk.Label(result_frame, textvariable=self.result_var, wraplength=600)
         self._match_label.pack(anchor="w", pady=(8, 0))
-
-        # 直拳技术指标明细（受 do_tech_var 控制显隐）。
-        self._detail_frame = ttk.Labelframe(result_frame, text="直拳技术指标", padding=8)
-        self._detail_frame.pack(fill="both", expand=False, pady=(8, 0))
-        detail_box = ttk.Frame(self._detail_frame)
-        detail_box.pack(fill="both", expand=True)
-        self.detail_text = Text(detail_box, height=9, wrap="none")
-        self.detail_text.pack(side="left", fill="both", expand=True)
-        detail_sb = Scrollbar(detail_box, command=self.detail_text.yview)
-        detail_sb.pack(side="right", fill="y")
-        self.detail_text.configure(yscrollcommand=detail_sb.set, state="disabled")
 
         # Collapsible JSON section
         self._json_section = CollapsibleSection(result_frame, "查看详细数据", expanded=False)
@@ -513,50 +437,16 @@ class CompareWindow:
         ttk.Button(json_content, text="复制数据", command=self._copy_raw).pack(anchor="e", pady=(6, 0))
 
         # Initialize display state
-        self._toggle_template_mode()
-        self._toggle_preview()
-        self._toggle_compare_section()
-        self._toggle_tech_section()
         self._reset_score_display()
 
-    def _toggle_compare_section(self) -> None:
-        """启用/停用模板比对：联动模板准备区、预览行与大号相似度显示的显隐。"""
-        enabled = bool(self.do_compare_var.get())
-        if enabled:
-            self._template_body.pack(fill="x", pady=(8, 0))
-            self._preview_row.pack(fill="x", pady=(8, 0))
-            self._score_frame.pack(fill="x", pady=(8, 0))
-        else:
-            self._template_body.pack_forget()
-            self._preview_row.pack_forget()
-            self._score_frame.pack_forget()
-
-    def _toggle_tech_section(self) -> None:
-        """启用/停用直拳技术评估：联动选项区与指标明细框的显隐。"""
-        enabled = bool(self.do_tech_var.get())
-        if enabled:
-            self._tech_body.pack(fill="x", pady=(8, 0))
-            self._detail_frame.pack(fill="both", expand=False, pady=(8, 0))
-        else:
-            self._tech_body.pack_forget()
-            self._detail_frame.pack_forget()
-
-    def _toggle_preview(self) -> None:
-        enabled = bool(self.save_preview_var.get())
-        self._preview_entry.configure(state="normal" if enabled else "disabled")
-        self._preview_btn.configure(state="normal" if enabled else "disabled")
-        if not enabled:
-            self.preview_out_var.set("")
-
-    def _toggle_template_mode(self) -> None:
-        """Switch between existing template and generate-from-video modes."""
-        mode = self.template_mode_var.get()
-        if mode == "existing":
-            self._generate_frame.pack_forget()
-            self._existing_frame.pack(fill="x", pady=(8, 0))
-        else:
-            self._existing_frame.pack_forget()
-            self._generate_frame.pack(fill="x", pady=(8, 0))
+    @staticmethod
+    def _score_color(score: float) -> str:
+        """分数 → 红黄绿。≥0.8 绿 / ≥0.5 黄 / 否则红。"""
+        if score >= 0.8:
+            return "#2e7d32"
+        if score >= 0.5:
+            return "#f9a825"
+        return "#c62828"
 
     def _reset_score_display(self) -> None:
         """Reset score display to initial state."""
@@ -564,25 +454,43 @@ class CompareWindow:
         self._last_match_info = ""
         self._score_label.configure(text="—", foreground="")
         self.result_var.set("")
+        self._clear_action_rows()
 
-    def _update_score_display(self, score: float, match_info: str = "") -> None:
-        """Update the large score display with color coding."""
-        self._last_score = score
+    def _clear_action_rows(self) -> None:
+        for name_lbl, score_lbl in self._action_rows:
+            name_lbl.destroy()
+            score_lbl.destroy()
+        self._action_rows = []
+
+    def _update_score_display(self, actions: list[tuple[str, float]], match_info: str = "") -> None:
+        """刷新综合分 + 逐动作成绩列表。actions = [(动作名, 0..1 分), ...]。"""
         self._last_match_info = match_info
+        self._clear_action_rows()
 
-        # Display as percentage
-        pct = int(score * 100)
-        self._score_label.configure(text=f"{pct}%")
+        if not actions:
+            self._score_label.configure(text="—", foreground="")
+            self.result_var.set(match_info)
+            return
 
-        # Color coding based on score
-        if score >= 0.8:
-            color = "#2e7d32"  # Green - very similar
-        elif score >= 0.5:
-            color = "#f9a825"  # Yellow/amber - partial
-        else:
-            color = "#c62828"  # Red - different
+        # 综合分 = 各动作分平均。
+        combined = sum(s for _, s in actions) / len(actions)
+        self._last_score = combined
+        self._score_label.configure(
+            text=f"{int(combined * 100)}%", foreground=self._score_color(combined)
+        )
 
-        self._score_label.configure(foreground=color)
+        # 逐动作一行。
+        for name, score in actions:
+            row = ttk.Frame(self._action_frame)
+            row.pack(fill="x", pady=1)
+            name_lbl = ttk.Label(row, text=name, anchor="w")
+            name_lbl.pack(side="left")
+            score_lbl = ttk.Label(
+                row, text=f"{int(score * 100)}%", anchor="e", foreground=self._score_color(score)
+            )
+            score_lbl.pack(side="right")
+            self._action_rows.append((name_lbl, score_lbl))
+
         self.result_var.set(match_info)
 
     def _show_progress(self, show: bool = True) -> None:
@@ -614,28 +522,49 @@ class CompareWindow:
         if p:
             self.target_video_var.set(p)
 
-    def _browse_template(self) -> None:
-        p = filedialog.askopenfilename(
-            title="选择模板文件",
+    def _pool_paths(self) -> list[str]:
+        """当前模板池中的所有路径（去空）。"""
+        if self.template_listbox is None:
+            return []
+        return [s for s in self.template_listbox.get(0, "end") if str(s).strip()]
+
+    def _add_template_path(self, path: str) -> None:
+        """校验后加入池（heavy + pose33_v3），去重。返回值仅用于内部判断由调用方处理。"""
+        if self.template_listbox is None:
+            return
+        usable = try_load_heavy_template(path)
+        if usable is None:
+            messagebox.showerror(
+                "模板无效",
+                f"{Path(path).name} 不是可用的 heavy + pose33_v3 模板，已跳过。\n"
+                "请用 make_template.py --pose heavy 生成后再添加。",
+                parent=self._win,
+            )
+            return
+        if str(usable) in {str(p) for p in self._pool_paths()}:
+            return
+        self.template_listbox.insert("end", str(usable))
+
+    def _add_templates(self) -> None:
+        paths = filedialog.askopenfilenames(
+            title="添加模板（可多选）",
             filetypes=[("模板文件", "*.npz"), ("所有文件", "*.*")],
             parent=self._win,
         )
         self._win.lift()
         self._win.focus_force()
-        if p:
-            self.template_var.set(p)
+        for p in paths:
+            self._add_template_path(p)
 
-    def _choose_preview_out(self) -> None:
-        p = filedialog.asksaveasfilename(
-            title="保存匹配预览视频",
-            defaultextension=".mp4",
-            filetypes=[("MP4 视频", "*.mp4"), ("AVI 视频", "*.avi"), ("所有文件", "*.*")],
-            parent=self._win,
-        )
-        self._win.lift()
-        self._win.focus_force()
-        if p:
-            self.preview_out_var.set(p)
+    def _remove_selected_templates(self) -> None:
+        if self.template_listbox is None:
+            return
+        for i in reversed(self.template_listbox.curselection()):
+            self.template_listbox.delete(i)
+
+    def _clear_templates(self) -> None:
+        if self.template_listbox is not None:
+            self.template_listbox.delete(0, "end")
 
     def _parse_int_or_none(self, s: str) -> int | None:
         s = (s or "").strip()
@@ -727,7 +656,7 @@ class CompareWindow:
                     progress_cb=self._progress,
                     stop_evt=self._stop_evt,
                 )
-                self._win.after(0, lambda: self.template_var.set(str(tpl_path)))
+                self._win.after(0, lambda p=str(tpl_path): self._add_template_path(p))
                 with np.load(tpl_path, allow_pickle=True) as template_data:
                     template_meta = dict(template_data["meta"].item() or {})
                 start_frame = int(template_meta.get("start_frame") or 0)
@@ -757,84 +686,52 @@ class CompareWindow:
         self._worker = threading.Thread(target=_run, daemon=True)
         self._worker.start()
 
-    def _set_detail(self, text: str) -> None:
-        if self.detail_text is None:
-            return
-
-        def _set() -> None:
-            if self.detail_text is None:
-                return
-            self.detail_text.configure(state="normal")
-            self.detail_text.delete("1.0", "end")
-            self.detail_text.insert("1.0", text)
-            self.detail_text.configure(state="disabled")
-
-        self._win.after(0, _set)
-
     def _start_compare(self) -> None:
         if self._worker and self._worker.is_alive():
             return
 
-        do_compare = bool(self.do_compare_var.get())
-        do_tech = bool(self.do_tech_var.get())
-        if not do_compare and not do_tech:
-            messagebox.showerror("配置错误", "请至少启用「模板比对」或「直拳技术评估」之一。", parent=self._win)
-            return
-
-        tpl = self.template_var.get().strip()
+        tpls = self._pool_paths()
         vid = self.target_video_var.get().strip()
         if not vid:
             messagebox.showerror("配置错误", "请先选择目标视频。", parent=self._win)
             return
-        if do_compare and not tpl:
-            messagebox.showerror("配置错误", "已启用模板比对，请先选择模板文件（.npz），或从基准视频生成模板。", parent=self._win)
+        if not tpls:
+            messagebox.showerror(
+                "配置错误", "模板池为空，请先添加模板（.npz），或从基准视频生成。", parent=self._win
+            )
             return
-
-        preview_out = None
-        if do_compare and self.save_preview_var.get():
-            preview_out = self.preview_out_var.get().strip()
-            if not preview_out:
-                preview_out = str(Path(tpl).with_suffix(".match.preview.avi"))
-                self.preview_out_var.set(preview_out)
 
         # 后端黑盒分析一律 heavy，与主界面预览档位无关。
         pose_variant = "heavy"
         self.pose_var.set("heavy")
-        stance = self.stance_var.get().strip() or "left"
-        view_hint = self.view_var.get().strip() or "auto"
-        want_debug = do_tech and bool(self.debug_video_var.get())
         workers = int(self.workers_var.get() or 1)
 
         self._stop_evt.clear()
         self._set_buttons(True)
         self._set_status("正在分析…")
         self._reset_score_display()
-        self._set_detail("")
         self._set_raw("")
         self._progress("准备中", 0, 0)
 
         def _run() -> None:
             payload: dict = {"video_path": vid}
-            match_info_parts: list[str] = []
             try:
-                # ① 模板比对（可选）
-                if do_compare:
-                    res = compare_video_to_template(
-                        tpl,
-                        vid,
-                        pose_variant=pose_variant,
-                        workers=workers,
-                        preview_out=preview_out,
-                        progress_cb=self._progress,
-                        stop_evt=self._stop_evt,
-                    )
-                    tpl_meta = {}
-                    try:
-                        d = np.load(tpl, allow_pickle=True)
-                        tpl_meta = d["meta"].item()
-                    except Exception:
-                        tpl_meta = {}
-                    payload["compare"] = {
+                results = compare_video_to_templates(
+                    tpls,
+                    vid,
+                    pose_variant=pose_variant,
+                    workers=workers,
+                    progress_cb=self._progress,
+                    stop_evt=self._stop_evt,
+                )
+                # 动作名 = 模板文件 stem；每个模板一个动作分。
+                actions = [
+                    (template_action_name(res.template_path), float(res.score))
+                    for res in results
+                ]
+                payload["actions"] = [
+                    {
+                        "name": template_action_name(res.template_path),
                         "score": res.score,
                         "avg_cost": res.avg_cost,
                         "cost": res.cost,
@@ -844,36 +741,23 @@ class CompareWindow:
                         "pose_variant": res.pose_variant,
                         "workers_used": res.workers_used,
                         "template_path": str(res.template_path),
-                        "preview_path": str(res.preview_path) if res.preview_path else None,
-                        "template_meta": tpl_meta,
                     }
-                    match_info_parts.append(
-                        f"匹配片段：帧 {res.start_frame}..{res.end_frame}  "
-                        f"时间 {res.start_frame/res.fps:.2f}s ~ {res.end_frame/res.fps:.2f}s"
-                    )
-                    if res.workers_used and res.workers_used != workers:
-                        match_info_parts.append("说明：模板为 VIDEO 模式，已自动使用单线程以保证准确。")
-                    if res.preview_path:
-                        self._win.after(0, lambda p=res.preview_path: self.preview_out_var.set(str(p)))
-                        match_info_parts.append(f"预览导出：{res.preview_path}")
-                    score = res.score
-                    self._win.after(0, lambda: self._update_score_display(score, "\n".join(match_info_parts)))
+                    for res in results
+                ]
+                if actions:
+                    combined = sum(s for _, s in actions) / len(actions)
+                    payload["combined_score"] = combined
+                    payload["combined_percent"] = int(round(combined * 100))
 
-                if self._stop_evt.is_set():
-                    self._set_status("已停止")
-                    return
+                match_info = f"共 {len(actions)} 个动作已评分"
+                downgraded = any(
+                    r.workers_used and r.workers_used != workers for r in results
+                )
+                if downgraded:
+                    match_info += "\n说明：模板为 VIDEO 模式，已自动使用单线程以保证准确。"
 
-                # ② 直拳技术评估（可选）
-                if do_tech:
-                    self._progress("技术评估中", 0, 0)
-                    self._run_tech_eval(
-                        Path(vid), pose_variant=pose_variant, stance=stance,
-                        view_hint=view_hint, want_debug=want_debug, payload=payload,
-                    )
-
+                self._win.after(0, lambda: self._update_score_display(actions, match_info))
                 self._set_raw(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2))
-                if not do_compare:
-                    self._set_result("\n".join(match_info_parts) if match_info_parts else "技术评估完成")
                 self._set_status("分析完成")
             except Exception as e:
                 self._set_status("分析失败")
@@ -884,77 +768,6 @@ class CompareWindow:
 
         self._worker = threading.Thread(target=_run, daemon=True)
         self._worker.start()
-
-    def _run_tech_eval(
-        self, video: Path, *, pose_variant: str, stance: str, view_hint: str,
-        want_debug: bool, payload: dict,
-    ) -> None:
-        """对单个视频执行直拳技术评估，写入指标明细文本与 payload。"""
-        def _cause(ind: object) -> str:
-            detail = getattr(ind, "detail", None)
-            return str(detail.get("primary_cause") or "") if isinstance(detail, dict) else ""
-
-        def _failed_stage(ind: object) -> str | None:
-            detail = getattr(ind, "detail", None)
-            if not isinstance(detail, dict):
-                return None
-            val = detail.get("failed_stage")
-            return None if val in (None, "") else str(val)
-
-        def _fmt(label: str, ind: object | None) -> str:
-            if ind is None:
-                return f"{label}: 未评估"
-            parts = [f"{label}: {getattr(ind, 'status', '')}", str(getattr(ind, "reason", ""))]
-            if _cause(ind):
-                parts.append(f"原因类型: {_cause(ind)}")
-            if _failed_stage(ind):
-                parts.append(f"失败环节: {_failed_stage(ind)}")
-            return " | ".join(p for p in parts if p)
-
-        if want_debug:
-            res, lm, vs, meta = evaluate_video_assets(
-                video, pose_variant=pose_variant, stance=stance, view_hint=view_hint
-            )
-        else:
-            res = evaluate_video_detail(
-                video, pose_variant=pose_variant, stance=stance, view_hint=view_hint
-            )
-            lm = vs = meta = None
-
-        detail_lines = [
-            f"视频: {video.name}",
-            f"视角模式: {res.view_mode}",
-            _fmt("重心(侧面优先)", res.cog_final),
-            _fmt("重心_侧面", res.cog_side),
-            _fmt("重心_正面", res.cog_front),
-            _fmt("重心_CoM(方案3)", res.cog_com),
-            _fmt("回收速度", res.retract_speed),
-            _fmt("发力顺序", res.force_sequence),
-            _fmt("拳面角度", res.wrist_angle),
-        ]
-        self._set_detail("\n".join(detail_lines))
-
-        payload["tech_eval"] = {
-            "pose_variant": pose_variant,
-            "fps": float(res.fps),
-            "view_mode": str(res.view_mode),
-            "cog_side": res.cog_side,
-            "cog_front": res.cog_front,
-            "cog_final": res.cog_final,
-            "cog_com": res.cog_com,
-            "retract_speed": res.retract_speed,
-            "force_sequence": res.force_sequence,
-            "wrist_angle": res.wrist_angle,
-        }
-
-        if want_debug and lm is not None and vs is not None and meta is not None:
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            out_mp4 = outputs_dir() / f"{video.stem}_debug_{ts}.mp4"
-            export_debug_video(
-                video, out_mp4, pose_variant=pose_variant, stance=stance,
-                view_hint=view_hint, res=res, landmarks=lm, view_scores=vs, meta=meta,
-            )
-            payload["tech_eval"]["debug_video"] = str(out_mp4)
 
     def _stop(self) -> None:
         self._stop_evt.set()
@@ -1648,7 +1461,7 @@ class App:
         self.record_dir_btn = ttk.Button(record_dir_row, text="选择…", command=self._choose_record_dir)
         self.record_dir_btn.pack(side="left", padx=(8, 0))
 
-        # 5) Compare_Control：动作分析（模板比对 + 直拳技术评估，绑定 self.compare_btn）。
+        # 5) Compare_Control：动作分析（模板比对，绑定 self.compare_btn）。
         self.compare_btn = ttk.Button(primary, text="动作分析…", command=self._open_compare)
         self.compare_btn.pack(fill="x", pady=(10, 0))
 

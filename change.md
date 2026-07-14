@@ -1,3 +1,43 @@
+## 2026-07-14: [fix] 录制保存目录持久化失效——测试污染真实 user_prefs.json
+
+### 问题描述
+
+用户反馈录制保存目录持久化「又失效了，总回退到奇怪地址」。排查发现仓库根真实 `user_prefs.json` 的 `record_dir` 被写成了一个 pytest 临时目录（`C:\Users\ny\AppData\Local\Temp\pytest-of-ny\pytest-595\test_second_dual_segment_can_s0`）。根因：测试 `test_second_dual_segment_can_start_before_first_result_finishes`（`tests/test_app_ui_lifecycle.py`）走真实录制路径，`App._begin_recording_segment`（`apps/app_ui.py:2181`）里的 `save_record_dir(next_base_dir)` 未被打桩，把 pytest `tmp_path` 写进了真实偏好文件。每跑一次测试就冲掉一次用户目录，启动时该临时目录不存在 → `load_record_dir` 回退 `outputs_dir()`，表现为「持久化失效」。
+
+### 修改内容
+
+- **`tests/conftest.py`**（新增）：autouse fixture `_isolate_user_prefs` 把 `core.paths._prefs_path` 钉到 `tmp_path_factory` 临时文件。任何测试都无法再读写真实 `user_prefs.json`——一劳永逸堵住污染源，不必逐个测试补 monkeypatch。
+- **`user_prefs.json`**：删掉被污染的 `record_dir`（临时目录）键，让其回退正常默认，用户下次在 GUI 选一次即持久化回来。
+
+### 验证方法
+
+- `pytest tests/test_user_prefs.py tests/test_app_ui_lifecycle.py -q` → 63 passed。
+- 跑完测试后 grep 真实 `user_prefs.json` 确认无 `record_dir` 键（不再被污染）。
+
+---
+
+## 2026-07-14: [refactor] 动作分析窗口改模板池逐动作评分 + 删除直拳技术评估
+
+### 问题描述
+
+Tkinter「动作分析」窗口（`CompareWindow`）是早期做的单模板→单相似度形态，没跟上考试系统的池式多动作口径：只能选一个模板出一个综合相似度，无法「模板里有什么动作就出什么动作的成绩」。同时窗口里嵌的「直拳技术评估」已随主链路调整废弃。
+
+### 修改内容
+
+- **`apps/app_ui.py`（`CompareWindow`）**：
+  - 删除直拳技术评估 UI 及相关死代码（`_run_tech_eval`、`_set_detail` 等）。
+  - 单模板选择框 → **模板池 Listbox**（添加/移除/清空，多选，`try_load_heavy_template` 校验 heavy+pose33_v3、去重）；「从视频生成模板」折叠区生成后自动入池。
+  - 比对改调 `compare_video_to_templates`（视频姿态提取一次、池内各模板复用），结果由「单个大百分比」改为**综合分（各动作平均）+ 逐动作成绩列表**，动作名取模板文件 stem，每行按分数红黄绿着色。
+  - 清理单模板/预览导出相关的死变量与方法、不再用的 `compare_video_to_template` 单数导入。
+- **`tests/test_app_ui_lifecycle.py`**：双摄提交测试桩补 `_current_template_lists`（生产 `_end_recording_segment` 读模板池，旧桩缺此属性导致 pre-existing 失败）。
+
+### 验证方法
+
+- headless 冒烟：池添加/读取/去重、逐动作显示、综合分平均、清空复位均正确。
+- `pytest tests/test_app_ui_lifecycle.py tests/test_app_ui_dual_camera.py tests/test_app_controls.py tests/test_error_handling.py -q` 全绿。
+
+---
+
 ## 2026-07-14: [feat] 八段锦评分接入——同动作正侧加权合并 + 背后七颠 DTW 分压缩映射
 
 ### 问题描述

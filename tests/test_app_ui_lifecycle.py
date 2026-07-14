@@ -1311,6 +1311,8 @@ def _dual_submission_app(tmp_path: Path, *, write_frames: bool = True):
         _sync_record_stop_enabled=lambda _state: None,
         record_btn=_Widget(),
     )
+    # 提交路径读取模板池；这些测试只验证提交机制，不涉及模板内容，返回空池即可。
+    app._current_template_lists = lambda: ([], [])
     # SimpleNamespace 需显式绑定 unbound 方法，供 _on_record_stop 调用
     app._end_recording_segment = (
         lambda discard=False, exam_row=None: app_ui.App._end_recording_segment(
