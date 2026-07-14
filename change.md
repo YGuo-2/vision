@@ -1,3 +1,66 @@
+## 2026-07-14: [fix] 考试系统结构对照 + 重考可用性问题
+
+### 问题描述
+
+用户反馈重考「一次都没成功过」。对照设计文档与实现后，逻辑层与物理层大体对齐，但重考在面板层有多处易踩坑，导致现场表现为按钮无用/点了无反应。
+
+### 结构对照结论
+
+| 层次 | 职责 | 对应实现 | 对齐情况 |
+|:---|:---|:---|:---|
+| 状态机 | 叫号/进场/录制/收尾/中止 | `core/exam_session.py` | 对齐；命令由 panel 执行 |
+| 占用闸门 | enter/empty 去抖 | `core/presence_gate.py` + App occupancy | 对齐 |
+| 台账/补考行 | 队尾追加、最后成功计分 | `core/exam_roster.ExamScorebook` | 对齐 §7.6 |
+| 执行层 | 播报/开停录/写盘 | `apps/exam_panel.py` + `app_ui` | 对齐 |
+| 重考事件 | 设计有 `retest_request` | **未进 `session.handle()`**，由 panel 直接 `append_retest` + `queue_retest_row` | 行为等价，接口名不一致 |
+| 持久化 | 设计 S5 仅已完成行不丢 | 只恢复名单路径，**不恢复成绩簿/阶段/重考行** | 有意局限，但 UI 易误解 |
+
+重考真实契约（实现）：选中考生 → 台账队尾追加 attempt_n → 若 `completed`/`aborted` 则 phase→`ready` → **必须再点「开始考试」** 才叫号；考试进行中只排队尾、不插队。
+
+### 修改内容（修踩坑，不改核心契约）
+
+- **`apps/exam_panel.py`**：
+  - 按钮文案改为「重考（选中考生）」；底部说明写清四步流程。
+  - 无选中时回退到当前叫号行（进行中）。
+  - `scorebook is None`（仅恢复名单未开考）给出完整操作顺序，不再含糊「导入后开考」。
+  - 拒绝纯 pending / processing / recording 的无效重考。
+  - 已有待考重考行时拒绝重复追加。
+  - 终态入队后弹窗询问「是否现在开始考试」，确认则直接 `_start_exam()`（根治「追加了但不知道要再点开始」）。
+  - 进行中入队则明确提示「排在队尾」。
+- **`tests/test_exam_panel.py`**：补终态自动开考、无台账提示、纯 pending 拒绝、无选中回退当前行等用例。
+
+### 验证方法
+
+- `pytest tests/test_exam_panel.py tests/test_exam_session.py -q` → **22 passed**。
+
+### 现场正确操作（重考）
+
+1. 双摄主界面「开始」保持运行（中止主会话会 abort 考试且可能无双摄）。
+2. 考试面板「开始考试」产生 `exam_*/成绩汇总.xlsx` 台账。
+3. 考生出现 completed/failed/skipped 后，列表选中该人 →「重考」。
+4. 若场次已 completed/aborted：在弹窗选「是」立即开考，或手动再点「开始考试」。
+5. 进行中追加的重考在名单最末尾，不会打断当前人。
+
+---
+
+## 2026-07-14: [docs] 同步 CLAUDE.md / AGENTS.md 至最近改动
+
+### 问题描述
+
+CLAUDE.md 与 AGENTS.md 落后于最近几次改动：①「动作分析」窗口已改模板池逐动作评分、直拳技术评估已删，文档仍描述旧单模板形态；②`recording_postprocess.py` 新增的八段锦 opt-in 注册表（`_VIEW_WEIGHTS`/`_SCORE_SQUEEZE`）未记录，后续 agent 可能误改踩坏生产行为；③AGENTS.md 结构清单整块缺考试系统模块；④`tests/conftest.py` 的 prefs 隔离约定未成文，易被后续测试绕过再引入污染。
+
+### 修改内容
+
+- **`CLAUDE.md`**：`apps/app_ui.py` 条目改述「动作分析」为模板池→逐动作成绩（走 `compare_video_to_templates`、动作名取模板 stem、综合分=各动作平均），注明旧单模板 UI 与直拳技术评估已移除；`apps/recording_postprocess.py` 条目补池级评分口径 + `_VIEW_WEIGHTS`/`merge_view_weighted_actions()`（攀足 side0.75/front0.25、攒拳怒目 50/50）与 `_SCORE_SQUEEZE`（背后七颠 `[0.75,0.90]`）两个 opt-in 注册表及散打 no-op 零回归说明。
+- **`AGENTS.md`**：结构清单补齐考试系统模块（`exam_session`/`exam_roster`/`presence_gate`/`exam_clip`/`exam_announcer`/`exam_panel`/`recording_postprocess`）；Testing Guidelines 加考试系统回归门（`test_exam_*` + `test_recording_postprocess.py`）与「测试隔离」约定（`tests/conftest.py` 把 `_prefs_path` 钉到临时文件，禁止后续测试绕过或直接读写真实 `user_prefs.json`）。
+
+### 验证方法
+
+- 文档同步依据：本轮已落地的三次代码改动（八段锦评分接入 `c4237b9`、动作分析池式重构 `c9ead24`、prefs 隔离 `5b5dd11`）。
+- 轻量验证：脚本核对文档引用的 8 个模块/文件路径全部真实存在（`core/exam_*`、`apps/exam_panel.py`、`apps/recording_postprocess.py`、`tests/conftest.py`）。
+
+---
+
 ## 2026-07-14: [fix] 录制保存目录持久化失效——测试污染真实 user_prefs.json
 
 ### 问题描述
