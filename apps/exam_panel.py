@@ -196,7 +196,7 @@ class ExamPanel:
 
         btns2 = ttk.Frame(f)
         btns2.pack(fill="x", pady=(6, 0))
-        ttk.Button(btns2, text="重考（当前学号）", command=self._retest_current).pack(
+        ttk.Button(btns2, text="重考（选中考生）", command=self._retest_current).pack(
             side="left"
         )
         ttk.Button(btns2, text="导出成绩…", command=self._export).pack(
@@ -223,6 +223,8 @@ class ExamPanel:
             "说明：v1 输出各动作黑盒相似度子分 + 综合分（无规则扣分）。"
             "正对正池、侧对侧池，每边可填多个动作模板。"
             "占用判定用 primary 旋转后 ROI。须先双摄「开始」并至少备好一侧 heavy 模板。"
+            "重考：先开考产生台账 → 选中已考完/失败/跳过的考生 → 点重考（追加到队尾）"
+            "→ 若整场已结束或已中止，再点「开始考试」才会叫号。"
         )
         ttk.Label(f, text=note, wraplength=480, foreground="#444").pack(
             anchor="w", pady=(8, 0)
@@ -412,31 +414,110 @@ class ExamPanel:
         self._dispatch(self.session.handle(name, now=now))
         self._refresh_tree()
 
-    def _retest_current(self) -> None:
+    def _resolve_retest_row(self) -> ExamResultRow | None:
+        """解析重考目标：优先列表选中行，否则回退到当前叫号行。"""
         sel = self.tree.selection()
-        if not sel:
-            messagebox.showinfo("重考", "请先在列表中选中一名考生", parent=self.win)
-            return
-        item = sel[0]
-        selected_row = self._row_by_id.get(str(item))
-        if selected_row is None:
-            vals = self.tree.item(item, "values")
+        if sel:
+            item = sel[0]
+            selected_row = self._row_by_id.get(str(item))
+            if selected_row is not None:
+                return selected_row
+            try:
+                vals = self.tree.item(item, "values")
+            except Exception:
+                vals = ()
             sid = str(vals[1]) if len(vals) > 1 else ""
-            selected_row = next(
-                (
-                    row
-                    for row in self.session.rows
-                    if row.candidate.student_id == sid
-                ),
-                None,
-            )
+            if sid:
+                return next(
+                    (
+                        row
+                        for row in self.session.rows
+                        if row.candidate.student_id == sid
+                    ),
+                    None,
+                )
+            return None
+        # 未选中时：若正在考场流程中，允许对「当前考生」重考
+        current = self.session.current
+        if current is not None and self.session.phase not in {
+            "idle",
+            "ready",
+            "completed",
+            "aborted",
+        }:
+            return current
+        return None
+
+    def _retest_current(self) -> None:
+        """队尾追加同名重考行（设计 §7.6）；不立即改叫号，除非场次已结束/中止后再次开考。"""
+        selected_row = self._resolve_retest_row()
         if selected_row is None:
-            messagebox.showerror("重考", "选中的考生已失效，请重新选择", parent=self.win)
+            messagebox.showinfo(
+                "重考",
+                "请先在列表中点选一名考生（已完成 / 失败 / 跳过），再点重考。\n"
+                "考试进行中未选中时，默认对当前叫号考生操作。",
+                parent=self.win,
+            )
             return
         cand = selected_row.candidate
         if self.scorebook is None:
-            messagebox.showerror("重考", "请先开始一场考试或导入后开考", parent=self.win)
+            messagebox.showerror(
+                "重考",
+                "尚无本场成绩台账，无法重考。\n\n"
+                "正确顺序：\n"
+                "1. 双摄主界面点「开始」\n"
+                "2. 本面板点「开始考试」产生场次与成绩表\n"
+                "3. 考生考完（或失败/跳过）后，选中该考生点「重考」\n"
+                "4. 若整场已结束/中止，再点一次「开始考试」才会叫到重考行\n\n"
+                "说明：仅恢复名单不会恢复旧成绩；关闭面板后重考记录不自动续接。",
+                parent=self.win,
+            )
             return
+
+        # 设计 §7.6：failed / skipped / completed（不满意）才补考；纯 pending 无需重考
+        retestable = frozenset(
+            {"completed", "failed", "skipped", "superseded", "cancelled"}
+        )
+        sid_rows = [
+            r
+            for r in self.session.rows
+            if r.candidate.student_id == cand.student_id
+        ]
+        if selected_row.status == "processing":
+            messagebox.showinfo(
+                "重考",
+                f"{cand.name} 正在后台比对（processing），请待出分后再重考。",
+                parent=self.win,
+            )
+            return
+        if selected_row.status == "recording":
+            messagebox.showinfo(
+                "重考",
+                f"{cand.name} 正在录制。请先「强制结束」或「跳过当前」，"
+                "待本段结束后再重考；或等其正常离场完成后再补考。",
+                parent=self.win,
+            )
+            return
+        if not any(r.status in retestable for r in sid_rows):
+            messagebox.showinfo(
+                "重考",
+                f"{cand.name} 尚未完成首次作答（仍为 pending），无需重考。\n"
+                "请等待叫号上场，或用「跳过当前」后再安排补考。",
+                parent=self.win,
+            )
+            return
+        if any(
+            r.status == "pending" and r.attempt_index > 1
+            for r in sid_rows
+        ):
+            messagebox.showinfo(
+                "重考",
+                f"{cand.name} 已有待考的重考行在队尾，请先考完该次再追加。",
+                parent=self.win,
+            )
+            return
+
+        phase_before = self.session.phase
         row = self.scorebook.append_retest(cand)
         self.session.rows = self.scorebook.rows
         self.session.queue_retest_row(row)
@@ -448,7 +529,33 @@ class ExamPanel:
             self.tree.see(row.row_id)
         except Exception:
             pass
-        self.status_var.set(f"已追加重考：{cand.name} 第{row.attempt_index}次（队尾）")
+        summary = (
+            f"已追加重考：{cand.name} 第{row.attempt_index}次（队尾，"
+            f"学号 {cand.student_id}）"
+        )
+        self.status_var.set(summary)
+
+        # 终态入队后 phase 会回到 ready，但不会自动叫号——这是现场最易踩坑处
+        if self.session.phase == "ready" and phase_before in {"completed", "aborted"}:
+            tip = (
+                f"{summary}\n\n"
+                f"场次已从「{phase_before}」恢复为 ready。\n"
+                "重考不会自动叫号，必须再点一次「开始考试」。\n"
+                "（中止后会先续考名单中仍 pending 的人，重考行在队尾。）\n\n"
+                "是否现在开始考试？"
+            )
+            if messagebox.askyesno("重考已入队", tip, parent=self.win):
+                self._start_exam()
+            return
+
+        if phase_before not in {"idle", "ready", "completed", "aborted"}:
+            messagebox.showinfo(
+                "重考已入队",
+                f"{summary}\n\n"
+                "考试仍在进行：新行已排在名单最末尾，"
+                "不会打断当前考生；轮到队尾时才会叫号。",
+                parent=self.win,
+            )
 
     def _export(self) -> None:
         if self.scorebook is None:

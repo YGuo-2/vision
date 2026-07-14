@@ -238,6 +238,7 @@ def test_tree_refresh_preserves_selected_candidate() -> None:
 
 def test_aborted_retest_becomes_startable_without_skipping_remaining_roster(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
     candidates = [
         ExamCandidate(1, "S1", "甲"),
@@ -269,6 +270,10 @@ def test_aborted_retest_becomes_startable_without_skipping_remaining_roster(
     panel._save_roi = lambda: True
     commands = []
     panel._dispatch = commands.extend
+    # 测「入队后手动再开考」；不自动点是
+    monkeypatch.setattr(
+        exam_panel.messagebox, "askyesno", lambda *a, **k: False
+    )
 
     panel._retest_current()
 
@@ -285,6 +290,132 @@ def test_aborted_retest_becomes_startable_without_skipping_remaining_roster(
     assert panel.session.current is panel.session.rows[1]
     assert active_calls == [(True, "run-existing", tmp_path)]
     assert any(command.kind == "ANNOUNCE" for command in commands)
+    book.close()
+
+
+def test_completed_retest_can_auto_start_when_confirmed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    candidates = [ExamCandidate(1, "S1", "甲")]
+    book = ExamScorebook(path=None)
+    book.load_candidates(candidates)
+    first = book.rows[0]
+    book.update_row(
+        first,
+        status="completed",
+        combined_percent=88,
+        combined_score=0.88,
+    )
+
+    session = ExamSession()
+    session.rows = book.rows
+    session.phase = "completed"
+    session.pointer = 1
+    session.run_id = "run-done"
+    panel = _bare_panel(session)
+    panel.scorebook = book
+    panel.run_dir = tmp_path
+    panel._row_by_id = {row.row_id: row for row in session.rows}
+    panel._refresh_tree()
+    panel.tree.selection_set(first.row_id)
+    panel.app = SimpleNamespace(
+        _exam_preflight=lambda: (True, ""),
+        _exam_set_active=lambda *a, **k: None,
+    )
+    panel._save_roi = lambda: True
+    commands: list = []
+    panel._dispatch = commands.extend
+    monkeypatch.setattr(exam_panel.messagebox, "askyesno", lambda *a, **k: True)
+
+    panel._retest_current()
+
+    assert panel.session.phase == "calling"
+    assert panel.session.pointer == 1
+    assert panel.session.current is not None
+    assert panel.session.current.attempt_index == 2
+    assert any(c.kind == "ANNOUNCE" for c in commands)
+    book.close()
+
+
+def test_retest_without_scorebook_explains_workflow(monkeypatch) -> None:
+    session = ExamSession()
+    session.load_roster([ExamCandidate(1, "S1", "甲")])
+    panel = _bare_panel(session)
+    panel._refresh_tree()
+    panel.tree.selection_set(session.rows[0].row_id)
+    errors: list[str] = []
+    monkeypatch.setattr(
+        exam_panel.messagebox,
+        "showerror",
+        lambda _t, message, **_k: errors.append(str(message)),
+    )
+
+    panel._retest_current()
+
+    assert len(errors) == 1
+    assert "成绩台账" in errors[0]
+    assert "开始考试" in errors[0]
+
+
+def test_retest_rejects_pure_pending_candidate(monkeypatch) -> None:
+    candidates = [ExamCandidate(1, "S1", "甲")]
+    book = ExamScorebook(path=None)
+    book.load_candidates(candidates)
+    session = ExamSession()
+    session.rows = book.rows
+    session.phase = "ready"
+    panel = _bare_panel(session)
+    panel.scorebook = book
+    panel._row_by_id = {row.row_id: row for row in session.rows}
+    panel._refresh_tree()
+    panel.tree.selection_set(session.rows[0].row_id)
+    infos: list[str] = []
+    monkeypatch.setattr(
+        exam_panel.messagebox,
+        "showinfo",
+        lambda _t, message, **_k: infos.append(str(message)),
+    )
+
+    panel._retest_current()
+
+    assert len(panel.session.rows) == 1
+    assert any("无需重考" in msg for msg in infos)
+    book.close()
+
+
+def test_retest_falls_back_to_session_current_when_no_selection(
+    monkeypatch,
+) -> None:
+    candidates = [
+        ExamCandidate(1, "S1", "甲"),
+        ExamCandidate(2, "S2", "乙"),
+    ]
+    book = ExamScorebook(path=None)
+    book.load_candidates(candidates)
+    book.update_row(book.rows[0], status="failed", error_code="begin_failed")
+    session = ExamSession()
+    session.rows = book.rows
+    session.phase = "wait_enter"
+    session.pointer = 0
+    panel = _bare_panel(session)
+    panel.scorebook = book
+    panel._row_by_id = {row.row_id: row for row in session.rows}
+    panel._refresh_tree()
+    # 故意不选中
+    panel.tree.selected = []
+    infos: list[str] = []
+    monkeypatch.setattr(
+        exam_panel.messagebox,
+        "showinfo",
+        lambda _t, message, **_k: infos.append(str(message)),
+    )
+
+    panel._retest_current()
+
+    assert len(panel.session.rows) == 3
+    assert panel.session.rows[-1].attempt_index == 2
+    assert panel.session.rows[-1].candidate.student_id == "S1"
+    assert any("队尾" in msg for msg in infos)
     book.close()
 
 

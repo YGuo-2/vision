@@ -158,9 +158,9 @@ npm run package:windows
 ### Apps 入口
 
 - **apps/main.py**: CLI 入口，支持摄像头/视频源 + 可选导出；摄像头 + `--workers>1` 走多核并行实时路径
-- **apps/app_ui.py**: Tkinter GUI（主预览窗 + 单视频「动作分析」对话框 + 设置/模型管理 + 双摄录制 + 「考试模式…」入口），线程化非阻塞处理；双摄侧含 occupancy 采样路径与 begin/end 录制原语供考试编排调用
+- **apps/app_ui.py**: Tkinter GUI（主预览窗 + 单视频「动作分析」对话框 + 设置/模型管理 + 双摄录制 + 「考试模式…」入口），线程化非阻塞处理；双摄侧含 occupancy 采样路径与 begin/end 录制原语供考试编排调用。「动作分析」对话框是**模板池 → 逐动作成绩**形态（`CompareWindow` 走 `compare_video_to_templates`，视频姿态提取一次、池内各模板复用；动作名取模板 stem，综合分=各动作平均）；旧的单模板→单相似度与直拳技术评估 UI 已移除
 - **apps/exam_panel.py**: Tk 考试面板（名单导入 / ROI 标定 / 开考控制 / 成绩导出）；编排状态机在 `core/exam_session.py`，占用去抖在 `core/presence_gate.py`。关面板后台账仍经 `_exam_scorebook_sinks` 接收后台比对回填（可多场并存，禁止单例覆盖）
-- **apps/recording_postprocess.py**: 双摄录制后处理链（转码 → 校验 → 比对），透传考生元数据；考试路径复用此链完成自动比对回填台账
+- **apps/recording_postprocess.py**: 双摄录制后处理链（转码 → 校验 → 比对），透传考生元数据；考试路径复用此链完成自动比对回填台账。评分池级（front 池均值 / side 池均值 / 综合=各动作子分平均）。含两个八段锦 opt-in 注册表（散打模板 stem 不命中 → no-op 零回归）：`_VIEW_WEIGHTS` + `merge_view_weighted_actions()` 把 `<名>_正面`/`<名>_侧面` 子分按权重合并成单个动作（两手攀足 side0.75/front0.25、攒拳怒目 50/50，去除双计数），`_SCORE_SQUEEZE` 把指定动作 DTW 分线性压到区间（背后七颠 `[0.75,0.90]`——DTW 对低位移提踵不可靠时的人人过/可复现/弱区分兜底）
 - **apps/ui_backend.py**: Vue/Tauri 桌面前端的 JSON bridge 契约层，调用既有 Python 后端（模型管理、会话、作业、分析、模板等）；含 latest-frame 二进制通道与 router 路由透传
 - **apps/camera_enum.py**: 摄像头枚举与输入源状态模型（Windows DirectShow 友好名、`open_camera()` 高帧率协商）
 - **apps/make_template.py / match_template.py**: 模板创建/匹配 CLI

@@ -26,9 +26,16 @@ vision/
 │   ├── paths.py                # artifact root 统一解析
 │   ├── parallel_pose_engine.py # 离线多 worker IMAGE-mode 推理
 │   └── video_writer.py         # 视频输出 codec 回退
+├── core/exam_session.py        # 考试编排纯状态机(无 Tk/OpenCV)
+├── core/exam_roster.py         # 名单导入 + 成绩台账 + Excel 导出
+├── core/presence_gate.py       # ROI 占用去抖闸门(无 UI/无 MediaPipe)
+├── core/exam_clip.py           # 派发前正侧帧截齐 + 走位/动作段裁剪
+├── core/exam_announcer.py      # 异步考试播报队列(默认 Windows TTS)
 ├── apps/                       # Python 入口
 │   ├── main.py                 # CLI runner
-│   ├── app_ui.py               # Tkinter desktop UI
+│   ├── app_ui.py               # Tkinter desktop UI(含动作分析池式对话框)
+│   ├── exam_panel.py           # Tk 考试面板(名单/ROI/开考/导出)
+│   ├── recording_postprocess.py# 双摄后处理链(转码→校验→池级比对)
 │   ├── ui_backend.py           # Vue/Tauri JSON bridge
 │   ├── camera_enum.py          # Windows 摄像头枚举与输入源状态
 │   ├── make_template.py        # 创建 pose 模板
@@ -147,6 +154,8 @@ Latest known desktop acceptance evidence, 2026-06-11:
 - Python 核心 / 算法：运行相关 `tests/test_*.py`，至少包含 `tests/test_pose33_v3_golden.py` 和受影响模块的契约测试。
 - batch paired / dual-stream：运行 `.\.venv\Scripts\python.exe -m pytest tests/test_batch_backend_args.py -q`，必要时加 `tests/test_compare_dual_streams.py -q`。
 - YOLO / layout / scoring：同时跑 `test_yolo_backend_contract.py`、`test_yolo_landmark_mapping.py`、`test_body_core_layout.py`、`test_tech_eval_contract.py`、`test_valid_mask_migration.py` 中相关子集。
+- 考试系统：运行 `.\.venv\Scripts\python.exe -m pytest tests/test_exam_session.py tests/test_exam_roster.py tests/test_exam_clip.py tests/test_presence_gate.py tests/test_recording_postprocess.py tests/test_exam_panel.py -q`。
+- **测试隔离**：`tests/conftest.py` 有 autouse fixture 把 `core.paths._prefs_path` 钉到临时文件，防止走真实录制路径的测试污染仓库根 `user_prefs.json`（曾致录制保存目录持久化失效）。新增会触碰用户偏好的测试不要绕过它，也不要直接读写真实 `user_prefs.json`。
 - Vue/Tauri / bridge：运行 `npm run verify:desktop`；小改也至少跑 `npm --prefix frontend run test` 和相关 `tests/test_ui_backend_*.py`。
 - 打包 / sidecar：运行 `npm run package:windows` 和 `.\.venv\Scripts\python.exe -m pytest tests/test_windows_packaging_smoke.py -q`。
 - 轻量语法检查：
