@@ -1214,6 +1214,16 @@ class App:
         self._exam_clip_lock = threading.Lock()
         self._exam_clip_threads: set[threading.Thread] = set()
 
+        # 学生练习模式（Qwen 视觉粗评，见 docs/error_analysis_plan.md §C）
+        self._student_practice_active = False
+        self._student_pending_record = False
+        self._student_judging = False
+        self._student_last_segment_dir: Path | None = None
+        self._student_judge_worker: threading.Thread | None = None
+        self._student_saved_auto_compare: bool | None = None
+        self._student_saved_skeleton: bool | None = None
+        self._student_saved_hands: bool | None = None
+
         self._stop_evt = threading.Event()
         self._worker: threading.Thread | None = None
         self._queue: Queue[tuple[np.ndarray, str]] = Queue(maxsize=1)
@@ -1371,20 +1381,27 @@ class App:
         self.camera_combo_2.pack(side="left", fill="x", expand=True)
         self.camera_combo_2.bind("<<ComboboxSelected>>", self._on_camera_2_selected)
 
+        # 教师主操作块（学生练习模式整体 pack_forget）
+        self._teacher_block = ttk.Frame(primary)
+        self._teacher_block.pack(fill="x")
+
         # 2) Model_Selector：仅驱动实时预览/骨架推理；黑盒评分固定 heavy。
-        ttk.Label(primary, text="预览姿态模型：").pack(anchor="w", pady=(10, 0))
+        ttk.Label(self._teacher_block, text="预览姿态模型：").pack(anchor="w", pady=(10, 0))
         self.model_combo = ttk.Combobox(
-            primary, textvariable=self.pose_var, values=["lite", "full", "heavy"], state="readonly"
+            self._teacher_block,
+            textvariable=self.pose_var,
+            values=["lite", "full", "heavy"],
+            state="readonly",
         )
         self.model_combo.pack(fill="x", pady=(6, 0))
         ttk.Label(
-            primary,
+            self._teacher_block,
             text="仅影响实时预览；录后黑盒评分固定 heavy",
             foreground="#555555",
         ).pack(anchor="w", pady=(2, 0))
 
         # 3) Start_Control：开始/停止（保留分离的 start/stop 双按钮与既有 _start/_stop 接线）。
-        start_row = ttk.Frame(primary)
+        start_row = ttk.Frame(self._teacher_block)
         start_row.pack(fill="x", pady=(10, 0))
         self.start_btn = ttk.Button(start_row, text="开始", command=self._start)
         self.start_btn.pack(side="left", fill="x", expand=True)
@@ -1397,7 +1414,7 @@ class App:
         #      - record_stop_btn（结束录制）：结束当前录制片段并落盘，但不结束识别会话，
         #        随后可在同一会话内再次「开始录制」生成新文件。
         #    会话未运行时整组禁用（需求 5.1）。
-        record_group = ttk.Labelframe(primary, text="录制", padding=8)
+        record_group = ttk.Labelframe(self._teacher_block, text="录制", padding=8)
         record_group.pack(fill="x", pady=(10, 0))
         self.record_btn = ttk.Button(
             record_group, text=RECORD_BTN_TEXT["idle"], command=self._on_record_toggle, state="disabled"
@@ -1462,12 +1479,84 @@ class App:
         self.record_dir_btn.pack(side="left", padx=(8, 0))
 
         # 5) Compare_Control：动作分析（模板比对，绑定 self.compare_btn）。
-        self.compare_btn = ttk.Button(primary, text="动作分析…", command=self._open_compare)
+        self.compare_btn = ttk.Button(
+            self._teacher_block, text="动作分析…", command=self._open_compare
+        )
         self.compare_btn.pack(fill="x", pady=(10, 0))
 
         # 考试模式：叫号 / ROI 占用 / 自动录制比对（设计见 docs/exam_system_design.md）
-        self.exam_btn = ttk.Button(primary, text="考试模式…", command=self._open_exam_panel)
+        self.exam_btn = ttk.Button(
+            self._teacher_block, text="考试模式…", command=self._open_exam_panel
+        )
         self.exam_btn.pack(fill="x", pady=(6, 0))
+
+        # 学生练习：Qwen 视觉粗评（无分数，见 docs/error_analysis_plan.md §C）
+        self.student_practice_btn = ttk.Button(
+            self._teacher_block,
+            text="学生练习…",
+            command=self._enter_student_practice,
+        )
+        self.student_practice_btn.pack(fill="x", pady=(6, 0))
+
+        # 学生练习块（默认不显示；进入模式后替换 teacher_block）
+        self._student_block = ttk.Labelframe(primary, text="学生练习（直拳·视觉点评）", padding=8)
+        self.student_exit_btn = ttk.Button(
+            self._student_block,
+            text="退出学生练习",
+            command=self._exit_student_practice,
+        )
+        self.student_exit_btn.pack(fill="x")
+        ttk.Label(
+            self._student_block,
+            text="仅点评，不打分；需本机 Qwen 服务（默认 :8091）",
+            foreground="#555555",
+            wraplength=320,
+        ).pack(anchor="w", pady=(6, 0))
+        student_btn_row = ttk.Frame(self._student_block)
+        student_btn_row.pack(fill="x", pady=(10, 0))
+        self.student_start_btn = ttk.Button(
+            student_btn_row, text="开始", command=self._student_start
+        )
+        self.student_start_btn.pack(side="left", fill="x", expand=True)
+        self.student_end_btn = ttk.Button(
+            student_btn_row,
+            text="结束",
+            command=self._student_end,
+            state="disabled",
+        )
+        self.student_end_btn.pack(side="left", fill="x", expand=True, padx=(8, 0))
+        self.student_judge_btn = ttk.Button(
+            self._student_block,
+            text="动作评判",
+            command=self._student_judge,
+            state="disabled",
+        )
+        self.student_judge_btn.pack(fill="x", pady=(8, 0))
+        self.student_status_var = StringVar(value="请选择正/侧双摄后点「开始」")
+        ttk.Label(
+            self._student_block,
+            textvariable=self.student_status_var,
+            wraplength=320,
+        ).pack(anchor="w", pady=(8, 0))
+        ttk.Label(self._student_block, text="点评结果：").pack(anchor="w", pady=(8, 0))
+        student_result_frame = ttk.Frame(self._student_block)
+        student_result_frame.pack(fill="both", expand=True, pady=(4, 0))
+        self.student_result_text = Text(
+            student_result_frame,
+            height=12,
+            width=36,
+            wrap="word",
+            state="disabled",
+            font=("Microsoft YaHei UI", 9),
+        )
+        student_result_scroll = ttk.Scrollbar(
+            student_result_frame,
+            orient="vertical",
+            command=self.student_result_text.yview,
+        )
+        self.student_result_text.configure(yscrollcommand=student_result_scroll.set)
+        self.student_result_text.pack(side="left", fill="both", expand=True)
+        student_result_scroll.pack(side="right", fill="y")
 
         # ===== 可见分隔线：在 Primary_Controls 与 Secondary_Options 之间插入显式
         # 水平分隔，强化主/次分区（需求 1.2）。布局测试可通过该属性定位。=====
@@ -1476,8 +1565,9 @@ class App:
 
         # ===== Secondary_Options 分组（次要选项，统一置于 Compare_Control 之后，
         # 需求 1.4/7.1/7.2/7.3/7.4）。=====
-        secondary = ttk.Labelframe(left, text="次要选项", padding=10)
-        secondary.pack(fill="x", pady=(0, 10))
+        self._secondary_block = ttk.Labelframe(left, text="次要选项", padding=10)
+        self._secondary_block.pack(fill="x", pady=(0, 10))
+        secondary = self._secondary_block
 
         # 输入源提示（显示当前选中的摄像头）。
         ttk.Label(secondary, textvariable=self.source_hint_var, wraplength=320).pack(
@@ -1495,20 +1585,23 @@ class App:
         )
 
         # ===== Status_Area（状态区，固定置于控制区底部，需求 7.6/7.7/7.8）。=====
-        info = ttk.Labelframe(left, text="状态", padding=10)
-        info.pack(fill="x")
+        self._info_block = ttk.Labelframe(left, text="状态", padding=10)
+        self._info_block.pack(fill="x")
+        info = self._info_block
         ttk.Label(info, textvariable=self.status_var, wraplength=320).pack(anchor="w")
         # 录制状态文本与 Result_Video 完整路径（需求 5.9/5.10）。
         ttk.Label(info, textvariable=self.recording_status_var, wraplength=320).pack(anchor="w", pady=(4, 0))
-        ttk.Separator(info, orient="horizontal").pack(fill="x", pady=8)
-        ttk.Label(info, text="双摄自动比对：").pack(anchor="w")
-        ttk.Label(info, textvariable=self.compare_segment_var, wraplength=320).pack(anchor="w", pady=(4, 0))
-        ttk.Label(info, textvariable=self.compare_status_var, wraplength=320).pack(anchor="w", pady=(4, 0))
-        ttk.Label(info, textvariable=self.compare_score_var, wraplength=320).pack(anchor="w", pady=(4, 0))
-        ttk.Label(info, textvariable=self.compare_error_var, wraplength=320).pack(anchor="w", pady=(4, 0))
-        ttk.Label(info, text="识别结果：").pack(anchor="w", pady=(8, 0))
-        ttk.Label(info, textvariable=self.actions_var, wraplength=320).pack(anchor="w")
-        online_match_row = ttk.Frame(info)
+        self._info_teacher_extra = ttk.Frame(info)
+        self._info_teacher_extra.pack(fill="x")
+        ttk.Separator(self._info_teacher_extra, orient="horizontal").pack(fill="x", pady=8)
+        ttk.Label(self._info_teacher_extra, text="双摄自动比对：").pack(anchor="w")
+        ttk.Label(self._info_teacher_extra, textvariable=self.compare_segment_var, wraplength=320).pack(anchor="w", pady=(4, 0))
+        ttk.Label(self._info_teacher_extra, textvariable=self.compare_status_var, wraplength=320).pack(anchor="w", pady=(4, 0))
+        ttk.Label(self._info_teacher_extra, textvariable=self.compare_score_var, wraplength=320).pack(anchor="w", pady=(4, 0))
+        ttk.Label(self._info_teacher_extra, textvariable=self.compare_error_var, wraplength=320).pack(anchor="w", pady=(4, 0))
+        ttk.Label(self._info_teacher_extra, text="识别结果：").pack(anchor="w", pady=(8, 0))
+        ttk.Label(self._info_teacher_extra, textvariable=self.actions_var, wraplength=320).pack(anchor="w")
+        online_match_row = ttk.Frame(self._info_teacher_extra)
         online_match_row.pack(fill="x", pady=(8, 0))
         ttk.Checkbutton(
             online_match_row,
@@ -1518,10 +1611,14 @@ class App:
         ttk.Label(online_match_row, textvariable=self.match_var, wraplength=210).pack(
             side="left", padx=(8, 0)
         )
-        ttk.Label(info, textvariable=self.progress_text_var, wraplength=320).pack(anchor="w", pady=(8, 0))
-        self.progress_bar = ttk.Progressbar(info, orient="horizontal", mode="determinate", maximum=100.0)
+        ttk.Label(self._info_teacher_extra, textvariable=self.progress_text_var, wraplength=320).pack(anchor="w", pady=(8, 0))
+        self.progress_bar = ttk.Progressbar(
+            self._info_teacher_extra, orient="horizontal", mode="determinate", maximum=100.0
+        )
         self.progress_bar.pack(fill="x", pady=(6, 0))
-        ttk.Label(info, text="提示：点击“停止”结束识别。").pack(anchor="w", pady=(8, 0))
+        ttk.Label(self._info_teacher_extra, text="提示：点击“停止”结束识别。").pack(
+            anchor="w", pady=(8, 0)
+        )
 
         # Right: preview
         right = ttk.Labelframe(outer, text="预览", padding=10)
@@ -2211,6 +2308,9 @@ class App:
                 if exam_row is not None
                 else App._current_auto_compare(self, prefer_ui=True)
             )
+            # 学生练习：永不自动模板比对
+            if bool(getattr(self, "_student_practice_active", False)):
+                auto_compare = False
             self._dual_auto_compare = bool(auto_compare)
             status_text = (
                 "自动比对：录制中" if auto_compare else "仅录制：录制中"
@@ -2279,6 +2379,9 @@ class App:
         App._end_recording_segment(self, discard=False)
 
     def _open_exam_panel(self) -> None:
+        if bool(getattr(self, "_student_practice_active", False)):
+            messagebox.showinfo("学生练习", "请先退出学生练习模式，再打开考试模式。")
+            return
         existing = getattr(self, "_exam_panel", None)
         if existing is not None:
             try:
@@ -2289,6 +2392,348 @@ class App:
         from apps.exam_panel import ExamPanel
 
         ExamPanel(self)
+
+    # ------------------------------------------------------------------
+    # 学生练习模式（Qwen 视觉粗评，无分数）
+    # ------------------------------------------------------------------
+
+    def _enter_student_practice(self) -> None:
+        """切换到学生练习极简界面：开始 / 结束 / 动作评判 / 预览。"""
+        if bool(getattr(self, "_student_practice_active", False)):
+            return
+        if bool(getattr(self, "_exam_active", False)) or bool(
+            getattr(self, "_exam_manual_locked", False)
+        ):
+            messagebox.showinfo("学生练习", "考试进行中，无法进入学生练习。")
+            return
+        if self._worker and self._worker.is_alive():
+            messagebox.showinfo(
+                "学生练习", "请先停止当前识别会话，再进入学生练习。"
+            )
+            return
+
+        self._student_practice_active = True
+        self._student_pending_record = False
+        self._student_judging = False
+        self._student_last_segment_dir = None
+
+        # 省 GPU：关骨架/手部/自动比对（不改正式评分算法，仅本模式会话策略）
+        self._student_saved_auto_compare = bool(self.auto_compare_var.get())
+        self._student_saved_skeleton = bool(self.record_skeleton_var.get())
+        self._student_saved_hands = bool(self.enable_hands_var.get())
+        self.auto_compare_var.set(False)
+        self.auto_compare_scale_var.set(0.0)
+        self._dual_auto_compare = False
+        self.record_skeleton_var.set(False)
+        self._dual_record_skeleton = False
+        self.enable_hands_var.set(False)
+        self.online_match_var.set(False)
+        self._sync_auto_compare_hint()
+
+        try:
+            self._teacher_block.pack_forget()
+        except Exception:
+            pass
+        try:
+            self.primary_secondary_separator.pack_forget()
+        except Exception:
+            pass
+        try:
+            self._secondary_block.pack_forget()
+        except Exception:
+            pass
+        try:
+            self._info_teacher_extra.pack_forget()
+        except Exception:
+            pass
+        try:
+            self.settings_btn.configure(state="disabled")
+        except Exception:
+            pass
+
+        self._student_block.pack(fill="both", expand=True, pady=(10, 0))
+        self._set_student_result_text(
+            "练习建议由本机 Qwen 视觉模型给出，非正式成绩、不打分。\n"
+            "流程：选双摄 → 开始（预览+开录）→ 做直拳 → 结束 → 动作评判。"
+        )
+        self.student_status_var.set("请选择正/侧双摄后点「开始」")
+        self._sync_student_buttons()
+        self.root.title("学生练习（直拳·视觉点评）")
+        self.status_var.set("学生练习模式")
+
+    def _exit_student_practice(self) -> None:
+        """退出学生练习并恢复教师控件。"""
+        if not bool(getattr(self, "_student_practice_active", False)):
+            return
+        if bool(getattr(self, "_student_judging", False)):
+            messagebox.showinfo("学生练习", "动作评判进行中，请稍候再退出。")
+            return
+
+        # 若仍在录制则先结束片段；再停会话
+        try:
+            if self._rec.state in {"recording", "paused"}:
+                App._end_recording_segment(self, discard=False)
+        except Exception:
+            pass
+        if self._worker and self._worker.is_alive():
+            self._stop()
+
+        self._student_practice_active = False
+        self._student_pending_record = False
+        self._student_judging = False
+
+        if self._student_saved_auto_compare is not None:
+            self.auto_compare_var.set(bool(self._student_saved_auto_compare))
+            self.auto_compare_scale_var.set(
+                1.0 if self._student_saved_auto_compare else 0.0
+            )
+            self._dual_auto_compare = bool(self._student_saved_auto_compare)
+        if self._student_saved_skeleton is not None:
+            self.record_skeleton_var.set(bool(self._student_saved_skeleton))
+        if self._student_saved_hands is not None:
+            self.enable_hands_var.set(bool(self._student_saved_hands))
+        self._student_saved_auto_compare = None
+        self._student_saved_skeleton = None
+        self._student_saved_hands = None
+        self._sync_auto_compare_hint()
+
+        try:
+            self._student_block.pack_forget()
+        except Exception:
+            pass
+        try:
+            self._teacher_block.pack(fill="x")
+        except Exception:
+            pass
+        try:
+            self.primary_secondary_separator.pack(fill="x", pady=8)
+        except Exception:
+            pass
+        try:
+            self._secondary_block.pack(fill="x", pady=(0, 10))
+        except Exception:
+            pass
+        try:
+            self._info_teacher_extra.pack(fill="x")
+        except Exception:
+            pass
+        try:
+            self.settings_btn.configure(state="normal")
+        except Exception:
+            pass
+
+        self.root.title("MediaPipe 动作识别（人体姿态 + 手部）")
+        self.status_var.set("就绪")
+        self._set_running_controls(False)
+
+    def _student_dual_cameras_ready(self) -> tuple[bool, str]:
+        label2 = (self.camera_choice_var_2.get() or "").strip()
+        if not label2 or label2 == NO_SECOND_CAMERA:
+            return False, "学生练习需要正/侧双摄像头，请选择第二摄像头（侧面）。"
+        label1 = (self.camera_choice_var.get() or "").strip()
+        if not label1:
+            return False, "请选择第一摄像头（正面）。"
+        return True, ""
+
+    def _sync_student_buttons(self) -> None:
+        if not bool(getattr(self, "_student_practice_active", False)):
+            return
+        judging = bool(getattr(self, "_student_judging", False))
+        recording = False
+        try:
+            recording = self._rec.state in {"recording", "paused"}
+        except Exception:
+            recording = False
+        session_alive = bool(self._worker and self._worker.is_alive())
+        has_segment = self._student_last_segment_dir is not None
+
+        try:
+            self.student_start_btn.configure(
+                state="disabled" if judging or recording else "normal"
+            )
+            self.student_end_btn.configure(
+                state="normal" if (recording and not judging) else "disabled"
+            )
+            self.student_judge_btn.configure(
+                state="normal" if (has_segment and not judging and not recording) else "disabled"
+            )
+            self.student_exit_btn.configure(
+                state="disabled" if judging else "normal"
+            )
+        except Exception:
+            pass
+        # 会话已开但未录时，开始按钮仍可用（再开一段）
+        if session_alive and not recording and not judging:
+            try:
+                self.student_start_btn.configure(state="normal")
+            except Exception:
+                pass
+
+    def _set_student_result_text(self, text: str) -> None:
+        widget = getattr(self, "student_result_text", None)
+        if widget is None:
+            return
+        try:
+            widget.configure(state="normal")
+            widget.delete("1.0", "end")
+            widget.insert("1.0", text)
+            widget.configure(state="disabled")
+        except Exception:
+            pass
+
+    def _student_start(self) -> None:
+        """开始 = 开双摄预览并开录。"""
+        if not bool(getattr(self, "_student_practice_active", False)):
+            return
+        if bool(getattr(self, "_student_judging", False)):
+            return
+        ok, err = self._student_dual_cameras_ready()
+        if not ok:
+            messagebox.showwarning("学生练习", err)
+            return
+
+        # 强制仅录制、无骨架
+        self.auto_compare_var.set(False)
+        self.auto_compare_scale_var.set(0.0)
+        self._dual_auto_compare = False
+        self.record_skeleton_var.set(False)
+        self._dual_record_skeleton = False
+        self.enable_hands_var.set(False)
+
+        session_alive = bool(self._worker and self._worker.is_alive())
+        if not session_alive:
+            self._student_pending_record = True
+            self.student_status_var.set("正在启动双摄预览…")
+            try:
+                self._start()
+            except Exception as e:
+                self._student_pending_record = False
+                messagebox.showerror("学生练习", f"启动失败：{e}")
+                self._sync_student_buttons()
+                return
+            # 若单摄路径（不应发生）dual ready 立即为 True，尝试立刻开录
+            if bool(getattr(self, "_dual_recording_ready", False)):
+                self._student_try_begin_recording()
+            self._sync_student_buttons()
+            return
+
+        # 会话已在跑：直接开新段
+        if self._rec.state in {"recording", "paused"}:
+            messagebox.showinfo("学生练习", "当前正在录制，请先点「结束」。")
+            return
+        self._student_try_begin_recording()
+
+    def _student_try_begin_recording(self) -> None:
+        if not bool(getattr(self, "_student_practice_active", False)):
+            return
+        if bool(getattr(self, "_student_judging", False)):
+            return
+        if not bool(getattr(self, "_dual_recording_ready", False)):
+            self._student_pending_record = True
+            self.student_status_var.set("双摄准备中，就绪后自动开录…")
+            self._sync_student_buttons()
+            return
+        self._student_pending_record = False
+        self._dual_auto_compare = False
+        ok = App._begin_recording_segment(self)
+        if not ok:
+            self.student_status_var.set("开录失败，请重试「开始」")
+            messagebox.showerror("学生练习", "无法开始录制，请确认双摄已就绪。")
+            self._sync_student_buttons()
+            return
+        self.student_status_var.set("录制中…完成动作后点「结束」")
+        self._sync_student_buttons()
+
+    def _student_end(self) -> None:
+        """结束 = 停录落盘，不自动评判。"""
+        if not bool(getattr(self, "_student_practice_active", False)):
+            return
+        if bool(getattr(self, "_student_judging", False)):
+            return
+        if self._rec.state not in {"recording", "paused"}:
+            self.student_status_var.set("当前没有进行中的录制")
+            self._sync_student_buttons()
+            return
+        App._end_recording_segment(self, discard=False)
+        # segment_dir 在 dispatch 里写入 _student_last_segment_dir
+        if self._student_last_segment_dir is None and self._record_stamp:
+            base = Path(getattr(self, "_record_base_dir", outputs_dir()))
+            stamp = self._record_stamp
+            # finalize 可能已清空 stamp；尽量用刚才的目录
+            candidate = base / stamp[:8] / f"record_{stamp}"
+            if candidate.is_dir():
+                self._student_last_segment_dir = candidate
+        if self._student_last_segment_dir is not None:
+            self.student_status_var.set(
+                f"已保存：{self._student_last_segment_dir.name}，可点「动作评判」"
+            )
+        else:
+            self.student_status_var.set("录制已结束（未解析到片段目录，请重试）")
+        self._sync_student_buttons()
+
+    def _student_judge(self) -> None:
+        """手动触发 Qwen 直拳点评。"""
+        if not bool(getattr(self, "_student_practice_active", False)):
+            return
+        if bool(getattr(self, "_student_judging", False)):
+            return
+        segment_dir = self._student_last_segment_dir
+        if segment_dir is None or not Path(segment_dir).is_dir():
+            messagebox.showinfo("动作评判", "请先「开始」录制并「结束」一段练习。")
+            return
+        if self._rec.state in {"recording", "paused"}:
+            messagebox.showinfo("动作评判", "请先结束录制再评判。")
+            return
+
+        from core.qwen_coach import analyze_jab_segment, health_check, resolve_base_url
+
+        ok_health, health_msg = health_check(timeout_s=3.0)
+        if not ok_health:
+            messagebox.showerror(
+                "动作评判",
+                "本机 Qwen 服务不可用。\n"
+                f"地址：{resolve_base_url()}\n"
+                "请先运行 scripts/start_qwen_server.ps1，或手动启动 llama-server。\n"
+                f"详情：{health_msg}",
+            )
+            return
+
+        self._student_judging = True
+        self.student_status_var.set("评判中…（约数秒到十余秒）")
+        self._set_student_result_text("正在抽帧并请求视觉模型，请稍候…")
+        self._sync_student_buttons()
+        seg = Path(segment_dir)
+
+        def _run() -> None:
+            result = analyze_jab_segment(seg, save_coach_json=True)
+
+            def _ui() -> None:
+                self._student_judging = False
+                if not bool(getattr(self, "_student_practice_active", False)):
+                    return
+                self._set_student_result_text(result.format_display())
+                if result.ok:
+                    lat = (
+                        f"{result.latency_s:.1f}s"
+                        if result.latency_s is not None
+                        else "-"
+                    )
+                    self.student_status_var.set(f"评判完成（耗时 {lat}）")
+                else:
+                    self.student_status_var.set(
+                        f"评判失败：{result.error_code or 'error'}"
+                    )
+                self._sync_student_buttons()
+
+            try:
+                self.root.after(0, _ui)
+            except Exception:
+                self._student_judging = False
+
+        self._student_judge_worker = threading.Thread(
+            target=_run, name="student-qwen-judge", daemon=True
+        )
+        self._student_judge_worker.start()
 
     def _exam_primary_rotate(self) -> int:
         try:
@@ -2532,6 +2977,14 @@ class App:
             self._transcode_async(finalization.front_path)
             self._transcode_async(finalization.side_path)
             return
+        # 学生练习：尽早记下片段目录，供「动作评判」使用（即使后续 early-return）
+        if (
+            bool(getattr(self, "_student_practice_active", False))
+            and finalization.segment_dir is not None
+            and finalization.has_activity
+        ):
+            self._student_last_segment_dir = Path(finalization.segment_dir)
+
         processor = getattr(self, "_record_postprocessor", None)
         if processor is None:
             self._transcode_async(finalization.front_path)
@@ -2560,6 +3013,9 @@ class App:
         auto_compare = bool(finalization.auto_compare)
         if exam_row is not None:
             auto_compare = True
+        # 学生练习：强制仅录制（转码落盘，不走 DTW 比对）
+        if bool(getattr(self, "_student_practice_active", False)):
+            auto_compare = False
 
         previous_latest = getattr(self, "_latest_compare_segment_id", None)
         # submit() 会同步发布 queued，消费者也可能立即发布终态。先建立 guard，
@@ -4920,10 +5376,29 @@ class App:
                     return
                 self._dual_recording_ready = True
             record_btn = getattr(self, "record_btn", None)
-            if record_btn is not None:
+            if record_btn is not None and not bool(
+                getattr(self, "_student_practice_active", False)
+            ):
                 record_btn.configure(
                     state="normal", text=RECORD_BTN_TEXT["idle"]
                 )
+            # 学生练习：预览就绪后自动开录（开始 = 预览+开录）
+            if bool(getattr(self, "_student_practice_active", False)) and bool(
+                getattr(self, "_student_pending_record", False)
+            ):
+                try:
+                    self._student_try_begin_recording()
+                except Exception:
+                    self._student_pending_record = False
+                    try:
+                        self.student_status_var.set("自动开录失败，请再点「开始」")
+                    except Exception:
+                        pass
+            elif bool(getattr(self, "_student_practice_active", False)):
+                try:
+                    self._sync_student_buttons()
+                except Exception:
+                    pass
 
         if getattr(self, "_closing", False):
             return
@@ -5137,6 +5612,10 @@ class App:
 
 
 def main() -> None:
+    # 启动即触发 models_dir()：解析模型根（onedir 冻结→_internal/models 直接用；
+    # onefile 冻结→seed 内置的四个模型到 exe 同级），使「设置 → MediaPipe 模型」
+    # 一打开就显示已安装、开箱即用（源码运行为普通路径解析）。
+    models_dir()
     root = Tk()
     App(root)
     root.mainloop()

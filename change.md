@@ -1,3 +1,31 @@
+## 2026-07-20: [feat] 学生练习模式（Qwen 直拳视觉粗评，无分数）
+
+### 问题描述
+
+教师端已有双摄录制 + 模板比对/考试编排；需要面向学生的极简练习页：开始、结束、
+动作评判、预览。评判走本机 Qwen3-VL 粗粒度中文点评，不打分、不改正式评分链路。
+
+### 修改内容
+
+- **`core/qwen_coach.py`**（新增）：直拳检查项白名单、`unable_to_judge` 契约、正/侧
+  抽帧 contact sheet、stdlib HTTP 调 `llama-server`、结果归一与展示文本（无分数）。
+- **`apps/app_ui.py`**：主界面「学生练习…」模式；开始=双摄预览+开录、结束=停录、
+  动作评判=手动 Qwen；强制 `auto_compare=False`、关骨架/手部；与考试模式互斥。
+- **`tests/test_qwen_coach.py`**（新增）：契约过滤、mock HTTP、抽帧与 `coach.json`。
+- **`scripts/start_qwen_server.ps1`**（新增）：启动 `E:\AI\qwen3-vl` 本机服务（:8091）。
+- **`docs/error_analysis_plan.md` §C**：记录学生 UI v1（prompt-only）范围与白名单。
+
+### 验证方法
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/test_qwen_coach.py tests/test_app_controls.py tests/test_app_ui_dual_camera.py -q
+.\.venv\Scripts\python.exe -m py_compile core/qwen_coach.py apps/app_ui.py
+```
+
+手工：启动 `scripts/start_qwen_server.ps1` → 学生练习 → 双摄开始/结束 → 动作评判。
+
+---
+
 ## 2026-07-14: [fix] 考试系统结构对照 + 重考可用性问题
 
 ### 问题描述
