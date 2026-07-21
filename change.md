@@ -1,3 +1,24 @@
+## 2026-07-20: [fix] 学生点评：纯固定文案，禁止回显模型自由文本
+
+### 问题描述
+
+Codex 二次阻塞：unknown action 回显「模型标记：得分95分」；自由 summary/problem/suggestion
+仍优先展示（如 guard_hand_low →「闭眼向后走十步」）。
+
+### 修改内容
+
+- **core/qwen_coach.py**：summary/problem/suggestion 仅由 code+severity+view_hint / 固定 reason 生成；
+  未知 action 用固定 not_jab 文案，warning 只记 len，不回显原值；raw_text 恒空。
+- **tests/test_qwen_coach.py**：得分95分 action、闭眼建议、roundhouse 不回显回归。
+
+### 验证方法
+
+`powershell
+.\.venv\Scripts\python.exe -m pytest tests/test_qwen_coach.py -q
+`
+
+---
+
 ## 2026-07-20: [fix] 学生练习 Codex P1/P2：fail-closed、受控文案、后处理就绪、健康检查后台化
 
 ### 问题描述

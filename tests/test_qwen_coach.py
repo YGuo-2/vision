@@ -131,14 +131,18 @@ def test_normalize_whitelist_filter():
     assert any("dropped_issues" in w for w in result.warnings)
     text = result.format_display()
     assert "非正式成绩" in text
-    assert "分数" not in text
     assert "护手" in text
-    # to_dict 不得带模型原文 raw_text
+    # 自由 summary/problem/suggestion 不得出现
+    assert "有问题" not in text
+    assert "肘未伸直" not in result.issues[0].problem
+    assert result.issues[0].problem == "出拳手臂未充分伸直（正面，轻微）"
+    assert result.issues[0].suggestion == qc.JAB_ISSUE_SUGGESTIONS["arm_not_extended"]
+    assert result.issues[1].suggestion == qc.JAB_ISSUE_SUGGESTIONS["guard_hand_low"]
     assert "raw_text" not in result.to_dict()
 
 
 def test_normalize_unknown_action_fail_closed():
-    """非直拳 action 不得显示为成功直拳。"""
+    """非直拳 action 不得显示为成功直拳，且不回显模型 action 原值。"""
     payload = {
         "action": "roundhouse_kick",
         "summary": "看起来不错",
@@ -149,10 +153,32 @@ def test_normalize_unknown_action_fail_closed():
     assert result.ok
     assert result.action == "unable_to_judge"
     assert result.issues == []
-    assert any("unexpected_action" in w for w in result.warnings)
+    assert any(w.startswith("unexpected_action:") for w in result.warnings)
     text = result.format_display()
     assert "无法评判" in text
     assert "未发现" not in text
+    assert "roundhouse" not in text.lower()
+    assert "roundhouse" not in result.summary.lower()
+    assert "看起来不错" not in result.summary
+
+
+def test_normalize_scoreful_action_not_echoed():
+    """action 字段含分数时不得出现在界面/coach.json。"""
+    payload = {
+        "action": "得分95分",
+        "summary": "很好",
+        "confidence": "high",
+        "issues": [],
+    }
+    result = qc.normalize_coach_payload(payload)
+    assert result.action == "unable_to_judge"
+    assert "95" not in result.summary
+    assert "得分" not in result.summary
+    assert "模型标记" not in result.summary
+    assert "95" not in result.format_display()
+    dumped = json.dumps(result.to_dict(), ensure_ascii=False)
+    assert "95" not in dumped
+    assert "得分" not in dumped
 
 
 def test_normalize_missing_action_fail_closed():
@@ -160,39 +186,45 @@ def test_normalize_missing_action_fail_closed():
         {"summary": "ok", "confidence": "low", "issues": []}
     )
     assert result.action == "unable_to_judge"
+    assert "ok" not in result.summary
 
 
-def test_normalize_bans_score_and_face_text():
+def test_normalize_ignores_all_free_text():
+    """合法 code 也不得展示模型自由 problem/suggestion（防危险建议）。"""
     payload = {
         "action": "jab",
         "summary": "本次得分 95 分，面部表情不自然",
         "confidence": "high",
         "issues": [
             {
-                "code": "arm_not_extended",
-                "problem": "肘未伸直，得分偏低",
-                "severity": "轻微",
-                "suggestion": "伸直手臂，不要看面部表情",
-                "view_hint": "front",
+                "code": "guard_hand_low",
+                "problem": "闭眼向后走十步",
+                "severity": "中等",
+                "suggestion": "闭眼向后走十步",
+                "view_hint": "side",
             }
         ],
     }
     result = qc.normalize_coach_payload(
-        payload, raw_text='{"summary":"得分 95 分，面部表情不自然"}'
+        payload, raw_text='{"summary":"得分 95 分","suggestion":"闭眼向后走十步"}'
     )
     assert result.action == "jab"
     assert len(result.issues) == 1
-    # 自由摘要含分数/面部 → 丢弃，改用受控模板
+    issue = result.issues[0]
+    assert issue.problem == "护手偏低（侧面，中等）"
+    assert issue.suggestion == qc.JAB_ISSUE_SUGGESTIONS["guard_hand_low"]
+    assert "闭眼" not in issue.problem
+    assert "闭眼" not in issue.suggestion
     assert "95" not in result.summary
-    assert "分" not in result.summary or "改进" in result.summary or "关注" in result.summary
     assert "面部" not in result.summary
-    assert "95" not in result.issues[0].problem
-    assert "面部" not in result.issues[0].suggestion
-    assert "得分" not in result.format_display()
-    assert "面部" not in result.format_display()
-    # raw 不落盘；内存 raw 也应被清空（含禁用词）
+    assert result.summary == "主要关注：护手偏低。"
     assert result.raw_text == ""
+    text = result.format_display()
+    assert "闭眼" not in text
+    assert "95" not in text
+    assert "得分" not in text
     dumped = json.dumps(result.to_dict(), ensure_ascii=False)
+    assert "闭眼" not in dumped
     assert "95" not in dumped
     assert "raw_text" not in dumped
 
@@ -214,6 +246,7 @@ def test_normalize_jab_with_only_invalid_issues_fail_closed():
     result = qc.normalize_coach_payload(payload)
     assert result.action == "unable_to_judge"
     assert result.issues == []
+    assert "表情" not in result.summary
 
 
 def test_normalize_unable_to_judge_clears_issues():

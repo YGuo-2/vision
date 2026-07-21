@@ -191,44 +191,44 @@ def sanitize_coach_text(
     return value
 
 
+# unable_to_judge 固定原因码 → 固定中文（绝不回显模型原值）
+_UNABLE_REASON_TEXT: dict[str, str] = {
+    "not_jab": "未能确认为直拳。请正对镜头重做直拳后重试。",
+    "missing_action": "未能识别动作类型。请正对镜头重做直拳后重试。",
+    "issues_all_dropped": "有效检查项为空，无法可靠点评。请调整机位后重试。",
+    "evidence": "证据不足，请重试：保证全身入画、光线充足、机位稳定。",
+}
+
+
 def controlled_summary(
     *,
     action: str,
     issues: Sequence[CoachIssue],
-    free_summary: str | None,
-    unexpected_action: str | None = None,
+    unable_reason: str | None = None,
 ) -> str:
-    """生成受控总结：优先模板，自由摘要仅在通过消毒后附加。"""
-    free = sanitize_coach_text(free_summary)
+    """仅由 action / issues / 固定 reason 生成总结，**不使用模型自由文本**。"""
     if action == "unable_to_judge":
-        if unexpected_action:
-            return (
-                free
-                or f"未能确认为直拳（模型标记：{unexpected_action}）。请正对镜头重做直拳。"
-            )
-        return free or "证据不足，请重试：保证全身入画、光线充足、机位稳定。"
+        key = unable_reason if unable_reason in _UNABLE_REASON_TEXT else "evidence"
+        return _UNABLE_REASON_TEXT[key]
     if not issues:
-        return free or "未发现白名单内明显问题，请继续保持。"
+        return "未发现白名单内明显问题，请继续保持。"
     labels = "、".join(JAB_ISSUE_CODES.get(i.code, i.code) for i in issues)
-    base = f"主要关注：{labels}。"
-    if free and free not in base:
-        return f"{base}{free}"
-    return base
+    return f"主要关注：{labels}。"
 
 
 def controlled_issue_texts(
     code: str,
     *,
-    free_problem: str | None,
-    free_suggestion: str | None,
+    severity: str,
+    view_hint: str,
 ) -> tuple[str, str]:
-    """白名单 code → 受控现象/建议文案。"""
+    """仅由 code + severity + view_hint 生成现象/建议，**不使用模型自由文本**。"""
     label = JAB_ISSUE_CODES.get(code, code)
-    problem = sanitize_coach_text(free_problem) or label
-    suggestion = (
-        sanitize_coach_text(free_suggestion)
-        or JAB_ISSUE_SUGGESTIONS.get(code)
-        or f"请针对「{label}」对照标准动作慢速练习。"
+    view = _view_zh(view_hint)
+    sev = severity if severity in SEVERITIES else "轻微"
+    problem = f"{label}（{view}，{sev}）"
+    suggestion = JAB_ISSUE_SUGGESTIONS.get(code) or (
+        f"请针对「{label}」对照标准动作慢速练习。"
     )
     return problem, suggestion
 
@@ -543,26 +543,34 @@ def normalize_coach_payload(
     raw_text: str = "",
     latency_s: float | None = None,
 ) -> CoachResult:
-    """将模型 JSON 归一为 CoachResult：白名单 + fail-closed + 受控文案。"""
+    """将模型 JSON 归一为 CoachResult：白名单 + fail-closed + **纯固定文案**。
+
+    模型自由文本（summary/problem/suggestion/action 原值）一律不进入展示与 coach.json。
+    仅信任结构化字段：action 枚举、issue.code、severity、view_hint、confidence。
+    """
     warnings: list[str] = []
+    # 保留原始 action 仅用于分类，绝不写入 summary / 展示
     action_raw = str(payload.get("action") or "").strip().lower()
-    unexpected_action: str | None = None
+    unable_reason: str | None = None
     if action_raw in _UNABLE_ACTIONS:
         action = "unable_to_judge"
+        unable_reason = "evidence"
     elif action_raw in _JAB_ACTIONS:
         action = "jab"
-    else:
-        # 未知 / 缺失 action 一律 fail-closed，禁止误判为成功直拳
+    elif not action_raw:
         action = "unable_to_judge"
-        unexpected_action = action_raw or "missing"
-        warnings.append(f"unexpected_action:{unexpected_action}")
+        unable_reason = "missing_action"
+        warnings.append("unexpected_action:missing")
+    else:
+        # 未知 action 一律 fail-closed；warning 可记短哈希/长度，不回显原文
+        action = "unable_to_judge"
+        unable_reason = "not_jab"
+        warnings.append(f"unexpected_action:len={len(action_raw)}")
 
     confidence = str(payload.get("confidence") or "low").strip().lower()
     if confidence not in CONFIDENCES:
         confidence = "low"
         warnings.append("confidence_clamped")
-
-    free_summary = str(payload.get("summary") or "").strip()
 
     issues_raw = payload.get("issues") or []
     if not isinstance(issues_raw, list):
@@ -586,9 +594,7 @@ def normalize_coach_payload(
         if view_hint not in VIEW_HINTS:
             view_hint = "unknown"
         problem, suggestion = controlled_issue_texts(
-            code,
-            free_problem=str(item.get("problem") or ""),
-            free_suggestion=str(item.get("suggestion") or ""),
+            code, severity=severity, view_hint=view_hint
         )
         issues.append(
             CoachIssue(
@@ -606,7 +612,7 @@ def normalize_coach_payload(
     # 宣称 jab 但有效 issue 全被滤掉 → 不可靠，fail-closed
     if action == "jab" and not issues and dropped > 0:
         action = "unable_to_judge"
-        unexpected_action = unexpected_action or "issues_all_dropped"
+        unable_reason = "issues_all_dropped"
         warnings.append("jab_with_only_invalid_issues")
 
     if action == "unable_to_judge":
@@ -615,15 +621,10 @@ def normalize_coach_payload(
     summary = controlled_summary(
         action=action,
         issues=issues,
-        free_summary=free_summary,
-        unexpected_action=unexpected_action,
+        unable_reason=unable_reason,
     )
-    # raw_text 仅内存调试用；不进 to_dict / coach.json，且截断
-    safe_raw = ""
-    if raw_text:
-        # 不落盘；内存最多保留短摘要且去掉疑似分数行
-        clipped = str(raw_text).strip()[:200]
-        safe_raw = clipped if sanitize_coach_text(clipped, max_len=200) else ""
+    # 模型原文永不进入结果对象（展示 / coach.json / 调试字段一律清空）
+    _ = raw_text  # 显式丢弃
 
     return CoachResult(
         ok=True,
@@ -631,7 +632,7 @@ def normalize_coach_payload(
         summary=summary,
         confidence=confidence,
         issues=issues,
-        raw_text=safe_raw,
+        raw_text="",
         latency_s=latency_s,
         warnings=warnings,
     )
