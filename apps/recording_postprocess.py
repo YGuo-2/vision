@@ -222,6 +222,9 @@ class PostprocessUpdate:
     error_code: str | None = None
     # 逐动作子分明细：({"name","view","score","start","end"}, ...)
     action_scores: tuple[dict[str, Any], ...] = ()
+    # 转码后的最终视频路径（学生练习等消费方用；中间态也可带当前源）
+    front_video: Path | None = None
+    side_video: Path | None = None
 
 
 @dataclass
@@ -1139,6 +1142,10 @@ class DualRecordingPostProcessor:
     def _update_from_payload(payload: dict[str, Any], message: str) -> PostprocessUpdate:
         result = payload.get("result") or {}
         error = payload.get("error") or {}
+        front_raw = payload.get("front_video_path")
+        side_raw = payload.get("side_video_path")
+        front_video = Path(str(front_raw)) if front_raw else None
+        side_video = Path(str(side_raw)) if side_raw else None
         return PostprocessUpdate(
             segment_id=str(payload["segment_id"]),
             status=payload["status"],
@@ -1148,6 +1155,8 @@ class DualRecordingPostProcessor:
             combined_percent=result.get("combined_percent"),
             error_code=error.get("code"),
             action_scores=tuple(result.get("action_scores") or ()),
+            front_video=front_video,
+            side_video=side_video,
         )
 
     def _notify(self, update: PostprocessUpdate) -> None:

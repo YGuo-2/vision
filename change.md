@@ -1,3 +1,27 @@
+## 2026-07-20: [fix] 学生练习 Codex P1/P2：fail-closed、受控文案、后处理就绪、健康检查后台化
+
+### 问题描述
+
+Codex deep review：未知 action 误判为成功直拳；summary/problem 可泄漏分数与面部评价；
+停录后立刻可评判与转码竞态；health_check 阻塞 Tk 主线程。
+
+### 修改内容
+
+- **core/qwen_coach.py**：未知/缺失 action fail-closed → unable_to_judge；白名单 issue 全滤掉也 fail-closed；
+  sanitize + 受控模板；coach.json 不写 raw_text；支持显式 front/side 终态路径。
+- **apps/recording_postprocess.py**：PostprocessUpdate 透传 front_video/side_video。
+- **apps/app_ui.py**：后处理终态就绪后才启用「动作评判」；评判用终态视频；
+  health+推理同后台线程；顺带修退出 pack 顺序与 online_match 恢复。
+- **tests/test_qwen_coach.py**：roundhouse_kick / 分数文案 / invalid issues 回归。
+
+### 验证方法
+
+`powershell
+.\.venv\Scripts\python.exe -m pytest tests/test_qwen_coach.py tests/test_app_controls.py tests/test_app_ui_dual_camera.py tests/test_recording_postprocess.py -q
+`
+
+---
+
 ## 2026-07-20: [feat] 学生练习模式（Qwen 直拳视觉粗评，无分数）
 
 ### 问题描述

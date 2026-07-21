@@ -1219,10 +1219,15 @@ class App:
         self._student_pending_record = False
         self._student_judging = False
         self._student_last_segment_dir: Path | None = None
+        self._student_last_segment_id: str | None = None
+        self._student_front_video: Path | None = None
+        self._student_side_video: Path | None = None
+        self._student_segment_ready = False  # 后处理终态且视频可读后才可评判
         self._student_judge_worker: threading.Thread | None = None
         self._student_saved_auto_compare: bool | None = None
         self._student_saved_skeleton: bool | None = None
         self._student_saved_hands: bool | None = None
+        self._student_saved_online_match: bool | None = None
 
         self._stop_evt = threading.Event()
         self._worker: threading.Thread | None = None
@@ -2416,11 +2421,16 @@ class App:
         self._student_pending_record = False
         self._student_judging = False
         self._student_last_segment_dir = None
+        self._student_last_segment_id = None
+        self._student_front_video = None
+        self._student_side_video = None
+        self._student_segment_ready = False
 
         # 省 GPU：关骨架/手部/自动比对（不改正式评分算法，仅本模式会话策略）
         self._student_saved_auto_compare = bool(self.auto_compare_var.get())
         self._student_saved_skeleton = bool(self.record_skeleton_var.get())
         self._student_saved_hands = bool(self.enable_hands_var.get())
+        self._student_saved_online_match = bool(self.online_match_var.get())
         self.auto_compare_var.set(False)
         self.auto_compare_scale_var.set(0.0)
         self._dual_auto_compare = False
@@ -2481,6 +2491,9 @@ class App:
         self._student_practice_active = False
         self._student_pending_record = False
         self._student_judging = False
+        self._student_segment_ready = False
+        self._student_front_video = None
+        self._student_side_video = None
 
         if self._student_saved_auto_compare is not None:
             self.auto_compare_var.set(bool(self._student_saved_auto_compare))
@@ -2492,9 +2505,12 @@ class App:
             self.record_skeleton_var.set(bool(self._student_saved_skeleton))
         if self._student_saved_hands is not None:
             self.enable_hands_var.set(bool(self._student_saved_hands))
+        if self._student_saved_online_match is not None:
+            self.online_match_var.set(bool(self._student_saved_online_match))
         self._student_saved_auto_compare = None
         self._student_saved_skeleton = None
         self._student_saved_hands = None
+        self._student_saved_online_match = None
         self._sync_auto_compare_hint()
 
         try:
@@ -2505,12 +2521,24 @@ class App:
             self._teacher_block.pack(fill="x")
         except Exception:
             pass
+        # 恢复 pack 顺序：primary → separator → secondary → info
+        info_block = getattr(self, "_info_block", None)
         try:
-            self.primary_secondary_separator.pack(fill="x", pady=8)
+            if info_block is not None:
+                self.primary_secondary_separator.pack(
+                    fill="x", pady=8, before=info_block
+                )
+            else:
+                self.primary_secondary_separator.pack(fill="x", pady=8)
         except Exception:
             pass
         try:
-            self._secondary_block.pack(fill="x", pady=(0, 10))
+            if info_block is not None:
+                self._secondary_block.pack(
+                    fill="x", pady=(0, 10), before=info_block
+                )
+            else:
+                self._secondary_block.pack(fill="x", pady=(0, 10))
         except Exception:
             pass
         try:
@@ -2545,7 +2573,8 @@ class App:
         except Exception:
             recording = False
         session_alive = bool(self._worker and self._worker.is_alive())
-        has_segment = self._student_last_segment_dir is not None
+        # 仅后处理终态就绪后才允许评判（避免与转码抢文件）
+        can_judge = bool(getattr(self, "_student_segment_ready", False))
 
         try:
             self.student_start_btn.configure(
@@ -2555,7 +2584,9 @@ class App:
                 state="normal" if (recording and not judging) else "disabled"
             )
             self.student_judge_btn.configure(
-                state="normal" if (has_segment and not judging and not recording) else "disabled"
+                state="normal"
+                if (can_judge and not judging and not recording)
+                else "disabled"
             )
             self.student_exit_btn.configure(
                 state="disabled" if judging else "normal"
@@ -2645,7 +2676,7 @@ class App:
         self._sync_student_buttons()
 
     def _student_end(self) -> None:
-        """结束 = 停录落盘，不自动评判。"""
+        """结束 = 停录落盘，不自动评判；须等后处理终态才可评判。"""
         if not bool(getattr(self, "_student_practice_active", False)):
             return
         if bool(getattr(self, "_student_judging", False)):
@@ -2654,58 +2685,171 @@ class App:
             self.student_status_var.set("当前没有进行中的录制")
             self._sync_student_buttons()
             return
+        # 新一段：清空就绪态，避免误用上一段视频
+        self._student_segment_ready = False
+        self._student_front_video = None
+        self._student_side_video = None
         App._end_recording_segment(self, discard=False)
-        # segment_dir 在 dispatch 里写入 _student_last_segment_dir
+        # segment_dir / segment_id 在 dispatch 里写入
         if self._student_last_segment_dir is None and self._record_stamp:
             base = Path(getattr(self, "_record_base_dir", outputs_dir()))
             stamp = self._record_stamp
-            # finalize 可能已清空 stamp；尽量用刚才的目录
             candidate = base / stamp[:8] / f"record_{stamp}"
             if candidate.is_dir():
                 self._student_last_segment_dir = candidate
+                self._student_last_segment_id = candidate.name
         if self._student_last_segment_dir is not None:
             self.student_status_var.set(
-                f"已保存：{self._student_last_segment_dir.name}，可点「动作评判」"
+                f"已停录：{self._student_last_segment_dir.name}，"
+                "正在转码落盘，完成后可「动作评判」…"
             )
         else:
             self.student_status_var.set("录制已结束（未解析到片段目录，请重试）")
         self._sync_student_buttons()
 
+    def _on_student_postprocess_update(self, update: PostprocessUpdate) -> None:
+        """后处理终态：记录最终视频路径，再允许动作评判。"""
+        if not bool(getattr(self, "_student_practice_active", False)):
+            return
+        seg_id = getattr(self, "_student_last_segment_id", None)
+        if not seg_id or update.segment_id != seg_id:
+            return
+        terminal = {"completed", "failed", "skipped", "cancelled"}
+        if update.status not in terminal:
+            # 中间态：提示转码中
+            if update.status in {"queued", "transcoding", "validating"}:
+                try:
+                    self.student_status_var.set(
+                        f"处理中：{update.message or update.status}…"
+                    )
+                except Exception:
+                    pass
+            return
+
+        front = getattr(update, "front_video", None)
+        side = getattr(update, "side_video", None)
+        front_ok = front is not None and Path(front).is_file()
+        side_ok = side is not None and Path(side).is_file()
+
+        # skipped(auto_compare_disabled) / completed：转码完成即可评
+        # failed/cancelled：若仍有可读源文件也允许（降级），否则禁用
+        usable = front_ok or side_ok
+        if update.status in {"failed", "cancelled"} and not usable:
+            self._student_segment_ready = False
+            self._student_front_video = None
+            self._student_side_video = None
+            try:
+                self.student_status_var.set(
+                    f"片段处理失败，无法评判：{update.error_code or update.message}"
+                )
+            except Exception:
+                pass
+            self._sync_student_buttons()
+            return
+
+        self._student_front_video = Path(front) if front_ok else None
+        self._student_side_video = Path(side) if side_ok else None
+        # 目录内再兜底一次
+        if (
+            (self._student_front_video is None or self._student_side_video is None)
+            and self._student_last_segment_dir is not None
+        ):
+            try:
+                from core.qwen_coach import resolve_segment_videos
+
+                f2, s2 = resolve_segment_videos(self._student_last_segment_dir)
+                if self._student_front_video is None:
+                    self._student_front_video = f2
+                if self._student_side_video is None:
+                    self._student_side_video = s2
+            except Exception:
+                pass
+
+        ready = (
+            self._student_front_video is not None
+            and self._student_side_video is not None
+            and Path(self._student_front_video).is_file()
+            and Path(self._student_side_video).is_file()
+        )
+        # 至少一路也可评（qwen_coach 支持单路 + warning）
+        if not ready:
+            ready = (
+                (self._student_front_video is not None and Path(self._student_front_video).is_file())
+                or (self._student_side_video is not None and Path(self._student_side_video).is_file())
+            )
+        self._student_segment_ready = bool(ready)
+        try:
+            if self._student_segment_ready:
+                self.student_status_var.set(
+                    f"已就绪：{seg_id}，可点「动作评判」"
+                )
+            else:
+                self.student_status_var.set(
+                    f"处理结束但未找到可读视频：{update.error_code or update.status}"
+                )
+        except Exception:
+            pass
+        self._sync_student_buttons()
+
     def _student_judge(self) -> None:
-        """手动触发 Qwen 直拳点评。"""
+        """手动触发 Qwen 直拳点评（健康检查 + 推理均在后台线程）。"""
         if not bool(getattr(self, "_student_practice_active", False)):
             return
         if bool(getattr(self, "_student_judging", False)):
             return
+        if not bool(getattr(self, "_student_segment_ready", False)):
+            messagebox.showinfo(
+                "动作评判",
+                "录像仍在转码/落盘，或尚未结束一段练习。\n"
+                "请等状态变为「已就绪」后再点「动作评判」。",
+            )
+            return
         segment_dir = self._student_last_segment_dir
-        if segment_dir is None or not Path(segment_dir).is_dir():
+        front = self._student_front_video
+        side = self._student_side_video
+        if segment_dir is None and front is None and side is None:
             messagebox.showinfo("动作评判", "请先「开始」录制并「结束」一段练习。")
             return
         if self._rec.state in {"recording", "paused"}:
             messagebox.showinfo("动作评判", "请先结束录制再评判。")
             return
 
-        from core.qwen_coach import analyze_jab_segment, health_check, resolve_base_url
-
-        ok_health, health_msg = health_check(timeout_s=3.0)
-        if not ok_health:
-            messagebox.showerror(
-                "动作评判",
-                "本机 Qwen 服务不可用。\n"
-                f"地址：{resolve_base_url()}\n"
-                "请先运行 scripts/start_qwen_server.ps1，或手动启动 llama-server。\n"
-                f"详情：{health_msg}",
-            )
-            return
-
         self._student_judging = True
-        self.student_status_var.set("评判中…（约数秒到十余秒）")
-        self._set_student_result_text("正在抽帧并请求视觉模型，请稍候…")
+        self.student_status_var.set("评判中…（检查服务并推理，约数秒到十余秒）")
+        self._set_student_result_text("正在连接视觉服务并抽帧，请稍候…")
         self._sync_student_buttons()
-        seg = Path(segment_dir)
+        seg = Path(segment_dir) if segment_dir is not None else None
+        front_path = Path(front) if front is not None else None
+        side_path = Path(side) if side is not None else None
 
         def _run() -> None:
-            result = analyze_jab_segment(seg, save_coach_json=True)
+            from core.qwen_coach import (
+                CoachResult,
+                analyze_jab_segment,
+                health_check,
+                resolve_base_url,
+            )
+
+            ok_health, health_msg = health_check(timeout_s=3.0)
+            if not ok_health:
+                result = CoachResult(
+                    ok=False,
+                    error_code="service_unavailable",
+                    error_message=(
+                        "本机 Qwen 服务不可用。\n"
+                        f"地址：{resolve_base_url()}\n"
+                        "请先运行 scripts/start_qwen_server.ps1，"
+                        "或手动启动 llama-server。\n"
+                        f"详情：{health_msg}"
+                    ),
+                )
+            else:
+                result = analyze_jab_segment(
+                    seg,
+                    front_path=front_path,
+                    side_path=side_path,
+                    save_coach_json=bool(seg is not None),
+                )
 
             def _ui() -> None:
                 self._student_judging = False
@@ -2977,13 +3121,21 @@ class App:
             self._transcode_async(finalization.front_path)
             self._transcode_async(finalization.side_path)
             return
-        # 学生练习：尽早记下片段目录，供「动作评判」使用（即使后续 early-return）
+        # 学生练习：记下片段目录/id；就绪态等后处理终态再开（见 _on_student_postprocess_update）
         if (
             bool(getattr(self, "_student_practice_active", False))
             and finalization.segment_dir is not None
             and finalization.has_activity
         ):
             self._student_last_segment_dir = Path(finalization.segment_dir)
+            self._student_last_segment_id = (
+                f"record_{finalization.stamp}"
+                if finalization.stamp
+                else Path(finalization.segment_dir).name
+            )
+            self._student_segment_ready = False
+            self._student_front_video = None
+            self._student_side_video = None
 
         processor = getattr(self, "_record_postprocessor", None)
         if processor is None:
@@ -3270,6 +3422,12 @@ class App:
                     self.compare_error_var.set(detail)
                 else:
                     self.compare_error_var.set("")
+            # 学生练习：等后处理终态 + 最终视频路径再允许评判
+            if not closing and bool(getattr(self, "_student_practice_active", False)):
+                try:
+                    App._on_student_postprocess_update(self, update)
+                except Exception:
+                    pass
             # 考试台账：面板或关窗后 sink，所有片段终态/过程态都要回填
             App._apply_exam_postprocess_update(self, update)
 

@@ -41,19 +41,46 @@ JAB_ISSUE_CODES: dict[str, str] = {
     "punch_path_off": "出拳轨迹明显偏离",
 }
 
+# 受控建议模板：展示层优先用模板，不用模型自由发挥。
+JAB_ISSUE_SUGGESTIONS: dict[str, str] = {
+    "arm_not_extended": "出拳至最远端时尽量伸直肘关节，避免半屈肘击打。",
+    "guard_hand_low": "非击打侧手保持在下颌高度附近，回收时同步抬回护手。",
+    "torso_lean": "出拳时躯干保持中立或微转，避免明显前倾/后仰。",
+    "stance_unstable": "双脚站距稳定、支撑脚踩实，出拳时避免重心乱晃。",
+    "shoulder_hip_no_rotate": "出拳时肩髋协调转动发力，避免只靠手臂甩打。",
+    "punch_path_off": "拳沿直线打出并直线回收，避免明显画弧或偏离目标线。",
+}
+
 SEVERITIES = ("轻微", "中等", "严重")
 VIEW_HINTS = ("front", "side", "both", "unknown")
 CONFIDENCES = ("low", "medium", "high")
+_JAB_ACTIONS = frozenset({"jab", "straight", "直拳", "zhiquan"})
+_UNABLE_ACTIONS = frozenset(
+    {"unable_to_judge", "unable", "unknown", "n/a", "na", "cannot_judge"}
+)
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8091"
 DEFAULT_TIMEOUT_S = 90.0
 DEFAULT_FRAMES_PER_VIEW = 6
 DEFAULT_MAX_LONG_EDGE = 640
 DEFAULT_JPEG_QUALITY = 85
+DEFAULT_TEXT_MAX_LEN = 80
 
 _JSON_FENCE_RE = re.compile(
     r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL | re.IGNORECASE
 )
+
+# 禁止出现在展示文案中的内容：分数、排名、面部/着装/背景等无关评价。
+_BANNED_TEXT_RE = re.compile(
+    r"("
+    r"\d+\s*分"
+    r"|得分|评分|打分|分数|百分|满分|及格|不及格|排名|名次"
+    r"|score|percent|percentage|ranking"
+    r"|面部|表情|微笑|服装|衣服|发型|妆容|背景音乐|长相|颜值"
+    r")",
+    re.IGNORECASE,
+)
+_SCORE_SYMBOL_RE = re.compile(r"[％%]|\b\d{1,3}\s*/\s*100\b")
 
 
 @dataclass(frozen=True)
@@ -82,13 +109,13 @@ class CoachResult:
     warnings: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
+        """序列化供 coach.json / 调试；不含模型原文 raw_text（防泄漏分数与无关内容）。"""
         return {
             "ok": self.ok,
             "action": self.action,
             "summary": self.summary,
             "confidence": self.confidence,
             "issues": [i.to_dict() for i in self.issues],
-            "raw_text": self.raw_text,
             "error_code": self.error_code,
             "error_message": self.error_message,
             "latency_s": self.latency_s,
@@ -96,7 +123,7 @@ class CoachResult:
         }
 
     def format_display(self) -> str:
-        """面向学生端的纯文本展示（无分数）。"""
+        """面向学生端的纯文本展示（无分数；文案已受控/消毒）。"""
         if not self.ok:
             code = self.error_code or "error"
             msg = self.error_message or "未知错误"
@@ -106,7 +133,8 @@ class CoachResult:
             lines = [
                 "动作：直拳",
                 f"结论：无法评判（置信度：{_confidence_zh(self.confidence)}）",
-                self.summary or "证据不足，请重试：保证全身入画、光线充足、机位稳定。",
+                self.summary
+                or "证据不足，请重试：保证全身入画、光线充足、机位稳定。",
             ]
             return "\n".join(lines)
 
@@ -131,7 +159,7 @@ class CoachResult:
             view = _view_zh(issue.view_hint)
             label = JAB_ISSUE_CODES.get(issue.code, issue.code)
             lines.append(f"{idx}. [{issue.severity}] {label}（{view}）")
-            if issue.problem:
+            if issue.problem and issue.problem != label:
                 lines.append(f"   现象：{issue.problem}")
             if issue.suggestion:
                 lines.append(f"   建议：{issue.suggestion}")
@@ -139,6 +167,70 @@ class CoachResult:
         if self.warnings:
             lines.append("提示：" + "；".join(self.warnings))
         return "\n".join(lines)
+
+
+def sanitize_coach_text(
+    text: str | None,
+    *,
+    max_len: int = DEFAULT_TEXT_MAX_LEN,
+) -> str | None:
+    """校验并截断展示文案；含禁用词/分数符号则丢弃（返回 None）。"""
+    if text is None:
+        return None
+    value = " ".join(str(text).split()).strip()
+    if not value:
+        return None
+    if _BANNED_TEXT_RE.search(value) or _SCORE_SYMBOL_RE.search(value):
+        return None
+    # 拒绝明显英文评分口吻
+    lowered = value.lower()
+    if any(tok in lowered for tok in ("score", "points", "grade", "rank")):
+        return None
+    if len(value) > max_len:
+        value = value[: max_len - 1].rstrip() + "…"
+    return value
+
+
+def controlled_summary(
+    *,
+    action: str,
+    issues: Sequence[CoachIssue],
+    free_summary: str | None,
+    unexpected_action: str | None = None,
+) -> str:
+    """生成受控总结：优先模板，自由摘要仅在通过消毒后附加。"""
+    free = sanitize_coach_text(free_summary)
+    if action == "unable_to_judge":
+        if unexpected_action:
+            return (
+                free
+                or f"未能确认为直拳（模型标记：{unexpected_action}）。请正对镜头重做直拳。"
+            )
+        return free or "证据不足，请重试：保证全身入画、光线充足、机位稳定。"
+    if not issues:
+        return free or "未发现白名单内明显问题，请继续保持。"
+    labels = "、".join(JAB_ISSUE_CODES.get(i.code, i.code) for i in issues)
+    base = f"主要关注：{labels}。"
+    if free and free not in base:
+        return f"{base}{free}"
+    return base
+
+
+def controlled_issue_texts(
+    code: str,
+    *,
+    free_problem: str | None,
+    free_suggestion: str | None,
+) -> tuple[str, str]:
+    """白名单 code → 受控现象/建议文案。"""
+    label = JAB_ISSUE_CODES.get(code, code)
+    problem = sanitize_coach_text(free_problem) or label
+    suggestion = (
+        sanitize_coach_text(free_suggestion)
+        or JAB_ISSUE_SUGGESTIONS.get(code)
+        or f"请针对「{label}」对照标准动作慢速练习。"
+    )
+    return problem, suggestion
 
 
 def _confidence_zh(value: str) -> str:
@@ -451,24 +543,26 @@ def normalize_coach_payload(
     raw_text: str = "",
     latency_s: float | None = None,
 ) -> CoachResult:
-    """将模型 JSON 归一为 CoachResult，并过滤白名单外 issue。"""
+    """将模型 JSON 归一为 CoachResult：白名单 + fail-closed + 受控文案。"""
     warnings: list[str] = []
-    action_raw = str(payload.get("action") or "jab").strip().lower()
-    if action_raw in {"unable_to_judge", "unable", "unknown", "n/a", "na"}:
+    action_raw = str(payload.get("action") or "").strip().lower()
+    unexpected_action: str | None = None
+    if action_raw in _UNABLE_ACTIONS:
         action = "unable_to_judge"
-    elif action_raw in {"jab", "straight", "直拳"}:
+    elif action_raw in _JAB_ACTIONS:
         action = "jab"
     else:
-        # 非预期 action：若 issues 空则 unable，否则仍当 jab 处理
-        action = "jab"
-        warnings.append(f"unexpected_action:{action_raw}")
+        # 未知 / 缺失 action 一律 fail-closed，禁止误判为成功直拳
+        action = "unable_to_judge"
+        unexpected_action = action_raw or "missing"
+        warnings.append(f"unexpected_action:{unexpected_action}")
 
     confidence = str(payload.get("confidence") or "low").strip().lower()
     if confidence not in CONFIDENCES:
         confidence = "low"
         warnings.append("confidence_clamped")
 
-    summary = str(payload.get("summary") or "").strip()
+    free_summary = str(payload.get("summary") or "").strip()
 
     issues_raw = payload.get("issues") or []
     if not isinstance(issues_raw, list):
@@ -491,10 +585,11 @@ def normalize_coach_payload(
         view_hint = str(item.get("view_hint") or "unknown").strip().lower()
         if view_hint not in VIEW_HINTS:
             view_hint = "unknown"
-        problem = str(item.get("problem") or JAB_ISSUE_CODES[code]).strip()
-        suggestion = str(item.get("suggestion") or "").strip()
-        if not suggestion:
-            suggestion = f"请针对「{JAB_ISSUE_CODES[code]}」对照标准动作慢速练习。"
+        problem, suggestion = controlled_issue_texts(
+            code,
+            free_problem=str(item.get("problem") or ""),
+            free_suggestion=str(item.get("suggestion") or ""),
+        )
         issues.append(
             CoachIssue(
                 code=code,
@@ -508,9 +603,27 @@ def normalize_coach_payload(
     if dropped:
         warnings.append(f"dropped_issues:{dropped}")
 
-    # 模型标 jab 但 issues 全被滤掉且无 summary 时，不强行 unable
+    # 宣称 jab 但有效 issue 全被滤掉 → 不可靠，fail-closed
+    if action == "jab" and not issues and dropped > 0:
+        action = "unable_to_judge"
+        unexpected_action = unexpected_action or "issues_all_dropped"
+        warnings.append("jab_with_only_invalid_issues")
+
     if action == "unable_to_judge":
         issues = []
+
+    summary = controlled_summary(
+        action=action,
+        issues=issues,
+        free_summary=free_summary,
+        unexpected_action=unexpected_action,
+    )
+    # raw_text 仅内存调试用；不进 to_dict / coach.json，且截断
+    safe_raw = ""
+    if raw_text:
+        # 不落盘；内存最多保留短摘要且去掉疑似分数行
+        clipped = str(raw_text).strip()[:200]
+        safe_raw = clipped if sanitize_coach_text(clipped, max_len=200) else ""
 
     return CoachResult(
         ok=True,
@@ -518,7 +631,7 @@ def normalize_coach_payload(
         summary=summary,
         confidence=confidence,
         issues=issues,
-        raw_text=raw_text,
+        raw_text=safe_raw,
         latency_s=latency_s,
         warnings=warnings,
     )
@@ -725,8 +838,10 @@ def analyze_jab_images(
 
 
 def analyze_jab_segment(
-    segment_dir: Path | str,
+    segment_dir: Path | str | None = None,
     *,
+    front_path: Path | str | None = None,
+    side_path: Path | str | None = None,
     base_url: str | None = None,
     timeout_s: float = DEFAULT_TIMEOUT_S,
     frames_per_view: int = DEFAULT_FRAMES_PER_VIEW,
@@ -734,17 +849,28 @@ def analyze_jab_segment(
     http_json: Callable[..., Any] | None = None,
     save_coach_json: bool = True,
 ) -> CoachResult:
-    """对学生练习片段目录做直拳点评。
+    """对学生练习片段做直拳点评。
 
-    期望目录内有 ``front.mp4`` / ``side.mp4``（或 avi 回退）。
-    成功时可选写入 ``coach.json``（不含分数字段）。
+    优先使用显式 ``front_path`` / ``side_path``（后处理终态路径）；
+    否则在 ``segment_dir`` 内解析 front/side 视频。
+    成功时可选写入 ``coach.json``（受控字段，无 raw 原文、无分数）。
     """
-    front, side = resolve_segment_videos(segment_dir)
+    front: Path | None = Path(front_path) if front_path else None
+    side: Path | None = Path(side_path) if side_path else None
+    if front is not None and not front.is_file():
+        front = None
+    if side is not None and not side.is_file():
+        side = None
+
+    if front is None and side is None and segment_dir is not None:
+        front, side = resolve_segment_videos(segment_dir)
+
     if front is None and side is None:
+        where = segment_dir if segment_dir is not None else "(no segment_dir)"
         return CoachResult(
             ok=False,
             error_code="invalid_video",
-            error_message=f"片段目录缺少 front/side 视频：{segment_dir}",
+            error_message=f"缺少可读的 front/side 视频：{where}",
         )
     if front is None or side is None:
         # 单路也可评，但提示缺视角
@@ -777,7 +903,7 @@ def analyze_jab_segment(
             http_json=http_json,
         )
 
-    if save_coach_json and result.ok:
+    if save_coach_json and result.ok and segment_dir is not None:
         try:
             out = Path(segment_dir) / "coach.json"
             out.write_text(
