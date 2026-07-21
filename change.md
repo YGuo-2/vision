@@ -1,3 +1,76 @@
+## 2026-07-20: [fix] 学生点评：纯固定文案，禁止回显模型自由文本
+
+### 问题描述
+
+Codex 二次阻塞：unknown action 回显「模型标记：得分95分」；自由 summary/problem/suggestion
+仍优先展示（如 guard_hand_low →「闭眼向后走十步」）。
+
+### 修改内容
+
+- **core/qwen_coach.py**：summary/problem/suggestion 仅由 code+severity+view_hint / 固定 reason 生成；
+  未知 action 用固定 not_jab 文案，warning 只记 len，不回显原值；raw_text 恒空。
+- **tests/test_qwen_coach.py**：得分95分 action、闭眼建议、roundhouse 不回显回归。
+
+### 验证方法
+
+`powershell
+.\.venv\Scripts\python.exe -m pytest tests/test_qwen_coach.py -q
+`
+
+---
+
+## 2026-07-20: [fix] 学生练习 Codex P1/P2：fail-closed、受控文案、后处理就绪、健康检查后台化
+
+### 问题描述
+
+Codex deep review：未知 action 误判为成功直拳；summary/problem 可泄漏分数与面部评价；
+停录后立刻可评判与转码竞态；health_check 阻塞 Tk 主线程。
+
+### 修改内容
+
+- **core/qwen_coach.py**：未知/缺失 action fail-closed → unable_to_judge；白名单 issue 全滤掉也 fail-closed；
+  sanitize + 受控模板；coach.json 不写 raw_text；支持显式 front/side 终态路径。
+- **apps/recording_postprocess.py**：PostprocessUpdate 透传 front_video/side_video。
+- **apps/app_ui.py**：后处理终态就绪后才启用「动作评判」；评判用终态视频；
+  health+推理同后台线程；顺带修退出 pack 顺序与 online_match 恢复。
+- **tests/test_qwen_coach.py**：roundhouse_kick / 分数文案 / invalid issues 回归。
+
+### 验证方法
+
+`powershell
+.\.venv\Scripts\python.exe -m pytest tests/test_qwen_coach.py tests/test_app_controls.py tests/test_app_ui_dual_camera.py tests/test_recording_postprocess.py -q
+`
+
+---
+
+## 2026-07-20: [feat] 学生练习模式（Qwen 直拳视觉粗评，无分数）
+
+### 问题描述
+
+教师端已有双摄录制 + 模板比对/考试编排；需要面向学生的极简练习页：开始、结束、
+动作评判、预览。评判走本机 Qwen3-VL 粗粒度中文点评，不打分、不改正式评分链路。
+
+### 修改内容
+
+- **`core/qwen_coach.py`**（新增）：直拳检查项白名单、`unable_to_judge` 契约、正/侧
+  抽帧 contact sheet、stdlib HTTP 调 `llama-server`、结果归一与展示文本（无分数）。
+- **`apps/app_ui.py`**：主界面「学生练习…」模式；开始=双摄预览+开录、结束=停录、
+  动作评判=手动 Qwen；强制 `auto_compare=False`、关骨架/手部；与考试模式互斥。
+- **`tests/test_qwen_coach.py`**（新增）：契约过滤、mock HTTP、抽帧与 `coach.json`。
+- **`scripts/start_qwen_server.ps1`**（新增）：启动 `E:\AI\qwen3-vl` 本机服务（:8091）。
+- **`docs/error_analysis_plan.md` §C**：记录学生 UI v1（prompt-only）范围与白名单。
+
+### 验证方法
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/test_qwen_coach.py tests/test_app_controls.py tests/test_app_ui_dual_camera.py -q
+.\.venv\Scripts\python.exe -m py_compile core/qwen_coach.py apps/app_ui.py
+```
+
+手工：启动 `scripts/start_qwen_server.ps1` → 学生练习 → 双摄开始/结束 → 动作评判。
+
+---
+
 ## 2026-07-14: [fix] 考试系统结构对照 + 重考可用性问题
 
 ### 问题描述
