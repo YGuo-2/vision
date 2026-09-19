@@ -218,14 +218,18 @@ def _normalize_delegate(delegate: str) -> str:
 
 def _base_options(model_path: Path, *, delegate: str) -> mp.tasks.BaseOptions:
     delegate_norm = _normalize_delegate(delegate)
+    # Windows 原生模型加载器不能可靠打开中文路径；Python 读字节避开其窄字符文件接口。
+    asset = ({"model_asset_buffer": model_path.read_bytes()}
+             if os.name == "nt" and not str(model_path).isascii()
+             else {"model_asset_path": str(model_path)})
     if delegate_norm == "cpu":
-        return mp.tasks.BaseOptions(model_asset_path=str(model_path))
+        return mp.tasks.BaseOptions(**asset)
     if delegate_norm == "gpu":
         delegate_enum = getattr(mp.tasks.BaseOptions, "Delegate", None)
         gpu_delegate = getattr(delegate_enum, "GPU", None) if delegate_enum is not None else None
         if gpu_delegate is None:
             raise RuntimeError("MediaPipe BaseOptions.Delegate.GPU is not available in this mediapipe build")
-        return mp.tasks.BaseOptions(model_asset_path=str(model_path), delegate=gpu_delegate)
+        return mp.tasks.BaseOptions(**asset, delegate=gpu_delegate)
     raise AssertionError("unreachable delegate branch")
 
 

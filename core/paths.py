@@ -8,7 +8,7 @@
 ``__file__`` 锚点随所在包不同（``core/`` 解析成 ``core/models``、``apps/`` 解析成
 ``apps/models`` ……），同一类产物会指向不同位置，既容易踩坑又难以维护。
 
-本模块把三个根目录的解析集中收口到唯一入口，统一锚定到**仓库根**
+源码运行时三个根目录统一锚定到**仓库根**
 （即 ``core/`` 包目录的父目录，``Path(__file__).resolve().parents[1]``）：
   - ``models_dir()``     → ``<repo_root>/models``
   - ``templates_dir()``  → ``<repo_root>/templates``
@@ -16,17 +16,20 @@
 
 约束
 ----
-- 仅依赖标准库 ``pathlib``，不导入 ``pose_features`` / ``action_compare`` 等业务模块，
+- 仅依赖标准库，不导入 ``pose_features`` / ``action_compare`` 等业务模块，
   避免循环依赖；任何入口（core/apps/batch/analysis）都能安全 import。
 - ``templates_dir`` / ``outputs_dir`` 在返回前 ``mkdir(parents=True, exist_ok=True)``。
-- ``models_dir`` 仅保证目录存在（``mkdir(exist_ok=True)``），**不会删除/移动**任何已有
-  模型文件；MediaPipe 缺失的 ``.task`` 由 ``MediaPipePipeline`` 自动下载补齐。
+- 内置模型的冻结桌面包使用 LocalAppData/VisionSanda，首次使用复制内置模型和模板；
+  不覆盖用户已有的非空文件。其他冻结入口保持原有 EXE 同级路径。
 """
 
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -38,26 +41,60 @@ def repo_root() -> Path:
     """返回 artifact 根目录。
 
     - 源码运行：``core/`` 包目录的父目录（仓库根）。
-    - PyInstaller 冻结运行：可执行文件所在目录。此时 ``__file__`` 指向临时解压目录
-      （``sys._MEIPASS``），不能用来定位 models/templates/outputs，否则运行结束目录被清空。
+    - 内置模型的离线桌面包：用户 LocalAppData/VisionSanda，普通用户也可写入。
+    - 其他 PyInstaller 入口（包括 sidecar）：保持可执行文件所在目录。
     """
     if getattr(sys, "frozen", False):
+        if _bundled_root() is not None:
+            root = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "VisionSanda"
+            root.mkdir(parents=True, exist_ok=True)
+            return root
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parents[1]
 
 
-def models_dir() -> Path:
-    """返回 ``<repo_root>/models`` 并确保其存在（不触碰已有模型文件）。"""
-    d = repo_root() / "models"
+def _bundled_root() -> Path | None:
+    root = getattr(sys, "_MEIPASS", None)
+    if getattr(sys, "frozen", False) and root and (Path(root) / "models").is_dir():
+        return Path(root)
+    return None
+
+
+def _seed_bundled(directory: str) -> Path:
+    """首次启动复制内置资源；原子替换避免中断留下半个模型，不覆盖用户文件。"""
+    d = repo_root() / directory
     d.mkdir(parents=True, exist_ok=True)
+    bundled = _bundled_root()
+    if bundled is not None:
+        source_root = bundled / directory
+        for source in source_root.rglob("*"):
+            if not source.is_file():
+                continue
+            target = d / source.relative_to(source_root)
+            if target.is_file() and target.stat().st_size > 0:
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = None
+            try:
+                with tempfile.NamedTemporaryFile(dir=target.parent, delete=False) as temp:
+                    temporary = Path(temp.name)
+                    with source.open("rb") as reader:
+                        shutil.copyfileobj(reader, temp)
+                temporary.replace(target)
+            finally:
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
     return d
+
+
+def models_dir() -> Path:
+    """返回持久化模型目录，离线包首次使用时释放内置模型。"""
+    return _seed_bundled("models")
 
 
 def templates_dir() -> Path:
-    """返回 ``<repo_root>/templates`` 并确保其存在。"""
-    d = repo_root() / "templates"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+    """返回可写模板目录，离线包附带仓库公开的在线识别模板。"""
+    return _seed_bundled("templates")
 
 
 def outputs_dir() -> Path:

@@ -85,7 +85,7 @@ def test_transcode_to_h264_runs_ffmpeg_and_removes_avi(
     expected_dst.write_bytes(b"old-mp4")
     calls: list[tuple[list[str], bool, float]] = []
 
-    def fake_run(command: list[str], *, check: bool, timeout: float):
+    def fake_run(command: list[str], *, check: bool, timeout: float, **kwargs):
         calls.append((command, check, timeout))
         Path(command[-1]).write_bytes(b"mp4")
         return subprocess.CompletedProcess(command, 0)

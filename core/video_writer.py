@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -80,6 +81,7 @@ def _run_ffmpeg_cancellable(command: list[str], stop_evt: Event) -> None:
         command,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
     )
     deadline = time.monotonic() + FFMPEG_TRANSCODE_TIMEOUT_S
     while True:
@@ -129,8 +131,9 @@ def transcode_to_h264(
     except OSError:
         return src
 
+    bundled_ffmpeg = list((Path(getattr(sys, "_MEIPASS", "")) / "ffmpeg").glob("*.exe")) if getattr(sys, "frozen", False) else []
     command = [
-        "ffmpeg",
+        str(bundled_ffmpeg[0]) if bundled_ffmpeg else "ffmpeg",
         "-y",
         "-i",
         str(src),
@@ -146,7 +149,9 @@ def transcode_to_h264(
     ]
     try:
         if stop_evt is None:
-            subprocess.run(command, check=True, timeout=FFMPEG_TRANSCODE_TIMEOUT_S)
+            subprocess.run(command, check=True, timeout=FFMPEG_TRANSCODE_TIMEOUT_S,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
         else:
             _run_ffmpeg_cancellable(command, stop_evt)
             if stop_evt.is_set():

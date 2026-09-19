@@ -1,0 +1,111 @@
+"""在实际打包 EXE 中运行的离线检查，不读写真实用户资料。"""
+from __future__ import annotations
+
+import json
+import os
+import socket
+import sys
+import tempfile
+import traceback
+import urllib.request
+from pathlib import Path
+
+
+def run(report_path: Path) -> int:
+    report_path = report_path.resolve()
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report = {"ok": False, "frozen": bool(getattr(sys, "frozen", False)), "checks": []}
+
+    def blocked(*args, **kwargs):
+        raise RuntimeError("离线检查禁止网络访问")
+
+    socket.socket.connect = blocked
+    socket.create_connection = blocked
+    urllib.request.urlopen = blocked
+    urllib.request.urlretrieve = blocked
+    root = None
+    try:
+        with tempfile.TemporaryDirectory(prefix="散打 离线检查-") as temporary:
+            os.environ["LOCALAPPDATA"] = temporary
+            # 窗口版没有 stdout/stderr；保留可读诊断日志。
+            with report_path.with_suffix(".log").open("w", encoding="utf-8", buffering=1) as log:
+                sys.stdout = sys.stderr = log
+                import cv2
+                import numpy as np
+                from core import paths, model_manager, online_matcher, video_writer
+                from core.vision_pipeline import MediaPipePipeline, PipelineConfig
+                from core.feedback_history import FeedbackHistory
+                from core.action_feedback import ACTIONS, STANCES
+
+                model_dir = paths.models_dir()
+                report["dataRoot"] = str(paths.repo_root())
+                assert model_dir.is_relative_to(Path(temporary))
+                assert all(model_manager.is_installed(spec) for spec in model_manager.MEDIAPIPE_MODELS)
+                report["checks"].append("four_bundled_models_seeded")
+                frame = np.zeros((240, 320, 3), dtype=np.uint8)
+                for variant in ("lite", "full", "heavy"):
+                    pipeline = MediaPipePipeline(models_dir=model_dir, cfg=PipelineConfig(
+                        pose_variant=variant, enable_hands=True, delegate="cpu", running_mode="image"))
+                    try:
+                        pipeline.infer(frame)
+                    finally:
+                        pipeline.close()
+                    report["checks"].append(variant + "_and_hand_cpu_inference")
+
+                templates = online_matcher.load_template_library(paths.templates_dir() / "online")
+                assert len(templates) == 2
+                paths.save_camera_selection(0, None)
+                assert paths.load_camera_selection() == (0, None)
+                paths.save_record_dir(paths.outputs_dir())
+                assert paths.load_record_dir() == paths.outputs_dir()
+                report["checks"].append("templates_and_persistent_preferences")
+
+                writer, video, codec = video_writer.open_video_writer(
+                    paths.outputs_dir() / "空白 测试.avi", fps=12, size=(320, 240))
+                try:
+                    for _ in range(24):
+                        writer.write(frame)
+                finally:
+                    writer.release()
+                video = video_writer.transcode_to_h264(video)
+                assert video.suffix == ".mp4", "内置 FFmpeg 转码失败"
+                cap = cv2.VideoCapture(str(video))
+                try:
+                    assert cap.read()[0], "录制文件不能解码"
+                finally:
+                    cap.release()
+                report["checks"].append("video_record_transcode_decode")
+
+                history = FeedbackHistory()
+                record = history.add({"studentId": "offline-check", "studentName": "打包检查",
+                                      "action": next(iter(ACTIONS)), "stance": next(iter(STANCES))}, video, None)
+                assert record["result"]["backend"] == "mediapipe"
+                assert history.get(record["id"])["id"] == record["id"]
+                history.export(record["id"], paths.outputs_dir() / "问题说明.txt")
+                assert (paths.outputs_dir() / "问题说明.txt").stat().st_size > 0
+                assert not any("qwen" in name or name == "torch" for name in sys.modules)
+                report["checks"].append("mediapipe_feedback_history_export")
+
+                from tkinter import Tk
+                from apps.app_ui import App
+                root = Tk()
+                root.withdraw()
+                app = App(root)
+                root.update()
+                app._enter_student_practice()
+                root.update()
+                assert app._student_practice_active
+                report["checks"].append("tk_student_practice_ui")
+                app._on_close()
+                root = None
+                report["ok"] = True
+    except Exception:
+        report["error"] = traceback.format_exc()
+    finally:
+        if root is not None:
+            try:
+                root.destroy()
+            except Exception:
+                pass
+        report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    return 0 if report["ok"] else 1

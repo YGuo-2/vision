@@ -17,14 +17,23 @@ MediaPipe，完全不碰 YOLO。因此：
 
 模型策略
 --------
-模型文件（models/*.task）不嵌入 exe。用户首次运行后，通过「设置 → MediaPipe 模型」
-面板下载所需模型到 exe 同级 models/ 目录（core.paths 冻结模式锚定到 exe 所在目录）。
-下载源为 Google 官方直链，国内需自备代理。
+内置 lite/full/heavy 三个人体模型及手部模型，首次启动释放到用户数据目录。
+构建环境另需安装 pyinstaller、imageio-ffmpeg（仅构建依赖，视频转码工具随包分发）。
 """
 
 from PyInstaller.utils.hooks import collect_all
+from pathlib import Path
+import imageio_ffmpeg
 
-datas = []
+model_names = ["pose_landmarker_lite.task", "pose_landmarker_full.task",
+               "pose_landmarker_heavy.task", "hand_landmarker.task"]
+for name in model_names:
+    if not (Path("models") / name).is_file():
+        raise SystemExit(f"离线打包缺少模型：models/{name}")
+datas = [(str(Path("models") / name), "models") for name in model_names]
+datas += [("templates/online/直拳_左手.npz", "templates/online"),
+          ("templates/online/直拳_右手.npz", "templates/online")]
+datas += [(imageio_ffmpeg.get_ffmpeg_exe(), "ffmpeg")]
 binaries = []
 hiddenimports = []
 
@@ -78,14 +87,14 @@ nvidia_excludes = [
 
 
 a = Analysis(
-    ["apps/app_ui.py"],
+    ["apps/desktop_launcher.py"],
     pathex=["."],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=["packaging/pyinstaller/pyi_rth_video_writer_alias.py"],
     excludes=heavy_excludes + nvidia_excludes,
     noarchive=False,
 )

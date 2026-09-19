@@ -1,3 +1,88 @@
+## 2026-09-19: [chore] 整理学生练习功能并同步远端
+
+### 问题描述
+
+将9月18日的MediaPipe学生练习、个人历史及离线运行支持，与9月19日的到位/离场自动录制播报一并提交。按用户要求，远端允许直接写入时提交到main，不创建PR。
+
+### 修改内容
+
+- 纳入学生练习相关源码、测试、需求与实施文档、离线构建配置；无关动画及其变更记录留在本地，模型、EXE与录像不进入提交。
+- 补齐身份绑定测试中的等待到位状态，增加等待期间不能对上一段录像发起评判的断言。
+
+### 验证方法
+
+- 本次学生分析、姿态golden、离线路径、视频转码、MediaPipe委托和Windows打包检查：66项通过、1项跳过（未生成Tauri sidecar实物）。
+- 复用本任务此前通过的183项学生到位、考试及桌面生命周期回归；相关运行代码未发生后续修改。
+- 提交前核对远端main与本地基线一致，并检查提交文件清单及空白错误。未重新构建包含9月19日优化的离线EXE；真实双摄和语音现场验收仍未进行。
+
+---
+
+## 2026-09-19: [feat] 学生练习到位播报开始、离场2秒播报结束
+
+### 问题描述
+
+学生练习原来需要手动开始和结束录制；甲方要求复用考试模式的站位检测与播报，到达指定位置报开始，离开2秒报结束。
+
+### 修改内容
+
+- “开始”改为开启双摄并等待到位；沿用考试模式保存的ROI和正面髋部中点检测，站稳0.8秒后播报“开始”并录制，离开区域连续2秒后播报“结束”并停录。不叠加考试的最短录制3秒限制。
+- 复用现有MediaPipe Lite、`PresenceGate`及`ExamAnnouncer`，不新增依赖，不更改考试状态机或评分规则。
+- 等待时锁定身份/动作并允许手动取消；保留手动结束。结束、退出、会话停止后解除检测，过滤上一轮排队样本；下一段需再点“开始”，避免覆盖待评判片段。
+- 同步学生界面提示与 `docs/学生练习动作问题说明实施.md`；新增 `tests/test_student_presence.py`。
+
+### 验证方法
+
+- `D:\DevTools\venvs\vision\Scripts\python.exe -m pytest tests/test_student_presence.py tests/test_presence_gate.py tests/test_app_controls.py tests/test_app_ui_lifecycle.py tests/test_exam_session.py tests/test_exam_roster.py tests/test_exam_clip.py tests/test_recording_postprocess.py tests/test_exam_panel.py -q`：183项通过。
+- 新检查使用真实站位闸门与UI控制方法，替换摄像头、录像落盘和语音设备，覆盖连续到位、短暂离场、精确2秒阈值、重复事件、取消等待、再次练习、停止后迟到事件与开录失败。
+- `git diff --check` 通过；本次更新源码，未重新构建离线EXE，未进行真实双摄站位与扬声器现场验收。
+
+---
+
+## 2026-09-18: [build] 旧版桌面离线 EXE，内置全部 MediaPipe 模型
+
+### 问题描述
+
+甲方无法下载模型，需要不安装 Python、不依赖开发电脑路径、双击即可启动的旧版桌面程序。
+
+### 修改内容
+
+- `app_ui_onefile.spec` 打包 Lite / Full / Heavy 三个人体模型及手部模型、两个公开直拳在线模板、FFmpeg 录像转码工具，排除 Torch / YOLO 重依赖。
+- 新增桌面启动入口及 EXE 内离线检查入口；普通启动日志保存至用户数据目录。内置模型包首次将模型与模板释放到 `%LOCALAPPDATA%\VisionSanda`，录制、历史和偏好可持久保存；源码和不内置模型的 sidecar 路径保持原行为。
+- 实际 EXE 检查发现 MediaPipe 原生加载器不能读取中文模型路径，统一在 Windows 非 ASCII 模型路径改用字节缓冲加载，保留原 ASCII 路径和 CPU/GPU 委托选择。
+- 录像转码使用内置 FFmpeg，隐藏子进程控制台；补充 `docs/离线桌面EXE交付.md`、交付说明及打包路径回归检查。
+- 交付产物：`dist/散打动作练习_离线版/散打动作练习.exe` 和同目录使用说明；压缩包为 `dist/散打动作练习_离线版_20260918.zip`。
+
+### 验证方法
+
+- 针对打包、视频转码、路径、姿态 golden 和委托配置的检查通过；Tauri sidecar 实物检查因本次未构建该入口而跳过。无须构建另一套 Vue/Tauri 桌面。
+- 实际 EXE 拷至仓库外中文/空格目录，PATH 仅含 Windows 目录，清空 Python 环境配置，禁用 Python 网络连接和下载：四个模型 CPU 推理、模板/偏好持久化、录像→H.264 MP4→解码、MediaPipe 学生问题说明、历史保存/读取/文字导出、真实 Tk 学生练习控件全部通过。
+- 普通无参数启动：主窗口可见，正常关窗退出码为 0。证据位于 `outputs/离线交付 检查/offline-check.json` 和 `normal-launch.json`。
+- `git diff --check` 通过。视频使用空白生成样本，仅验证分发与调用链，不代表识别准确率或甲方摄像头/性能验收。
+
+---
+
+## 2026-09-18: [feat] 学生练习使用MediaPipe规则检查及个人历史
+
+### 问题描述
+
+依据需求汇总和《武术散打得分点.docx》扩展旧版学生练习。用户明确要求复用MediaPipe、不得依赖甲方电脑带不动的本地视觉大模型；已替换此前未提交的Qwen实现。
+
+### 修改内容
+
+- 新增规则目录 `core/action_feedback.py`、MediaPipe几何/时序实现 `core/feedback_geometry.py`，只用现有Lite、CPU、pose-only；复用valid_mask、角度及屈膝/脚尖规则，低置信度与阶段不明不当合格，不改正式评分路径。
+- 学生练习入口、错误提示、历史视频解析均不再导入或调用Qwen，无HTTP模型服务依赖。首尾实战式、前后侧动作规则分别检查，保留待标定/待教师确认项目。
+- 新增 `core/feedback_history.py`、`apps/feedback_panel.py`：学号与录制动作绑定、个人历史、旧视频导入与补充分析、文字导出、教师确认/撤销、两周受管副本保留；外部原视频不删除。
+- 同步 `docs/学生练习动作问题说明实施.md` 和针对性测试。测试环境在 `D:\DevTools\venvs\vision`；本机通过现有模型管理器安装了Lite供真实CPU运行验证。
+
+### 验证方法
+
+- `tests/test_action_feedback.py tests/test_pose33_v3_golden.py tests/test_app_controls.py`：49项通过。
+- 真实加载MediaPipe Lite CPU，处理24帧空白视频，正确标记证据不足；确认未导入Qwen模块。没有把空白输入冒烟当作动作识别率/甲方性能验收。
+- `git diff --check`；旧版真实Tk控件的任务/历史流程通过。厘米标定、规则冲突和教师样本准确率尚待验收。
+- 既有UI录制按钮normal/disabled断言曾在修改前HEAD复现，未扩大修改。
+
+---
+
 ## 2026-07-20: [fix] 学生点评：纯固定文案，禁止回显模型自由文本
 
 ### 问题描述
@@ -1084,3 +1169,28 @@ PR #71 存在五项场地前阻塞：在线直拳模板未交付、`mp4v` 回退
 - 首轮全量 `pytest tests -q` 为 **403 passed / 10 failed**。后续 PR 审查确认：其中 5 条 `ui_backend` session 与 1 条 YOLO preview routing 由 PR 第 4 个在制品提交引入，其余为落后最新文档/接口的旧测试；最终验证结果见本文件置顶记录。
 - `py_compile apps/app_ui.py core/vision_pipeline.py core/video_writer.py core/parallel_pose_engine.py` → OK。
 - 待场地人员按实际机位人工确认左右手命中、平滑观感、录制全链路，并现场标定 `MatcherConfig` 阈值。
+## 2026-09-17: [feat] 新增鹈鹕骑自行车 SVG 2D 动画页面
+
+### 问题描述
+
+需要一个无需外部资源、可直接打开的 HTML SVG 动画，展示鹈鹕骑自行车沿海边前进。
+
+### 修改内容
+
+- **pelican-bike-animation.html**：新增自包含 SVG 场景，包含夕阳、海面、棕榈树、海鸥、红色自行车和鹈鹕角色。
+- 使用原生 SVG/CSS 动画实现车轮旋转、踩踏、翅膀摆动、海浪、云层和漂浮尘粒；增加暂停/继续按钮与减少动效适配。
+
+### 验证方法
+
+- 检查 HTML 文件存在且可读，确认 SVG、关键动画和暂停按钮节点存在。
+- `git diff --check` 通过。
+- 未运行测试套件（用户明确要求不需要测试）。
+
+---
+## 2026-09-18: [feat] 创建根目录鹈鹕骑行单文件动画
+
+- 问题描述：用户要求 SVG 鹈鹕骑自行车 2D 动画 HTML，并明确不需要测试；此前记录指向的 outputs/pelican-bike.html 当前不存在。
+- 修改内容：新增根目录 `pelican-bike.html`，内嵌海岸场景 SVG、车轮和双脚联动动画、围巾飘动、移动云朵与道路，提供暂停按钮和减少动态效果支持，无外部依赖。
+- 验证方法：遵循用户要求，未运行测试，也未进行浏览器渲染验证。
+
+---
