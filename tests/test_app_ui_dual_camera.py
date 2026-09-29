@@ -574,7 +574,7 @@ def test_dual_wait_failure_posts_status_and_done_exactly_once(monkeypatch):
 
     class _Pool:
         def wait_pair(self, _primary, _secondary, *, timeout, stop_event):
-            assert 0.0 <= timeout <= 5.0
+            assert 0.0 <= timeout <= 15.0
             assert not stop_event.is_set()
             raise RuntimeError("camera 1 unavailable")
 
@@ -929,12 +929,17 @@ def test_dual_worker_finally_always_closes_recording_pair():
     assert len(finally_calls) == 1
 
 
-def _exercise_dual_runtime_failure(monkeypatch, *, record_skeleton: bool, phase: str):
+def _exercise_dual_runtime_failure(monkeypatch, *, record_skeleton: bool, phase: str, student=False):
     frame = np.zeros((4, 6, 3), dtype=np.uint8)
 
     class _Capture:
         def __init__(self) -> None:
             self.release_calls = 0
+            self.settings = []
+
+        def set(self, prop, value):
+            self.settings.append((prop, value))
+            return False  # 驱动可以拒绝，后续必须仍使用实际帧大小。
 
         def isOpened(self) -> bool:
             return True
@@ -1032,6 +1037,7 @@ def _exercise_dual_runtime_failure(monkeypatch, *, record_skeleton: bool, phase:
 
     app = SimpleNamespace(
         _camera_warmup_pool=_Pool(),
+        _student_practice_active=student,
         _current_session_generation=1,
         _record_pair_lock=threading.Lock(),
         _rec=_RecordingSession(),
@@ -1084,7 +1090,13 @@ def _exercise_dual_runtime_failure(monkeypatch, *, record_skeleton: bool, phase:
     assert side_cap.release_calls == 1
     assert close_pair_calls == [True]
     assert done_calls == [True]
+    if student:
+        assert front_cap.settings == side_cap.settings == []
     return pipelines
+
+
+def test_student_dual_camera_never_changes_format_after_claim(monkeypatch):
+    _exercise_dual_runtime_failure(monkeypatch, record_skeleton=False, phase="write", student=True)
 
 
 def test_dual_skeleton_annotate_failure_closes_two_pipelines(monkeypatch):

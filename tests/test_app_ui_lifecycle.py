@@ -310,6 +310,23 @@ def test_exclusive_capture_retries_release_before_unlocking_index() -> None:
     assert capture.release_calls == 1
 
 
+def test_student_capture_negotiates_1080p_before_warmup(monkeypatch):
+    app = _preopen_app()
+    app._student_practice_active = True
+    calls = []
+
+    def factory(index, **kwargs):
+        calls.append((index, kwargs))
+        return _Cap()
+
+    monkeypatch.setattr(app_ui, "open_camera", factory)
+    stop = threading.Event()
+    capture = app._open_camera_exclusive(0, stop_event=stop)
+    capture.release()
+    assert calls == [(0, {"width": 1920, "height": 1080, "stop_event": stop})]
+    assert not app._camera_open_lock(0).locked()
+
+
 def test_camera_enumeration_result_is_applied_only_from_main_thread_queue(monkeypatch):
     app, applied = _enumeration_app()
     pending: list[object] = []
@@ -515,7 +532,7 @@ def test_same_index_pool_open_waits_for_legacy_preopen_release(monkeypatch):
     primary_calls = 0
     observed_legacy_releases: list[int] = []
 
-    def camera_factory(index: int):
+    def camera_factory(index: int, **_kwargs):
         nonlocal primary_calls
         if index == 1:
             pool_secondary_entered.set()
@@ -567,7 +584,7 @@ def test_single_preopen_waits_until_cancelled_pool_capture_is_released(monkeypat
 
     pool_capture.release = delayed_release
 
-    def camera_factory(index: int):
+    def camera_factory(index: int, **_kwargs):
         calls.append(index)
         if len(calls) == 1:
             pool_opened.set()
@@ -666,7 +683,8 @@ def test_video_worker_releases_camera_warmups_before_opening_file(monkeypatch):
     assert video_cap.release_calls == 1
 
 
-def test_post_done_rewarms_current_selection_for_next_session():
+@pytest.mark.parametrize("rewarm", [True, False])
+def test_post_done_rewarms_only_when_requested(rewarm):
     calls: list[bool] = []
 
     class _ImmediateRoot:
@@ -683,9 +701,28 @@ def test_post_done_rewarms_current_selection_for_next_session():
         _sync_camera_warmup=lambda *, allow_running=False: calls.append(allow_running),
     )
 
-    app_ui.App._post_done(app)
+    app_ui.App._post_done(app, rewarm=rewarm)
 
-    assert calls == [True]
+    assert calls == ([True] if rewarm else [])
+
+
+def test_camera_open_failure_restores_controls_without_rewarming():
+    statuses = []
+    completions = []
+
+    def broken_open(_index):
+        raise TimeoutError("摄像头响应超时")
+
+    app = SimpleNamespace(
+        _take_preopen_cap=lambda _index: None,
+        _open_camera_serialized=broken_open,
+        _post_status=statuses.append,
+        _post_done=lambda **kwargs: completions.append(kwargs),
+    )
+    state = SimpleNamespace(source="0", source2=None, workers=1, record_skeleton=False)
+    app_ui.App._worker_loop(app, state)
+    assert "摄像头响应超时" in statuses[-1]
+    assert completions == [{"rewarm": False}]
 
 
 def test_generation_aware_post_done_ignores_stale_and_deduplicates_current():

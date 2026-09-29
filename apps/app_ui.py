@@ -5,6 +5,7 @@ import json
 import os
 import threading
 import time
+import traceback
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
@@ -31,7 +32,8 @@ from core import pose_features as pf
 from core.parallel_pose_engine import ParallelPoseEngine, default_pipeline_factory
 from core.preview_smoother import PreviewLandmarkSmoother
 from core.recording_controller import RecordingController, RecordingState
-from apps.camera_enum import CameraEntry, InputSourceState, enumerate_cameras, open_camera
+from apps.camera_enum import CameraEntry, InputSourceState, enumerate_cameras
+from apps.camera_capture import open_camera
 from apps.camera_warmup import (
     CameraWarmupPool,
     CameraWarmupStopped,
@@ -2674,6 +2676,8 @@ class App:
 
         session_alive = bool(self._worker and self._worker.is_alive())
         if not session_alive:
+            # 学生练习改用 1080p；弃用之前按普通预览格式建立的预热句柄。
+            self._release_camera_warmups()
             self._student_pending_record = True
             self.student_status_var.set("正在启动双摄预览…")
             try:
@@ -3946,7 +3950,8 @@ class App:
             stop_event=stop_event,
         )
         try:
-            capture = open_camera(index)
+            size = (1920, 1080) if getattr(self, "_student_practice_active", False) else (1280, 720)
+            capture = open_camera(index, width=size[0], height=size[1], stop_event=stop_event)
         except BaseException:
             index_lock.release()
             raise
@@ -4577,13 +4582,19 @@ class App:
             self._worker_loop_parallel_camera(state)
             return
 
-        if source.isdigit():
-            # 点2：优先复用预打开的 cap（命中即用，藏掉冷启动），否则回退同步 open_camera。
-            cap = self._take_preopen_cap(int(source)) or self._open_camera_serialized(
-                int(source)
-            )
-        else:
-            cap = cv2.VideoCapture(source)
+        try:
+            if source.isdigit():
+                # 优先复用预打开的 cap，否则同步启动独立采集进程。
+                cap = self._take_preopen_cap(int(source)) or self._open_camera_serialized(
+                    int(source)
+                )
+            else:
+                cap = cv2.VideoCapture(source)
+        except Exception as exc:
+            traceback.print_exc()
+            self._post_status(f"打开输入源失败：{exc}")
+            self._post_done(rewarm=False)
+            return
 
         if not cap.isOpened():
             cap.release()
@@ -4620,6 +4631,7 @@ class App:
         smoother = PreviewLandmarkSmoother() if (draw_skeleton and not is_file) else None
 
         pipe = None
+        failed = False
         try:
             if draw_skeleton:
                 try:
@@ -4633,9 +4645,8 @@ class App:
                         ),
                     )
                 except Exception as e:
-                    cap.release()
+                    failed = True
                     self._post_status(f"初始化失败：{e}")
-                    self._post_done()
                     return
 
             t0 = time.monotonic()
@@ -4647,7 +4658,8 @@ class App:
             while not self._stop_evt.is_set():
                 ok, frame = cap.read()
                 if not ok:
-                    # Video ended or camera read failed.
+                    if not is_file and not self._stop_evt.is_set():
+                        raise RuntimeError("摄像头读帧失败，请检查连接后重新开始")
                     self._stop_evt.set()
                     break
 
@@ -4714,14 +4726,24 @@ class App:
                     actions_text = "-"
                 self._post_frame(annotated, actions_text)
 
-            cap.release()
             cv2.destroyAllWindows()
 
             self._post_status("已停止")
             self._post_progress(frame_count, total)
-            self._post_done()
+        except Exception as exc:
+            failed = not self._stop_evt.is_set()
+            if failed:
+                traceback.print_exc()
+                self._post_status(f"运行失败：{exc}")
+            else:
+                self._post_status("已停止")
         finally:
             # 覆盖正常结束 / 停止 / 异常：释放 writer 并复位录制状态。
+            self._stop_evt.set()
+            try:
+                cap.release()
+            except Exception:
+                traceback.print_exc()
             if pipe is not None:
                 try:
                     pipe.close()
@@ -4730,6 +4752,10 @@ class App:
             if matcher is not None:
                 matcher.close()
             self._transcode_async(self._close_primary_recording_session())
+            if failed:
+                self._post_done(rewarm=False)
+            else:
+                self._post_done()
 
     def _worker_loop_dual_camera(self, state: UiState) -> None:
         """双摄 wait→裸帧→模型→claim→正式循环，所有资源在单一 finally 收敛。"""
@@ -4785,7 +4811,7 @@ class App:
             pair = pool.wait_pair(
                 primary_index,
                 secondary_index,
-                timeout=5.0,
+                timeout=15.0,
                 stop_event=self._stop_evt,
             )
             self._mark_dual_startup_metric(generation, "pair_ready")
@@ -4917,15 +4943,16 @@ class App:
             phase = "runtime"
             t0 = time.monotonic()
             last_layout: str | None = None
-            self._post_status("运行中…（双摄像头）")
+            self._post_status(f"运行中…（双摄像头 {w}×{h} / {w2}×{h2}）")
             self._post_progress(0, 0)
 
             while not self._stop_evt.is_set():
                 ok, frame = cap.read()
                 ok2, frame2 = cap2.read()
                 if not ok or not ok2:
-                    self._stop_evt.set()
-                    break
+                    if self._stop_evt.is_set():
+                        break
+                    raise RuntimeError(f"第{1 if not ok else 2}路摄像头读帧失败，请检查连接后重新开始")
 
                 frame = _apply_rotation(
                     frame, self._get_runtime_rotate("primary")
@@ -5071,6 +5098,7 @@ class App:
             if not getattr(self, "_closing", False):
                 self._post_status(final_status)
         except Exception as exc:
+            traceback.print_exc()
             if self._stop_evt.is_set():
                 outcome = "stopped"
                 final_status = "已停止"
@@ -5115,6 +5143,7 @@ class App:
             self._post_done(
                 session_generation=generation,
                 final_status=final_status,
+                rewarm=outcome != "failed",
             )
 
     def _worker_loop_parallel_video(
@@ -5271,12 +5300,14 @@ class App:
 
         cap = None
         t_reader: threading.Thread | None = None
+        failed = False
+        capture_errors: list[Exception] = []
         try:
             try:
                 engine.start()
             except Exception as e:
+                failed = True
                 self._post_status(f"初始化失败：{e}")
-                self._post_done()
                 return
 
             # 各 worker 后台建模型的同时打开摄像头，两段冷启动重叠（而非串行）。点2：优先
@@ -5285,8 +5316,8 @@ class App:
                 int(state.source)
             ) or self._open_camera_serialized(int(state.source))
             if not cap.isOpened():
+                failed = True
                 self._post_status(f"无法打开输入源：{state.source}")
-                self._post_done()
                 return
 
             fps_for_ts = 30.0
@@ -5306,6 +5337,8 @@ class App:
                     while not self._stop_evt.is_set():
                         ok, frame = cap.read()
                         if not ok:
+                            if not self._stop_evt.is_set():
+                                raise RuntimeError("摄像头读帧失败，请检查连接后重新开始")
                             break
                         frame = _apply_rotation(
                             frame, self._get_runtime_rotate("primary")
@@ -5319,6 +5352,10 @@ class App:
                             with timestamp_ready:
                                 submitted_timestamps[submitted_index] = timestamp_ms
                                 timestamp_ready.notify_all()
+                except Exception as exc:
+                    if not self._stop_evt.is_set():
+                        traceback.print_exc()
+                        capture_errors.append(exc)
                 finally:
                     engine.signal_input_done()
 
@@ -5394,14 +5431,22 @@ class App:
             t_reader.join(timeout=2.0)
             cv2.destroyAllWindows()
 
-            err = engine.take_error()
+            err = capture_errors[0] if capture_errors else engine.take_error()
             if err is not None:
-                self._post_status(f"推理失败：{err}")
+                failed = True
+                self._post_status(f"运行失败：{err}")
             else:
                 self._post_status("已停止")
             self._post_progress(0, 0)
-            self._post_done()
+        except Exception as exc:
+            failed = not self._stop_evt.is_set()
+            if failed:
+                traceback.print_exc()
+                self._post_status(f"运行失败：{exc}")
+            else:
+                self._post_status("已停止")
         finally:
+            self._stop_evt.set()
             engine.close()
             if cap is not None:
                 try:
@@ -5413,6 +5458,10 @@ class App:
             if matcher is not None:
                 matcher.close()
             self._transcode_async(self._close_primary_recording_session())
+            if failed:
+                self._post_done(rewarm=False)
+            else:
+                self._post_done()
 
     def _prepare_preview_rgb(
         self, frame_bgr: np.ndarray, preview_wh: tuple[int, int]
@@ -5672,6 +5721,7 @@ class App:
         self,
         session_generation: int | None = None,
         final_status: str | None = None,
+        rewarm: bool = True,
     ) -> None:
         def _done() -> None:
             if getattr(self, "_closing", False):
@@ -5712,7 +5762,8 @@ class App:
             # 双摄 worker 已在 _post_done 前释放接管的 capture；即使 Thread 对象尚在
             # 收尾，也可以立即按当前两项选择重建下一次会话的预热。
             try:
-                self._sync_camera_warmup(allow_running=True)
+                if rewarm:
+                    self._sync_camera_warmup(allow_running=True)
             except Exception:
                 pass
 

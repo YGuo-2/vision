@@ -11,6 +11,30 @@ import urllib.request
 from pathlib import Path
 
 
+class _CameraSmokeCapture:
+    """打包检查用驱动；不接触物理摄像头。"""
+    def __init__(self, index, **kwargs):
+        self.index, self.reads = index, 0
+
+    def read(self):
+        import numpy as np
+        self.reads += 1
+        if self.index == 1 and self.reads > 1:
+            raise RuntimeError("simulated cv::Mat stride failure")
+        return True, np.zeros((24, 32, 3), dtype=np.uint8)[:, ::-1]
+
+    def get(self, prop):
+        return 30
+
+    def release(self):
+        pass
+
+
+class _CameraSmokeRecovered(_CameraSmokeCapture):
+    def __init__(self, index, **kwargs):
+        super().__init__(0, **kwargs)
+
+
 def run(report_path: Path) -> int:
     report_path = report_path.resolve()
     report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -86,11 +110,35 @@ def run(report_path: Path) -> int:
                 assert not any("qwen" in name or name == "torch" for name in sys.modules)
                 report["checks"].append("mediapipe_feedback_history_export")
 
+                from apps.camera_capture import ProcessCamera
+                failed_camera = ProcessCamera(1, _factory=_CameraSmokeCapture)
+                try:
+                    assert failed_camera.read()[0]
+                    try:
+                        failed_camera.read()
+                    except RuntimeError as exc:
+                        assert "simulated cv::Mat" in str(exc)
+                    else:
+                        raise AssertionError("摄像头异常没有传回主进程")
+                    assert not failed_camera.isOpened()
+                finally:
+                    failed_camera.release()
+                recovered_camera = ProcessCamera(1, _factory=_CameraSmokeRecovered)
+                try:
+                    ok, recovered_frame = recovered_camera.read()
+                    assert ok and recovered_frame.flags.c_contiguous
+                    assert recovered_frame.flags.owndata
+                finally:
+                    recovered_camera.release()
+                report["checks"].append("camera_spawn_error_cleanup_and_reopen")
+
                 from tkinter import Tk
                 from apps.app_ui import App
+                from unittest.mock import patch
                 root = Tk()
                 root.withdraw()
-                app = App(root)
+                with patch.object(App, "_start_enumeration"):
+                    app = App(root)
                 root.update()
                 app._enter_student_practice()
                 root.update()

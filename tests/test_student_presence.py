@@ -58,6 +58,22 @@ def occupancy(app, present, now):
     app._drain_exam_occupancy()
 
 
+def test_cold_start_discards_preview_format_before_opening_student_cameras(monkeypatch):
+    app = practice_app(monkeypatch, ready=False)
+    app._worker = None
+    events = []
+    app._release_camera_warmups = lambda: events.append("release")
+
+    def start():
+        events.append("start")
+        app._worker = SimpleNamespace(is_alive=lambda: True)
+
+    app._start = start
+    app._student_start()
+    assert events == ["release", "start"]
+    assert app._student_pending_record
+
+
 def test_wait_enter_record_leave_and_rearm(monkeypatch):
     app = practice_app(monkeypatch)
     app._student_start()
