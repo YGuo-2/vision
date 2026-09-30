@@ -532,7 +532,7 @@ def test_second_camera_combobox_binds_warmup_selection_handler():
     ]
 
 
-def test_app_warmup_pool_uses_exclusive_camera_factory_explicitly():
+def test_app_warmup_pool_is_the_only_camera_owner():
     init = _app_method_node("__init__")
     calls = _named_calls(init, "CameraWarmupPool")
 
@@ -540,7 +540,10 @@ def test_app_warmup_pool_uses_exclusive_camera_factory_explicitly():
     capture_factory = next(
         keyword.value for keyword in calls[0].keywords if keyword.arg == "capture_factory"
     )
-    assert ast.unparse(capture_factory) == "self._open_camera_exclusive"
+    assert ast.unparse(capture_factory) == "self._open_camera_process"
+    # 所有摄像头打开都经池；worker 与选择回调不再直接调用 open_camera。
+    for name in ("_worker_loop", "_worker_loop_parallel_camera", "_sync_camera_warmup"):
+        assert _named_calls(_function_node(name), "open_camera") == []
 
 
 def test_dual_start_dispatches_state_without_claiming_in_parent_worker(monkeypatch):
@@ -597,7 +600,6 @@ def test_dual_wait_failure_posts_status_and_done_exactly_once(monkeypatch):
         _stop_evt=threading.Event(),
         _post_status=statuses.append,
         _post_done=lambda **_kwargs: done_calls.append(True),
-        _cancel_dual_warmup_roles=lambda: cancel_calls.append(True),
         _invalidate_dual_preview=lambda _generation: None,
         _finish_dual_startup_metrics=lambda *_args, **_kwargs: None,
     )
@@ -611,7 +613,8 @@ def test_dual_wait_failure_posts_status_and_done_exactly_once(monkeypatch):
 
     assert statuses == ["双摄像头预热失败：camera 1 unavailable"]
     assert done_calls == [True]
-    assert cancel_calls == [True]
+    # wait_pair 失败由池自行回收观察到的 pair；worker 未取得代次，不再盲目取消角色。
+    assert cancel_calls == []
 
 
 def test_dual_worker_never_opens_camera_after_pair_claim():
@@ -995,7 +998,11 @@ def _exercise_dual_runtime_failure(monkeypatch, *, record_skeleton: bool, phase:
 
     class _Pool:
         def wait_pair(self, primary, secondary, *, timeout, stop_event):
-            assert (primary, secondary) == (0, 1)
+            expected_size = (1920, 1080) if student else (1280, 720)
+            assert (primary, secondary) == (
+                app_ui.CaptureSpec(0, *expected_size),
+                app_ui.CaptureSpec(1, *expected_size),
+            )
             return (
                 SimpleNamespace(frame=frame.copy(), sequence=1, generation=1),
                 SimpleNamespace(frame=frame.copy(), sequence=1, generation=1),
@@ -1013,7 +1020,7 @@ def _exercise_dual_runtime_failure(monkeypatch, *, record_skeleton: bool, phase:
             expected_generations,
             stop_event,
         ):
-            assert (primary, secondary) == (0, 1)
+            assert (primary.index, secondary.index) == (0, 1)
             assert expected_generations == (1, 1)
             assert not stop_event.is_set()
             return front_cap, side_cap
@@ -1063,7 +1070,6 @@ def _exercise_dual_runtime_failure(monkeypatch, *, record_skeleton: bool, phase:
         _advance_dual_preview_stage=lambda *_args, **_kwargs: True,
         _set_dual_startup_outcome=lambda *_args, **_kwargs: None,
         _post_dual_recording_ready=lambda _generation: None,
-        _cancel_dual_warmup_roles=lambda: None,
         _invalidate_dual_preview=lambda _generation: None,
         _finish_dual_startup_metrics=lambda *_args, **_kwargs: None,
         _write_recording_pair=write_pair,
@@ -1078,6 +1084,7 @@ def _exercise_dual_runtime_failure(monkeypatch, *, record_skeleton: bool, phase:
         rotate=0,
         rotate2=0,
         record_skeleton=record_skeleton,
+        capture_size=(1920, 1080) if student else (1280, 720),
     )
     monkeypatch.setattr(app_ui, "models_dir", lambda: Path("models"))
     monkeypatch.setattr(app_ui, "MediaPipePipeline", pipeline_factory)
@@ -1315,8 +1322,8 @@ def test_second_pipeline_failure_closes_first_without_starting_recording(monkeyp
         def claim_pair(self, *_args, **_kwargs):
             pytest.fail("claim must not run after pipeline initialization fails")
 
-        def cancel(self, role):
-            cancel_calls.append(role)
+        def cancel(self, role, *, generation=None):
+            cancel_calls.append((role, generation))
 
     class _RecordingSession:
         def begin_session(self, **_kwargs) -> None:
@@ -1374,7 +1381,8 @@ def test_second_pipeline_failure_closes_first_without_starting_recording(monkeyp
 
     assert first.close_calls == 1
     assert begin_calls == []
-    assert cancel_calls == [app_ui.PRIMARY, app_ui.SECONDARY]
+    # 失败会话只取消自己 wait_pair 观察到的代次，不误伤之后新声明的预热。
+    assert cancel_calls == [(app_ui.PRIMARY, 1), (app_ui.SECONDARY, 1)]
     assert done_calls == [1]
 
 

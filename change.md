@@ -1,3 +1,23 @@
+## 2026-09-30: [refactor] Tk 摄像头统一设备所有者与会话 lease
+
+### 问题描述
+
+用户连续遇到启动失败、学生练习切换失败，要求按 `docs/摄像头架构设计交接说明.md` 重构而非逐入口打补丁。根因是单摄预打开与双摄预热池两套所有者并存、打开锁不覆盖句柄生命周期、采集尺寸在打开途中读取可变模式标志、`cancel()` 返回被当作已释放、失败会话不分代次取消预热、退出学生练习过早恢复控件、会话自行终止不通知考试面板。
+
+### 修改内容
+
+- apps/camera_warmup.py：`CameraWarmupPool` 成为 Tk 桌面唯一设备所有者。新增冻结的 `CaptureSpec`（编号+请求尺寸，预热复用须 spec 一致）、`sync()` 声明式预热（支持交换正/侧）、`wait_one/claim_one` 单摄路径、`CameraLease`（会话期间设备仍记为占用，`release()` 成功才解除；失败则隔离并在下次同编号打开前按间隔重试）、按代次 `cancel`、`device_busy/wait_released`、结构化生命周期日志。取消/替换只发信号，释放由 reader/reaper 线程完成。
+- apps/app_ui.py：删除单摄预打开整套状态、按编号打开锁、`_ExclusiveCameraCapture`、`_open_camera_serialized/_open_camera_exclusive`、`_warm_dual_cameras`、`_cancel_dual_warmup_roles`；单摄、并行单摄、双摄统一经池等待首帧并接管 lease。`UiState.capture_size` 在启动时冻结（普通 720p、学生 1080p）；学生冷启动不再盲目释放预热。失败会话只取消自己观察到的预热代次；单摄 `_post_done` 带会话代次；lease 释放失败显示原因；退出学生练习在 worker 结束前保持「开始」禁用；会话自行终止时通知考试面板；刷新枚举前等待采集进程释放；关窗有界等待进程退出。新增 `[camera]` JSON 诊断日志（会话、设备、请求/实际尺寸、阶段、耗时、错误）。
+- apps/desktop_smoke.py、tests：迁移预打开/索引锁测试到新契约；新增 spec 重新协商、lease 占用阻止重开、释放失败隔离与重试、代次取消、角色交换、单摄停止等测试；真实 Tk+spawn 模式切换检查扩展为两轮 720p↔1080p、开始即停止再开始、双摄转单摄、关窗无残留采集进程。
+- docs/camera_session_architecture.md：所有权、状态完成条件、并发与失败策略、删除迁移清单、验收映射、日志字段与基线说明。
+
+### 验证方法
+
+- 摄像头/预热/生命周期/双摄/学生练习/控件/打包契约/枚举/考试/录制回归（D:\DevTools\venvs\vision）：338 passed、1 skipped（可选 sidecar 运行检查）；含真实 Tk mainloop + spawn 子进程模式切换检查。
+- 全量 tests：784 passed、1 skipped、8 failed。8 项失败（`test_backend_routing_contract` 1 项、`test_ui_backend_sessions` 5 项、`test_ui_controls` 1 项、`test_s5_hands_toggle` 1 项）在未改动的 958dd2f+补丁基线上同样失败，属 Vue/Tauri bridge 与既有 AST 契约，与本次无关。
+- git diff --check 通过。
+- 未重新打包 EXE，未做甲方双摄实机验收；本分支不含主工作区未提交的结果页工作与 v4 分析规则，发布前需先统一源码基线（见设计文档 §5）。
+
 ## 2026-09-28: [fix] Tk 双摄格式异常与启动失败后的进程级恢复
 
 ### 问题描述

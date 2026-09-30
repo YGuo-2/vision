@@ -18,6 +18,7 @@ from apps.camera_warmup import (  # noqa: E402
     CameraWarmupPool,
     CameraWarmupStopped,
     CameraWarmupTimeout,
+    CaptureSpec,
     PRIMARY,
     SECONDARY,
 )
@@ -297,12 +298,87 @@ def test_blocked_open_is_quarantined_and_retry_does_not_duplicate_open() -> None
         with pytest.raises(CameraWarmupTimeout):
             pool.wait_pair(0, 1, timeout=0.01, stop_event=threading.Event())
         assert sorted(calls) == [0, 1]
-        with pytest.raises(CameraWarmupError, match="still shutting down"):
+        with pytest.raises(CameraWarmupTimeout, match="上次采集仍未释放"):
             pool.wait_pair(0, 1, timeout=0.01, stop_event=threading.Event())
         assert sorted(calls) == [0, 1]
     finally:
         allow_open.set()
         _eventually(lambda: all(cap.release_calls == 1 for cap in captures.values()))
+        pool.close()
+
+
+@pytest.mark.parametrize("prewarm", [False, True])
+@pytest.mark.parametrize("finish", ["ready", "stop", "timeout"])
+def test_restart_waits_for_cancelled_capture_release(prewarm, finish) -> None:
+    release_entered = threading.Event()
+    allow_release = threading.Event()
+    waiting = threading.Event()
+    stop = threading.Event()
+    result = {}
+    calls = []
+
+    class SlowReleaseCapture(ControlledCapture):
+        def release(self):
+            release_entered.set()
+            assert allow_release.wait(2.0)
+            super().release()
+
+    previous = SlowReleaseCapture(10)
+    current = {0: ControlledCapture(20), 1: ControlledCapture(30)}
+
+    def factory(index):
+        calls.append(index)
+        return previous if len(calls) == 1 else current[index]
+
+    pool = CameraWarmupPool(factory, join_timeout=0.01)
+
+    def restart():
+        waiting.set()
+        try:
+            if prewarm:
+                pool.warm(PRIMARY, 0)
+            result["pair"] = pool.wait_pair(
+                0, 1, timeout=0.2 if finish == "timeout" else 1.0, stop_event=stop
+            )
+        except BaseException as exc:
+            result["error"] = exc
+
+    worker = threading.Thread(target=restart)
+    try:
+        pool.warm(PRIMARY, 0)
+        _eventually(lambda: previous.read_calls >= 2)
+        pool.cancel(PRIMARY)
+        assert release_entered.wait(1.0)
+        worker.start()
+        assert waiting.wait(1.0)
+        # The new reader may be scheduled, but the physical device stays exclusive.
+        worker.join(0.05)
+        assert "error" not in result, result.get("error")
+        assert worker.is_alive()
+        assert calls.count(0) == 1
+        if finish != "ready":
+            if finish == "stop":
+                stop.set()
+            worker.join(1.0)
+            assert not worker.is_alive()
+            expected = CameraWarmupStopped if finish == "stop" else CameraWarmupTimeout
+            assert isinstance(result.get("error"), expected)
+            allow_release.set()
+            _eventually(lambda: previous.release_calls == 1)
+            assert pool.snapshot_pair(0, 1) is None
+            assert calls.count(0) == 1  # Cancelled retries must never open late.
+            return
+        allow_release.set()
+        worker.join(1.0)
+        assert not worker.is_alive()
+        assert "error" not in result, result.get("error")
+        assert [_value(frame.frame) for frame in result["pair"]] == [20, 30]
+        assert calls.count(0) == 2
+        assert previous.release_calls == 1
+    finally:
+        allow_release.set()
+        if worker.ident is not None:
+            worker.join(2.0)
         pool.close()
 
 
@@ -377,16 +453,20 @@ def test_claim_pair_stops_readers_and_transfers_both_captures() -> None:
         pump_done.set()
         pump.join(1.0)
 
-    assert claimed == (captures[0], captures[1])
+    assert tuple(lease.capture for lease in claimed) == (captures[0], captures[1])
     assert captures[0].release_calls == 0
     assert captures[1].release_calls == 0
     assert pool.snapshot_pair(0, 1) is None
+    # lease 期间设备仍记为占用；close 不代替会话释放。
+    assert pool.device_busy(0) and pool.device_busy(1)
     pool.close()
     assert captures[0].release_calls == 0
     assert captures[1].release_calls == 0
 
     for cap in claimed:
         cap.release()
+    assert captures[0].release_calls == 1
+    assert not pool.device_busy(0) and not pool.device_busy(1)
 
 
 def test_claim_pair_never_opens_a_missing_pair() -> None:
@@ -576,7 +656,7 @@ def test_wait_during_claim_is_rejected_without_reopening_or_breaking_claim() -> 
     worker.join(1.0)
     assert not worker.is_alive()
     assert "error" not in result
-    assert result["caps"] == (captures[0], captures[1])
+    assert tuple(lease.capture for lease in result["caps"]) == (captures[0], captures[1])
     assert sorted(open_calls) == [0, 1]
     for cap in result["caps"]:
         cap.release()
@@ -647,6 +727,146 @@ def test_cancel_returns_before_blocking_driver_release_finishes() -> None:
         pool.close()
 
 
+def test_spec_change_renegotiates_after_old_format_releases() -> None:
+    """模式切换只改请求尺寸：旧格式释放完成后才按新尺寸打开，同尺寸则复用。"""
+    release_entered = threading.Event()
+    allow_release = threading.Event()
+    calls: list[tuple[int, int, int]] = []
+
+    class SlowReleaseCapture(ControlledCapture):
+        def release(self) -> None:
+            release_entered.set()
+            assert allow_release.wait(2.0)
+            super().release()
+
+    old = SlowReleaseCapture(1)
+    new = ControlledCapture(2)
+
+    def factory(index: int, *, width: int, height: int):
+        calls.append((index, width, height))
+        return old if len(calls) == 1 else new
+
+    preview = CaptureSpec(0, 1280, 720)
+    student = CaptureSpec(0, 1920, 1080)
+    pool = CameraWarmupPool(factory, join_timeout=0.01)
+    try:
+        pool.sync(preview, None)
+        _eventually(lambda: old.read_calls >= 2)
+        pool.sync(preview, None)
+        assert calls == [(0, 1280, 720)]
+
+        result: dict[str, object] = {}
+        worker = threading.Thread(
+            target=lambda: result.setdefault(
+                "frame",
+                pool.wait_one(student, timeout=2.0, stop_event=threading.Event()),
+            )
+        )
+        worker.start()
+        assert release_entered.wait(1.0)
+        worker.join(0.05)
+        assert worker.is_alive()
+        assert calls == [(0, 1280, 720)]  # 旧进程未释放前不重叠打开同一设备
+        allow_release.set()
+        worker.join(1.0)
+        assert calls == [(0, 1280, 720), (0, 1920, 1080)]
+        assert _value(result["frame"].frame) == 2
+    finally:
+        allow_release.set()
+        pool.close()
+
+
+def test_leased_device_blocks_reopen_until_session_releases() -> None:
+    opened: list[int] = []
+    captures = [ControlledCapture(1), ControlledCapture(2)]
+
+    def factory(index: int):
+        opened.append(index)
+        return captures[len(opened) - 1]
+
+    pool = CameraWarmupPool(factory, join_timeout=0.01)
+    try:
+        ready = pool.wait_one(0, timeout=1.0, stop_event=threading.Event())
+        captures[0].push(3)  # 真实采集 read 有界返回；模拟驱动需补一帧让 reader 退出
+        lease = pool.claim_one(0, timeout=1.0, expected_generation=ready.generation)
+        pool.warm(PRIMARY, 0)
+        time.sleep(0.05)
+        assert opened == [0]  # 会话持有 lease 时，下一次预热只能等待
+        lease.release()
+        _eventually(lambda: opened == [0, 0])
+        assert captures[0].release_calls == 1
+    finally:
+        pool.close()
+
+
+def test_failed_lease_release_is_quarantined_then_retried_before_reopen() -> None:
+    class FailOnceCapture(ControlledCapture):
+        def __init__(self, *values: int) -> None:
+            super().__init__(*values)
+            self.release_attempts = 0
+
+        def release(self) -> None:
+            self.release_attempts += 1
+            if self.release_attempts == 1:
+                raise RuntimeError("driver stuck")
+            super().release()
+
+    stuck = FailOnceCapture(1)
+    fresh = ControlledCapture(2)
+    opened: list[int] = []
+
+    def factory(index: int):
+        opened.append(index)
+        return stuck if len(opened) == 1 else fresh
+
+    pool = CameraWarmupPool(factory, join_timeout=0.01, release_retry_interval=0.0)
+    try:
+        ready = pool.wait_one(0, timeout=1.0, stop_event=threading.Event())
+        stuck.push(3)
+        lease = pool.claim_one(0, timeout=1.0, expected_generation=ready.generation)
+        with pytest.raises(CameraWarmupError, match="隔离"):
+            lease.release()
+        assert pool.device_busy(0)
+        frame = pool.wait_one(0, timeout=1.0, stop_event=threading.Event())
+        assert _value(frame.frame) == 2
+        assert stuck.release_attempts == 2 and stuck.release_calls == 1
+        assert opened == [0, 0]
+    finally:
+        pool.close()
+
+
+def test_generation_scoped_cancel_keeps_newer_warmup() -> None:
+    captures = {0: ControlledCapture(1)}
+    pool = CameraWarmupPool(captures.__getitem__, join_timeout=0.01)
+    try:
+        first = pool.wait_one(0, timeout=1.0, stop_event=threading.Event())
+        pool.cancel(PRIMARY, generation=first.generation + 1)
+        assert pool.device_busy(0)
+        pool.cancel(PRIMARY, generation=first.generation)
+        _eventually(lambda: captures[0].release_calls == 1)
+    finally:
+        pool.close()
+
+
+def test_sync_swaps_roles_without_rejecting_same_index() -> None:
+    captures = {0: ControlledCapture(1, 3), 1: ControlledCapture(2, 4)}
+    reopened = {0: ControlledCapture(5), 1: ControlledCapture(6)}
+    calls: list[int] = []
+
+    def factory(index: int):
+        calls.append(index)
+        return captures[index] if calls.count(index) == 1 else reopened[index]
+
+    pool = CameraWarmupPool(factory, join_timeout=0.01)
+    try:
+        pool.wait_pair(0, 1, timeout=1.0, stop_event=threading.Event())
+        swapped = pool.wait_pair(1, 0, timeout=1.0, stop_event=threading.Event())
+        assert (_value(swapped[0].frame), _value(swapped[1].frame)) == (6, 5)
+        assert all(cap.release_calls == 1 for cap in captures.values())
+    finally:
+        pool.close()
+
+
 @pytest.mark.parametrize(
     ("role", "index"),
     [("other", 0), (PRIMARY, -1), (PRIMARY, True)],
@@ -700,6 +920,8 @@ def test_warm_rejects_same_index_for_other_role_without_replacing_first() -> Non
         pool.warm(PRIMARY, 0)
         with pytest.raises(ValueError, match="both roles"):
             pool.warm(SECONDARY, 0)
+        _eventually(lambda: calls == [0])
+        time.sleep(0.02)
         assert calls == [0]
     finally:
         pool.cancel(PRIMARY)

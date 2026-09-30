@@ -37,7 +37,7 @@ from apps.camera_capture import open_camera
 from apps.camera_warmup import (
     CameraWarmupPool,
     CameraWarmupStopped,
-    CameraWarmupTimeout,
+    CaptureSpec,
     PRIMARY,
     SECONDARY,
 )
@@ -161,30 +161,22 @@ _CLOSE_JOIN_TIMEOUT_S = 3.0
 _CLOSE_JOIN_SLICE_S = 0.05
 _CLOSE_POLL_MS = 50
 _CAMERA_CANCEL_JOIN_TIMEOUT_S = 0.05
-_CAMERA_OPEN_LOCK_TIMEOUT_S = 5.0
+# 覆盖 ProcessCamera 12 秒首帧预算与旧设备释放等待；接管只需停掉预热 reader。
+_CAMERA_START_TIMEOUT_S = 15.0
+_CAMERA_CLAIM_TIMEOUT_S = 5.0
+_CAMERA_RELEASE_WAIT_S = 3.0
+_PREVIEW_CAPTURE_SIZE = (1280, 720)
+_STUDENT_CAPTURE_SIZE = (1920, 1080)
 _DUAL_RAW_PUMP_INTERVAL_S = 0.05
 _DUAL_STAGE_RANK = {"raw": 0, "annotated": 1}
 
 
-class _ExclusiveCameraCapture:
-    """Hold an index lock until the wrapped capture is released."""
-
-    def __init__(self, capture, index_lock: threading.Lock) -> None:
-        self._capture = capture
-        self._index_lock = index_lock
-        self._release_lock = threading.Lock()
-        self._released = False
-
-    def __getattr__(self, name: str):
-        return getattr(self._capture, name)
-
-    def release(self) -> None:
-        with self._release_lock:
-            if self._released:
-                return
-            self._capture.release()
-            self._released = True
-            self._index_lock.release()
+def _log_camera_event(payload: dict) -> None:
+    """摄像头生命周期诊断行；窗口版 stdout 由 desktop_launcher 重定向到 desktop.log。"""
+    try:
+        print("[camera] " + json.dumps(payload, ensure_ascii=False, sort_keys=True), flush=True)
+    except Exception:
+        pass
 
 
 def clamp_workers(n: int) -> int:
@@ -795,6 +787,8 @@ class UiState:
     record_skeleton: bool = False
     # 双摄录制结束后是否自动进入黑盒比对（检测一条龙）；False 为仅录制。
     auto_compare: bool = True
+    # 会话启动时冻结的请求尺寸；打开途中切换模式不得改变本次采集配置。
+    capture_size: tuple[int, int] = _PREVIEW_CAPTURE_SIZE
     session_generation: int = 0
     start_click: float = 0.0
 
@@ -1171,21 +1165,12 @@ class App:
             maxsize=1
         )
 
-        # 摄像头预打开（点2）：选中摄像头即后台 open_camera() 预热，_start 时复用，藏掉
-        # 0.5–2.5s 驱动冷启动。锁保护 _preopen_cap/_preopen_index 的存取（主线程触发、
-        # 预打开线程写入、worker 消费三方共享）。
-        self._preopen_lock = threading.Lock()
-        self._preopen_cap: cv2.VideoCapture | None = None
-        self._preopen_index: int | None = None
-        self._preopen_pending_index: int | None = None
-        # 每次预打开请求、消费或释放都递增 generation。后台 open 完成时只有仍匹配
-        # 当前 generation 的任务才可提交结果，防止较晚返回的旧任务覆盖新 cap。
-        self._preopen_generation = 0
-        self._camera_open_locks_guard = threading.Lock()
-        self._camera_open_locks: dict[int, threading.Lock] = {}
+        # 物理摄像头唯一所有者：单摄/双摄预热、会话接管和释放隔离都经此池。
+        # 采集配置（编号+请求尺寸）在请求时冻结为 CaptureSpec，不在打开途中读模式标志。
         self._camera_warmup_pool = CameraWarmupPool(
-            capture_factory=self._open_camera_exclusive,
+            capture_factory=self._open_camera_process,
             join_timeout=_CAMERA_CANCEL_JOIN_TIMEOUT_S,
+            log=_log_camera_event,
         )
 
         # H.264 转码不能依赖 daemon 线程碰运气完成；登记所有 worker，关窗时有界等待。
@@ -2490,6 +2475,7 @@ class App:
         self._sync_student_buttons()
         self.root.title("学生练习（动作问题说明）")
         self.status_var.set("学生练习模式")
+        self._sync_camera_warmup()
 
     def _exit_student_practice(self) -> None:
         """退出学生练习并恢复教师控件。"""
@@ -2576,8 +2562,17 @@ class App:
             pass
 
         self.root.title("MediaPipe 动作识别（人体姿态 + 手部）")
+        if self._worker and self._worker.is_alive():
+            # 采集尚在收尾：保持开始禁用，避免点击被静默丢弃；_post_done 负责恢复。
+            self.status_var.set("正在停止…")
+            for name in ("start_btn", "stop_btn"):
+                button = getattr(self, name, None)
+                if button is not None:
+                    button.configure(state="disabled")
+            return
         self.status_var.set("就绪")
         self._set_running_controls(False)
+        self._sync_camera_warmup()
 
     def _student_dual_cameras_ready(self) -> tuple[bool, str]:
         label2 = (self.camera_choice_var_2.get() or "").strip()
@@ -2676,8 +2671,7 @@ class App:
 
         session_alive = bool(self._worker and self._worker.is_alive())
         if not session_alive:
-            # 学生练习改用 1080p；弃用之前按普通预览格式建立的预热句柄。
-            self._release_camera_warmups()
+            # 会话 state 冻结 1080p 请求；池发现预热格式不一致时会在旧进程释放后重开。
             self._student_pending_record = True
             self.student_status_var.set("正在启动双摄预览…")
             try:
@@ -3685,10 +3679,14 @@ class App:
         self._set_refresh_enabled()
         self.camera_combo.configure(state="disabled")
 
+        pool = getattr(self, "_camera_warmup_pool", None)
+
         def _run() -> None:
             ok = True
             entries: list[CameraEntry] = []
             try:
+                if pool is not None:
+                    pool.wait_released(_CAMERA_RELEASE_WAIT_S)
                 entries = enumerate_cameras()
             except Exception:
                 ok = False
@@ -3840,25 +3838,26 @@ class App:
         self._start_enumeration()
 
     def _release_camera_warmups(self) -> None:
-        """释放单摄预打开和双摄 pool 当前持有的所有 capture。"""
-        self._release_preopen_cap()
+        """放弃所有预热 reader；释放在后台完成，重开同编号时由池等待真实释放。"""
         pool = getattr(self, "_camera_warmup_pool", None)
         if pool is None:
             return
-        for role in (PRIMARY, SECONDARY):
-            try:
-                pool.cancel(role)
-            except Exception:
-                pass
+        try:
+            pool.release_all()
+        except Exception:
+            pass
 
-    def _sync_camera_warmup(self, *, allow_running: bool = False) -> None:
-        """按两个下拉框的当前值选择单摄预开或双摄并发预热。"""
-        if getattr(self, "_closing", False):
-            return
-        running = bool(self._worker and self._worker.is_alive())
-        if running and not allow_running:
-            return
+    def _camera_capture_size(self) -> tuple[int, int]:
+        """当前模式的请求尺寸；只在主线程构造 spec 时读取一次，随后冻结。"""
+        if bool(getattr(self, "_student_practice_active", False)):
+            return _STUDENT_CAPTURE_SIZE
+        return _PREVIEW_CAPTURE_SIZE
 
+    def _camera_spec(self, index: int) -> CaptureSpec:
+        width, height = App._camera_capture_size(self)
+        return CaptureSpec(int(index), width, height)
+
+    def _selected_camera_indices(self) -> tuple[int | None, int | None]:
         primary = None
         if self._source_state.kind == "camera" and self._source_state.value:
             try:
@@ -3871,246 +3870,29 @@ class App:
             if secondary_label and secondary_label != NO_SECOND_CAMERA
             else None
         )
+        if primary is None or secondary == primary:
+            secondary = None
+        return primary, secondary
 
-        pool = getattr(self, "_camera_warmup_pool", None)
-        if primary is None or secondary is None or primary == secondary:
-            if pool is not None:
-                for role in (PRIMARY, SECONDARY):
-                    try:
-                        pool.cancel(role)
-                    except Exception:
-                        pass
-            if primary is not None:
-                self._kick_preopen(primary)
-            else:
-                self._release_preopen_cap()
+    def _sync_camera_warmup(self, *, allow_running: bool = False) -> None:
+        """按两个下拉框和当前模式声明预热需求；配置一致则复用，不一致由池重新协商。"""
+        if getattr(self, "_closing", False):
             return
-
-        # 双摄 pool 接管两路设备前先使旧单摄预开失效，禁止同一主摄被重复打开。
-        self._release_preopen_cap()
-        self._warm_dual_cameras(primary, secondary)
-
-    def _camera_open_lock(self, index: int) -> threading.Lock:
-        """返回按设备编号复用的 open 锁；不同摄像头仍可并发冷启动。"""
-        with self._camera_open_locks_guard:
-            lock = self._camera_open_locks.get(index)
-            if lock is None:
-                lock = threading.Lock()
-                self._camera_open_locks[index] = lock
-            return lock
-
-    def _acquire_camera_open_lock(
-        self,
-        index: int,
-        *,
-        stop_event: threading.Event | None = None,
-        timeout: float = _CAMERA_OPEN_LOCK_TIMEOUT_S,
-    ) -> threading.Lock:
-        index_lock = self._camera_open_lock(index)
-        deadline = time.monotonic() + max(0.0, float(timeout))
-        while True:
-            if stop_event is not None and stop_event.is_set():
-                raise CameraWarmupStopped("camera open was stopped")
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise CameraWarmupTimeout(
-                    f"camera {index} is still releasing"
-                )
-            if index_lock.acquire(
-                timeout=min(_CAMERA_CANCEL_JOIN_TIMEOUT_S, remaining)
-            ):
-                return index_lock
-
-    def _open_camera_serialized(
-        self,
-        index: int,
-        *,
-        timeout: float = _CAMERA_OPEN_LOCK_TIMEOUT_S,
-    ):
-        """串行化同一设备的驱动 open，避免 legacy preopen 与双摄 pool 争抢。"""
-        index_lock = self._acquire_camera_open_lock(
-            index,
-            stop_event=getattr(self, "_stop_evt", None),
-            timeout=timeout,
-        )
-        try:
-            return open_camera(index)
-        finally:
-            index_lock.release()
-
-    def _open_camera_exclusive(
-        self,
-        index: int,
-        *,
-        stop_event: threading.Event | None = None,
-    ):
-        """打开 pool capture，并把同编号互斥延续到 capture.release()。"""
-        index_lock = self._acquire_camera_open_lock(
-            index,
-            stop_event=stop_event,
-        )
-        try:
-            size = (1920, 1080) if getattr(self, "_student_practice_active", False) else (1280, 720)
-            capture = open_camera(index, width=size[0], height=size[1], stop_event=stop_event)
-        except BaseException:
-            index_lock.release()
-            raise
-        return _ExclusiveCameraCapture(capture, index_lock)
-
-    def _warm_dual_cameras(self, primary: int, secondary: int) -> None:
-        """启动两路 pool reader；参数均为普通 int，可由预开后台线程安全调用。"""
-        pool = getattr(self, "_camera_warmup_pool", None)
-        if pool is None or getattr(self, "_closing", False):
+        running = bool(self._worker and self._worker.is_alive())
+        if running and not allow_running:
             return
+        pool = getattr(self, "_camera_warmup_pool", None)
+        if pool is None:
+            return
+        primary, secondary = App._selected_camera_indices(self)
         try:
-            pool.warm(PRIMARY, primary)
-            pool.warm(SECONDARY, secondary)
+            pool.sync(
+                None if primary is None else App._camera_spec(self, primary),
+                None if secondary is None else App._camera_spec(self, secondary),
+            )
         except Exception as exc:
-            for role in (PRIMARY, SECONDARY):
-                try:
-                    pool.cancel(role)
-                except Exception:
-                    pass
+            App._release_camera_warmups(self)
             self._post_status(f"摄像头预热失败：{exc}")
-
-    # ---- 摄像头预打开（点2） ----
-
-    def _kick_preopen(self, index: int) -> None:
-        """释放旧预热 cap，后台线程为 index 预热新 cap。
-
-        `open_camera` 阻塞 0.5–2.5s（驱动冷启动），必须放后台线程，仿 `_start_enumeration`。
-        """
-        with self._preopen_lock:
-            if (
-                self._preopen_index == index
-                and self._preopen_cap is not None
-            ):
-                return
-            if self._preopen_pending_index == index:
-                return
-            self._preopen_generation += 1
-            generation = self._preopen_generation
-            # 同一摄像头的重复预热在新 cap 成功后再原子替换；新 open
-            # 失败时保留已有有效 handle。切到不同摄像头则立即释放旧设备。
-            same_index = self._preopen_index == index
-            old_cap = None if same_index else self._preopen_cap
-            if not same_index:
-                self._preopen_cap = None
-                self._preopen_index = None
-            self._preopen_pending_index = index
-        if old_cap is not None:
-            old_cap.release()
-        worker = threading.Thread(
-            target=self._preopen_camera,
-            args=(index, generation),
-            daemon=True,
-        )
-        try:
-            worker.start()
-        except Exception:
-            with self._preopen_lock:
-                if generation == self._preopen_generation:
-                    self._preopen_pending_index = None
-            raise
-
-    def _preopen_camera(self, index: int, generation: int) -> None:
-        """预打开线程体：open_camera 完成后双重校验（锁下）才存入 _preopen_cap/_preopen_index。
-
-        仅当 (a) 请求 generation 仍是最新，(b) 用户当前选中仍是该 index——读取非 Tkinter
-        的 `_source_state`（跨线程碰 Tkinter 变量不安全），(c) 会话未运行，且 (d) cap 确实
-        已打开时才提交。提交与替换在同一锁内完成，被替换或失效的 handle 在锁外释放。
-        """
-        # 外层按 index 持锁直到失效 capture 已释放；pool 对同一 index 的 factory
-        # 只有在这里完整收敛后才能进入，避免驱动层出现重叠 open handle。
-        index_lock = self._camera_open_lock(index)
-        if not index_lock.acquire(timeout=_CAMERA_OPEN_LOCK_TIMEOUT_S):
-            with self._preopen_lock:
-                if generation == self._preopen_generation:
-                    self._preopen_pending_index = None
-            self._post_status(f"摄像头 {index} 仍在释放，请稍后重试")
-            return
-        try:
-            # 线程可能在创建后尚未获得 index lock，期间用户已切到双摄且 pool
-            # 抢先完成 open。此时旧 generation 必须在触碰驱动前直接退出。
-            with self._preopen_lock:
-                if generation != self._preopen_generation:
-                    return
-            try:
-                cap = open_camera(index)
-            except Exception:
-                with self._preopen_lock:
-                    if generation == self._preopen_generation:
-                        self._preopen_pending_index = None
-                return
-
-            try:
-                opened = bool(cap is not None and cap.isOpened())
-            except Exception:
-                opened = False
-
-            replaced_cap = None
-            with self._preopen_lock:
-                running = bool(self._worker and self._worker.is_alive())
-                still_selected = (
-                    self._source_state.kind == "camera"
-                    and self._source_state.value == str(index)
-                )
-                keep = (
-                    generation == self._preopen_generation
-                    and still_selected
-                    and not running
-                    and opened
-                )
-                if keep:
-                    replaced_cap = self._preopen_cap
-                    self._preopen_cap = cap
-                    self._preopen_index = index
-                if generation == self._preopen_generation:
-                    self._preopen_pending_index = None
-            if replaced_cap is not None and replaced_cap is not cap:
-                replaced_cap.release()
-            if not keep and cap is not None:
-                cap.release()
-        finally:
-            index_lock.release()
-
-    def _take_preopen_cap(self, index: int):
-        """消费预热 cap（转移所有权）：命中且仍 isOpened() 才返回，否则 None（回退 open_camera）。
-
-        命中但已失效（如设备被拔出）时就地释放并清空，不留僵尸引用。
-        """
-        with self._preopen_lock:
-            # 会话开始消费时，所有尚未完成的预打开任务都不再有提交资格。
-            self._preopen_generation += 1
-            cap = self._preopen_cap
-            cached_index = self._preopen_index
-            self._preopen_cap = None
-            self._preopen_index = None
-            self._preopen_pending_index = None
-        if cap is None:
-            return None
-        if cached_index != index:
-            cap.release()
-            return None
-        try:
-            opened = bool(cap.isOpened())
-        except Exception:
-            opened = False
-        if opened:
-            return cap
-        cap.release()
-        return None
-
-    def _release_preopen_cap(self) -> None:
-        """失效所有请求并清空预热 cap（锁下弹出、锁外 release，避免阻塞设备调用）。"""
-        with self._preopen_lock:
-            self._preopen_generation += 1
-            cap = self._preopen_cap
-            self._preopen_cap = None
-            self._preopen_index = None
-            self._preopen_pending_index = None
-        if cap is not None:
-            cap.release()
 
     def _collect_state(self) -> UiState:
         # 无有效输入源：使用统一提示文案（需求 4.2）。
@@ -4169,6 +3951,7 @@ class App:
                 if source2 is not None and hasattr(self, "auto_compare_var")
                 else True
             ),
+            capture_size=App._camera_capture_size(self),
         )
 
     @staticmethod
@@ -4262,19 +4045,64 @@ class App:
             with render_lock:
                 invalidate_locked()
 
-    def _cancel_dual_warmup_roles(self) -> None:
+    def _open_camera_process(
+        self,
+        index: int,
+        *,
+        width: int,
+        height: int,
+        stop_event: threading.Event,
+    ):
+        """池的唯一打开入口：每路一个 spawn 采集进程，调用时解析模块级 open_camera。"""
+        return open_camera(index, width=width, height=height, stop_event=stop_event)
+
+    @staticmethod
+    def _session_spec(state: UiState, source: str) -> CaptureSpec:
+        width, height = getattr(state, "capture_size", _PREVIEW_CAPTURE_SIZE)
+        return CaptureSpec(int(source), int(width), int(height))
+
+    def _cancel_session_warmups(self, generations: tuple[int, ...]) -> None:
+        """失败会话只取消自己观察到的预热代次，不误伤之后重新声明的预热。"""
         pool = getattr(self, "_camera_warmup_pool", None)
         if pool is None:
             return
-        for role in (PRIMARY, SECONDARY):
+        for role, generation in zip((PRIMARY, SECONDARY), generations):
             try:
-                pool.cancel(role)
+                pool.cancel(role, generation=generation)
             except Exception:
                 pass
 
+    def _open_session_camera(self, state: UiState):
+        """单摄：等池内 reader 出有效首帧后接管为 lease；停止/超时由池回收。"""
+        pool = self._camera_warmup_pool
+        spec = App._session_spec(state, state.source)
+        ready = pool.wait_one(
+            spec, timeout=_CAMERA_START_TIMEOUT_S, stop_event=self._stop_evt
+        )
+        return pool.claim_one(
+            spec,
+            timeout=_CAMERA_CLAIM_TIMEOUT_S,
+            expected_generation=ready.generation,
+            stop_event=self._stop_evt,
+        )
+
+    def _release_session_camera(self, capture) -> str | None:
+        """释放会话 lease；失败时设备保持隔离，返回可见原因。"""
+        try:
+            capture.release()
+        except Exception as exc:
+            traceback.print_exc()
+            return f"摄像头释放失败：{exc}"
+        return None
+
     def _start(self) -> None:
         if self._worker and self._worker.is_alive():
-            return
+            # _post_done 是 worker 的最后一步且已归还 lease；此时线程只剩返回，可短暂 join。
+            if getattr(self, "_current_session_generation", 0) == 0:
+                self._worker.join(timeout=0.2)
+            if self._worker.is_alive():
+                self.status_var.set("上一会话仍在收尾，请稍候再点「开始」")
+                return
         start_click = time.monotonic()
 
         try:
@@ -4284,6 +4112,18 @@ class App:
             return
 
         state = self._begin_preview_session(state, start_click=start_click)
+        _log_camera_event(
+            {
+                "event": "session_start",
+                "session": getattr(state, "session_generation", None),
+                "primary": getattr(state, "source", None),
+                "secondary": getattr(state, "source2", None),
+                "requested": "x".join(
+                    str(v) for v in getattr(state, "capture_size", _PREVIEW_CAPTURE_SIZE)
+                ),
+                "student": bool(getattr(self, "_student_practice_active", False)),
+            }
+        )
 
         self._stop_evt.clear()
         self.start_btn.configure(state="disabled")
@@ -4337,11 +4177,16 @@ class App:
             except Exception:
                 pass
         dual_active = bool(getattr(self, "_active_dual_generation", 0))
+        _log_camera_event(
+            {
+                "event": "stop_requested",
+                "session": getattr(self, "_current_session_generation", 0),
+            }
+        )
         self._stop_evt.set()
         self._dual_recording_ready = False
         if dual_active:
             self._invalidate_dual_preview()
-            self._cancel_dual_warmup_roles()
         record_btn = getattr(self, "record_btn", None)
         if record_btn is not None:
             try:
@@ -4391,7 +4236,7 @@ class App:
         self._stop_evt.set()
         self._dual_recording_ready = False
         App._invalidate_dual_preview(self)
-        App._cancel_dual_warmup_roles(self)
+        App._release_camera_warmups(self)
         for name in (
             "record_btn",
             "record_stop_btn",
@@ -4448,11 +4293,13 @@ class App:
                     with finalize_lock:
                         _finish_current_then_cancel()
             finally:
-                self._release_preopen_cap()
                 pool = getattr(self, "_camera_warmup_pool", None)
                 if pool is not None:
                     try:
                         pool.close()
+                        # 关窗预算内等待采集进程真实退出；超时由诊断日志记录。
+                        if not pool.wait_released(_CAMERA_RELEASE_WAIT_S):
+                            _log_camera_event({"event": "close_release_timeout"})
                     except Exception:
                         pass
 
@@ -4584,22 +4431,33 @@ class App:
 
         try:
             if source.isdigit():
-                # 优先复用预打开的 cap，否则同步启动独立采集进程。
-                cap = self._take_preopen_cap(int(source)) or self._open_camera_serialized(
-                    int(source)
-                )
+                # 预热 reader 出首帧后接管；无预热时池在后台按本次 spec 冷启动。
+                cap = App._open_session_camera(self, state)
             else:
                 cap = cv2.VideoCapture(source)
+        except CameraWarmupStopped:
+            self._post_status("已停止")
+            self._post_done(session_generation=getattr(state, "session_generation", None))
+            return
         except Exception as exc:
             traceback.print_exc()
-            self._post_status(f"打开输入源失败：{exc}")
-            self._post_done(rewarm=False)
+            final_status = f"打开输入源失败：{exc}"
+            self._post_status(final_status)
+            self._post_done(
+                session_generation=getattr(state, "session_generation", None),
+                final_status=final_status,
+                rewarm=False,
+            )
             return
 
         if not cap.isOpened():
             cap.release()
-            self._post_status(f"无法打开输入源：{source}")
-            self._post_done()
+            final_status = f"无法打开输入源：{source}"
+            self._post_status(final_status)
+            self._post_done(
+                session_generation=getattr(state, "session_generation", None),
+                final_status=final_status,
+            )
             return
 
         src_fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
@@ -4632,6 +4490,7 @@ class App:
 
         pipe = None
         failed = False
+        final_status: str | None = None
         try:
             if draw_skeleton:
                 try:
@@ -4646,7 +4505,8 @@ class App:
                     )
                 except Exception as e:
                     failed = True
-                    self._post_status(f"初始化失败：{e}")
+                    final_status = f"初始化失败：{e}"
+                    self._post_status(final_status)
                     return
 
             t0 = time.monotonic()
@@ -4734,16 +4594,18 @@ class App:
             failed = not self._stop_evt.is_set()
             if failed:
                 traceback.print_exc()
-                self._post_status(f"运行失败：{exc}")
+                final_status = f"运行失败：{exc}"
+                self._post_status(final_status)
             else:
                 self._post_status("已停止")
         finally:
             # 覆盖正常结束 / 停止 / 异常：释放 writer 并复位录制状态。
             self._stop_evt.set()
-            try:
-                cap.release()
-            except Exception:
-                traceback.print_exc()
+            release_error = App._release_session_camera(self, cap)
+            if release_error is not None:
+                failed = True
+                final_status = final_status or release_error
+                self._post_status(final_status)
             if pipe is not None:
                 try:
                     pipe.close()
@@ -4752,10 +4614,11 @@ class App:
             if matcher is not None:
                 matcher.close()
             self._transcode_async(self._close_primary_recording_session())
-            if failed:
-                self._post_done(rewarm=False)
-            else:
-                self._post_done()
+            self._post_done(
+                session_generation=getattr(state, "session_generation", None),
+                final_status=final_status,
+                rewarm=not failed,
+            )
 
     def _worker_loop_dual_camera(self, state: UiState) -> None:
         """双摄 wait→裸帧→模型→claim→正式循环，所有资源在单一 finally 收敛。"""
@@ -4763,14 +4626,15 @@ class App:
             getattr(state, "session_generation", 0)
             or getattr(self, "_current_session_generation", 0)
         )
-        primary_index = int(state.source)
-        secondary_index = int(state.source2)
+        primary_spec = App._session_spec(state, state.source)
+        secondary_spec = App._session_spec(state, state.source2)
         pool = self._camera_warmup_pool
         cap = None
         cap2 = None
         pipe = None
         pipe2 = None
         pool_claimed = False
+        warm_generations: tuple[int, ...] = ()
         recording_pair_started = False
         raw_pump_stop = threading.Event()
         raw_pump: threading.Thread | None = None
@@ -4809,11 +4673,12 @@ class App:
 
         try:
             pair = pool.wait_pair(
-                primary_index,
-                secondary_index,
-                timeout=15.0,
+                primary_spec,
+                secondary_spec,
+                timeout=_CAMERA_START_TIMEOUT_S,
                 stop_event=self._stop_evt,
             )
+            warm_generations = (pair[0].generation, pair[1].generation)
             self._mark_dual_startup_metric(generation, "pair_ready")
             if self._stop_evt.is_set():
                 raise CameraWarmupStopped("camera warmup was stopped")
@@ -4853,8 +4718,8 @@ class App:
                     try:
                         while not raw_pump_stop.is_set() and not self._stop_evt.is_set():
                             latest = pool.snapshot_pair(
-                                primary_index,
-                                secondary_index,
+                                primary_spec,
+                                secondary_spec,
                                 after=(cursor[0], cursor[1]),
                             )
                             if latest is not None:
@@ -4907,10 +4772,10 @@ class App:
 
             phase = "claim"
             cap, cap2 = pool.claim_pair(
-                primary_index,
-                secondary_index,
-                timeout=5.0,
-                expected_generations=(pair[0].generation, pair[1].generation),
+                primary_spec,
+                secondary_spec,
+                timeout=_CAMERA_CLAIM_TIMEOUT_S,
+                expected_generations=warm_generations,
                 stop_event=self._stop_evt,
             )
             pool_claimed = True
@@ -5120,14 +4985,23 @@ class App:
                         pipeline.close()
                     except Exception:
                         pass
-            for capture in (cap, cap2):
-                if capture is not None:
-                    try:
-                        capture.release()
-                    except Exception:
-                        pass
+            # 两路 lease 一起归还；释放失败的设备由池隔离，不影响已写片段收尾。
+            release_errors = [
+                error
+                for error in (
+                    App._release_session_camera(self, capture)
+                    for capture in (cap, cap2)
+                    if capture is not None
+                )
+                if error is not None
+            ]
             if not pool_claimed:
-                self._cancel_dual_warmup_roles()
+                App._cancel_session_warmups(self, warm_generations)
+            if release_errors:
+                outcome = "failed"
+                final_status = final_status if error_type else release_errors[0]
+                error_type = error_type or "CameraReleaseError"
+                self._post_status(final_status)
             try:
                 cv2.destroyAllWindows()
             except Exception:
@@ -5301,23 +5175,27 @@ class App:
         cap = None
         t_reader: threading.Thread | None = None
         failed = False
+        final_status: str | None = None
         capture_errors: list[Exception] = []
         try:
             try:
                 engine.start()
             except Exception as e:
                 failed = True
-                self._post_status(f"初始化失败：{e}")
+                final_status = f"初始化失败：{e}"
+                self._post_status(final_status)
                 return
 
-            # 各 worker 后台建模型的同时打开摄像头，两段冷启动重叠（而非串行）。点2：优先
-            # 复用预打开的 cap（命中即用），否则回退同步 open_camera。
-            cap = self._take_preopen_cap(
-                int(state.source)
-            ) or self._open_camera_serialized(int(state.source))
+            # 各 worker 后台建模型的同时由池接管摄像头，两段冷启动重叠（而非串行）。
+            try:
+                cap = App._open_session_camera(self, state)
+            except CameraWarmupStopped:
+                self._post_status("已停止")
+                return
             if not cap.isOpened():
                 failed = True
-                self._post_status(f"无法打开输入源：{state.source}")
+                final_status = f"无法打开输入源：{state.source}"
+                self._post_status(final_status)
                 return
 
             fps_for_ts = 30.0
@@ -5434,7 +5312,8 @@ class App:
             err = capture_errors[0] if capture_errors else engine.take_error()
             if err is not None:
                 failed = True
-                self._post_status(f"运行失败：{err}")
+                final_status = f"运行失败：{err}"
+                self._post_status(final_status)
             else:
                 self._post_status("已停止")
             self._post_progress(0, 0)
@@ -5442,26 +5321,29 @@ class App:
             failed = not self._stop_evt.is_set()
             if failed:
                 traceback.print_exc()
-                self._post_status(f"运行失败：{exc}")
+                final_status = f"运行失败：{exc}"
+                self._post_status(final_status)
             else:
                 self._post_status("已停止")
         finally:
             self._stop_evt.set()
             engine.close()
-            if cap is not None:
-                try:
-                    cap.release()
-                except Exception:
-                    pass
             if t_reader is not None and t_reader.is_alive():
                 t_reader.join(timeout=2.0)
+            if cap is not None:
+                release_error = App._release_session_camera(self, cap)
+                if release_error is not None:
+                    failed = True
+                    final_status = final_status or release_error
+                    self._post_status(final_status)
             if matcher is not None:
                 matcher.close()
             self._transcode_async(self._close_primary_recording_session())
-            if failed:
-                self._post_done(rewarm=False)
-            else:
-                self._post_done()
+            self._post_done(
+                session_generation=getattr(state, "session_generation", None),
+                final_status=final_status,
+                rewarm=not failed,
+            )
 
     def _prepare_preview_rgb(
         self, frame_bgr: np.ndarray, preview_wh: tuple[int, int]
@@ -5723,6 +5605,16 @@ class App:
         final_status: str | None = None,
         rewarm: bool = True,
     ) -> None:
+        # worker 最后一步：此时 lease 已归还（或已隔离），记录会话终态与原因。
+        _log_camera_event(
+            {
+                "event": "session_done",
+                "session": session_generation,
+                "status": final_status,
+                "rewarm": bool(rewarm),
+            }
+        )
+
         def _done() -> None:
             if getattr(self, "_closing", False):
                 return
@@ -5747,6 +5639,13 @@ class App:
                         getattr(self, "_dual_startup_metrics", {}).pop(
                             session_generation, None
                         )
+            if bool(getattr(self, "_exam_active", False)):
+                panel = getattr(self, "_exam_panel", None)
+                if panel is not None:
+                    try:
+                        panel.on_session_stop()
+                    except Exception:
+                        traceback.print_exc()
             self.start_btn.configure(state="normal")
             self.stop_btn.configure(state="disabled")
             self._set_refresh_enabled()
@@ -5759,8 +5658,8 @@ class App:
                 self._sync_student_buttons()
             if final_status:
                 self.status_var.set(final_status)
-            # 双摄 worker 已在 _post_done 前释放接管的 capture；即使 Thread 对象尚在
-            # 收尾，也可以立即按当前两项选择重建下一次会话的预热。
+            # worker 已在 _post_done 前归还 lease；新 reader 若遇到仍在退出的旧进程，
+            # 会在后台等待真实释放后再打开，Tk 线程不等待驱动。
             try:
                 if rewarm:
                     self._sync_camera_warmup(allow_running=True)
