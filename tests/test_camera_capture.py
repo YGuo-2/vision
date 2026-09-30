@@ -85,18 +85,13 @@ def test_cancel_blocked_open_reaps_child():
 
 
 def test_blocked_release_is_bounded_and_idempotent():
-    from apps.app_ui import _ExclusiveCameraCapture
     camera = camera_capture.ProcessCamera(3, _factory=FakeCapture)
     pid = camera._process.pid
-    lock = threading.Lock()
-    lock.acquire()
-    wrapped = _ExclusiveCameraCapture(camera, lock)
     started = time.monotonic()
-    wrapped.release()
-    wrapped.release()
+    camera.release()
+    camera.release()
     assert time.monotonic() - started < 3
-    assert lock.acquire(timeout=0.1)
-    lock.release()
+    assert not camera.isOpened()
     assert pid not in {child.pid for child in mp.active_children()}
 
 
@@ -160,34 +155,28 @@ def test_ambiguous_camera_names_never_fall_back_to_another_index(monkeypatch):
 
 
 def test_process_pair_survives_warmup_thread_handoff_and_reopens():
-    from apps.app_ui import _ExclusiveCameraCapture
-    from apps.camera_warmup import CameraWarmupPool
+    from apps.camera_warmup import CameraWarmupPool, CaptureSpec
 
-    locks = [threading.Lock(), threading.Lock()]
-
-    def factory(index, *, stop_event):
-        assert locks[index].acquire(timeout=1)
-        try:
-            capture = camera_capture.ProcessCamera(
-                index, stop_event=stop_event, _factory=HealthyCapture)
-        except BaseException:
-            locks[index].release()
-            raise
-        return _ExclusiveCameraCapture(capture, locks[index])
+    def factory(index, *, width, height, stop_event):
+        return camera_capture.ProcessCamera(
+            index, width=width, height=height, stop_event=stop_event,
+            _factory=HealthyCapture)
 
     pool = CameraWarmupPool(capture_factory=factory, join_timeout=0.1)
     try:
-        for _ in range(2):
-            pool.wait_pair(0, 1, timeout=10, stop_event=threading.Event())
-            captures = pool.claim_pair(0, 1, timeout=3)
+        for size in ((1280, 720), (1920, 1080)):
+            specs = (CaptureSpec(0, *size), CaptureSpec(1, *size))
+            pool.wait_pair(*specs, timeout=10, stop_event=threading.Event())
+            leases = pool.claim_pair(*specs, timeout=3)
             try:
                 # claim 已设置预热 stop_event；新线程接管后仍须能正常读帧。
-                for capture in captures:
-                    assert capture.read()[0]
+                for lease in leases:
+                    assert lease.read()[0]
+                    assert pool.device_busy(lease.spec.index)
             finally:
-                for capture in captures:
-                    capture.release()
-            assert not any(lock.locked() for lock in locks)
+                for lease in leases:
+                    lease.release()
+            assert not pool.device_busy(0) and not pool.device_busy(1)
     finally:
         pool.close()
 

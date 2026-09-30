@@ -58,19 +58,20 @@ def occupancy(app, present, now):
     app._drain_exam_occupancy()
 
 
-def test_cold_start_discards_preview_format_before_opening_student_cameras(monkeypatch):
+def test_cold_start_requests_student_format_without_blind_release(monkeypatch):
     app = practice_app(monkeypatch, ready=False)
     app._worker = None
     events = []
     app._release_camera_warmups = lambda: events.append("release")
 
     def start():
-        events.append("start")
+        # 学生模式下冻结的请求尺寸为 1080p；格式不一致的预热由池在释放后重开。
+        events.append(("start", app_ui.App._camera_capture_size(app)))
         app._worker = SimpleNamespace(is_alive=lambda: True)
 
     app._start = start
     app._student_start()
-    assert events == ["release", "start"]
+    assert events == [("start", (1920, 1080))]
     assert app._student_pending_record
 
 
