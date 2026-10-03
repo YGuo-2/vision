@@ -41,6 +41,32 @@
 - 内存模拟阻塞采集与释放异常：确认连续重试被拒绝及设备锁保留；模拟结束主动解除阻塞并关闭 pool，未访问物理摄像头。
 - 核对当前模型配置、录像写入、离线时间轴及官方 MediaPipe / Ultralytics / MMPose / MotionBERT 文档；以 change.md 定向 diff 检查作为本次文档验证。
 
+## 2026-09-26: [fix] 学生练习图文报告Milestone 1红蓝对抗缺陷修复
+
+### 问题描述
+
+在学生练习动作分析图文报告（`core/feedback_report.py`）Milestone 1阶段由Challenger对抗测试发现多处安全与健壮性缺陷：
+1. 报告核心标题裁决逻辑（`get_headline_summary`）在极端组合下出现状态语义漂移：未发现问题被误判为无法判断、撤销项未从可测量基数排除导致全撤销时分母虚高、全项目无法判断时未正确映射至最高优先级错误提示，以及覆盖161,051种状态空间的边界case未严格遵循层级定义。
+2. 证据帧提取（`extract_evidence_frame`）对格式异常的骨骼关键点结构缺少充分防御，遇到空列表嵌套（如 `[[]]`）、单维度或含非法浮点值（如 NaN、Inf）的关键点时会抛出 `IndexError` 或 `TypeError`。
+3. 路径脱敏函数（`desensitize_paths`）正则表达式无法捕获含空格路径（如 `C:\Program Files\...`、`C:\Users\John Doe\...`）与 Windows UNC 网络共享路径（如 `\\server\share\...`），且仅脱敏了部分字段，学员姓名、学号、检查项名称及教师签名等用户输入/元数据字段缺少脱敏过滤，存在本地隐私泄露隐患。
+4. HTML报告导出解析部分字段缺少空值（NoneType）安全校验及异常类型转换保护（`sourceFps`、`sideOffsetSeconds`、`revision` 遇到非数值字符串导致崩溃）。
+
+### 修改内容
+
+- 核心裁决修复：`get_headline_summary` 重构判定优先层级与统计基数，`measurable_count` 严格排除 `revoked_count`；优先响应全项无法判断（`level="error"`, `title="本次未能完成有效判断"`, `status_tone="unable"`），依次严格实现全待判断、部分待判断、部分无法判断与全部未发现问题层级，并对全撤销项与空记录提供兜底说明；补充前端对应的 `.banner-unable` 警示样式。
+- 坐标解析健壮性：在 `extract_evidence_frame` 引入 `_is_valid_point` 校验，严格限制关键点为长度不小于2的序列且坐标均为有限数值（`math.isfinite`），自动跳过畸形关键点，避免 `IndexError` 崩溃。
+- 全面脱敏与防注入：重构 `WIN_PATH_RE`、新增 `WIN_UNC_PATH_RE` 及优化 `UNIX_PATH_RE`，全面覆盖含空格路径与网络共享 UNC 路径，避免误吞合法标点；将脱敏函数应用到 HTML 渲染中的所有用户可见及元数据字段（包括 `student_name`、`student_id`、`rule_version`、`check.name`、`check.body_part`、`audit.teacher` 等）。
+- 空值安全与容错转换：新增 `safe_clean(val, default="")` 与 `_safe_float(val, default=0.0)`，安全处理任意 `None` 或畸形输入；`try/except` 包裹帧提取与指标解析过程，确保报告导出始终优雅降级。
+
+### 验证方法
+
+- 运行全部 254 项测试套件：`Remove-Item Env:\TCL_LIBRARY, Env:\TK_LIBRARY; python -m pytest tests/test_student_presence.py tests/test_app_controls.py tests/test_feedback_report.py tests/test_feedback_html_export.py tests/test_adversarial_m1.py tests/test_feedback_report_adversarial.py tests/test_action_feedback.py -q`，254 项全部通过（100% pass）。
+- 穷举验证：`tests/test_adversarial_m1.py` 覆盖 161,051 种状态空间排列组合，零违规（0 violations）。
+- 对抗攻击与畸形数据验证：`tests/test_feedback_report_adversarial.py` 164 项用例覆盖 XSS 注入、含空格路径与 UNC 路径脱敏、离线零外链、畸形数据及文件损毁恢复，全部通过。
+- 格式检查：`git diff --check` 验证无空白与语法格式错误。
+
+---
+
 ## 2026-09-20: [fix] 学生练习v4逐帧分析、遮挡分段与播报隐藏窗口
 
 ### 问题描述

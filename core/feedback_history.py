@@ -185,15 +185,20 @@ class FeedbackHistory:
         with self._lock:
             record = self.get(record_id)
             destination = Path(destination).resolve()
-            if destination.suffix.lower() != ".txt":
-                raise ValueError("请选择 .txt 文字报告文件")
+            ext = destination.suffix.lower()
+            if ext not in {".txt", ".html", ".htm"}:
+                raise ValueError("请选择 .html 图文报告或 .txt 文字报告文件")
             if destination == self.root or self.root in destination.parents:
                 raise ValueError("请将导出报告保存在受管历史目录之外")
             if str(destination) in record["sourcePaths"].values():
                 raise ValueError("不能覆盖原视频")
             temp = destination.with_name(destination.name + "." + uuid4().hex + ".tmp")
             try:
-                temp.write_text(format_report(record), encoding="utf-8-sig")
+                if ext == ".txt":
+                    temp.write_text(format_report(record), encoding="utf-8-sig")
+                else:
+                    from core.feedback_report import render_html_report
+                    temp.write_text(render_html_report(record, history_root=self.root), encoding="utf-8")
                 temp.replace(destination)
             finally:
                 temp.unlink(missing_ok=True)
