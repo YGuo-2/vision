@@ -1,3 +1,13 @@
+## 2026-10-03（America/Los_Angeles）: [docs] 整体架构重构设计同步推送后的基线，修正摄像头接口分层
+
+- 问题描述：main 推送、PR #75 关闭、2 项 Tk 测试修正后，设计文档中"本地未推送""PR 仍为 open""8 项失败"等描述过时；复查时还发现摄像头门面的接口违反文档自己的分层规则。
+- 修改内容：
+  - 基线说明、§5.3.1、D-14、§12 的 P0 行、测试基线与风险表同步到当前状态；P0 剩余项补上"合并 spec 时收入 `assets/feedback` 结果页图标"（现有两份 spec 都没有收入，9-29 交付包的结果页因此不显示图标）。
+  - 分层修正：`CameraService` 属 L1（media），原写 `open_input(...) -> CameraInput`，而 `CameraInput` 属 L4（live），构成反向依赖。改为 `open_stream(specs) -> CameraStream`（L1），由 `live/inputs.py` 的 `CameraInput` 包装后供 runner 使用；§2.2 包结构、§5.3.2、§8.2、P5 行同步。
+  - 池接口清单补上 PR #75 已有的 `warm`、`release_all`；V-1、V-6 中"PR #75 目前……"改为"现状……"；§1.2 用户数据兼容补上可选的 `feedback_config.json`（§7.8 已承诺保留文件名与字段）。
+- 同步依据：`git ls-remote`、`gh pr view 75` 与全量 pytest 结果；`apps/camera_warmup.py` 中 `CameraWarmupPool` 的公开方法签名（AST）；`apps/feedback_result_panel.py` 的图标目录 `_ASSETS_DIR`；`dist/` 下最新交付包为 camera-mode-fix-20260929，包内没有 png。
+- 验证方法：文档检查脚本 0 问题（68 个章节，登记表 41 行，V-1～V-8、D-1～D-14 均有定义且有序，表格列数一致，引用的现有文件路径均存在）；过时措辞扫描无命中；git diff --check 通过。
+
 ## 2026-10-03（America/Los_Angeles）: [test] 推送 P0 基线、关闭 PR #75，修正两项过时的 Tk 测试
 
 - 问题描述：用户确认推送当前 main，并同意按已查明的根因修正 2 项失败的 Tk 测试。两项都是产品行为先变、测试没有跟上，产品代码无需修改。
