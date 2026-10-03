@@ -1,3 +1,25 @@
+## 2026-09-29: [fix] 学生练习切换时异步释放与重开竞态
+
+### 问题描述与复现
+
+- 阅读前次「修复摄像头回退并提升精度」会话（01a0e88e-10e0-7232-8030-05c731d99430）并核对当前 958dd2f。学生练习 `_student_start()` 为 1080p 先调用 `_release_camera_warmups()`，但 pool.cancel() 只请求异步取消，随后立即 wait_pair() 被预热池自己的 `camera 0 is still shutting down` 拒绝。普通模式不强制执行这次格式重建，故单摄/双摄普通预览正常不能排除此竞态。
+- 新增可控释放屏障，修复前“直接重启”“先预热再重启”两条路径均稳定重现相同报错；前次单独启动/回收检查和仅记录 release/start 调用顺序的测试未覆盖这个真实交接窗口。
+
+### 修改内容
+
+- apps/camera_warmup.py：将同编号设备尚在退出的处理移入共用 reader 的 `_open_capture()`，等待旧 owner 完整释放后才调用摄像头工厂；warm()/wait_pair() 均复用，Tk 主线程不等待驱动。保留设备排他、代次隔离和 15 秒启动预算，取消或超时后的排队 reader 不得迟到重开设备。真实超时附带仍未释放的设备编号。
+- tests/test_camera_warmup.py：覆盖直接/预热重试的释放完成、主动停止、等待超时六种组合，验证不重叠打开、取消后不复活；阻塞 open 测试继续验证设备隔离。
+- apps/desktop_smoke.py、tests/test_camera_capture.py：加入真实 Tk mainloop、按钮回调、预热池、实际 spawn 子进程的两轮“普通 720p 预览→停止/自动预热→学生 1080p→退出→再开始”检查；仅物理摄像头由模拟驱动替代。
+
+### 验证方法与交付
+
+- 当前工作区摄像头/预热/生命周期/双摄/学生练习回归：199 passed。首次真实 Tk 检查被原有未提交结果页改动阻塞：core.feedback_report 导入当前 core.action_feedback 不存在的 format_fusion；保留这些原有工作，不混入摄像头修复。
+- 在 958dd2f 的隔离 worktree 应用仅本次补丁后，摄像头、预热、Tk 生命周期、双摄、学生练习、控件及打包契约：220 passed、1 skipped（可选 sidecar 运行检查）；含真实 Tk/进程模式切换检查。目录：C:/Users/21240/.codex/worktrees/camera-mode-recovery/vision。
+- 核对发现 Git 基线为分析规则 v2，而上次交付的 dist/camera-fix-20260928/vision_ui.exe 为 v4。最终交付因此基于上次 EXE，仅替换 apps.camera_warmup 和 apps.desktop_smoke 两个模块；895 个其他 Python 模块、1224 个其他归档资源条目逐项确认保持原字节，保留 v4 分析、模型、界面和资源。隔离源码构建的旧规则版本不作为最终交付。
+- 最终 EXE：dist/camera-mode-fix-20260929/vision_ui.exe。实际运行 --offline-self-check 返回 ok=true、frozen=true，四个模型、Lite/Full/Heavy+手部 CPU 推理、录像转码解码、v4 双视角逐帧分析、历史导出、采集异常恢复和两轮 Tk 720p/1080p 切换通过。
+- 证据：outputs/camera-mode-offline-check-20260929.json 及同名 .log；版本保持核验：outputs/camera-mode-v4-repackage-20260929.json；可复现重打包脚本：outputs/rebuild_camera_mode_v4_fix.py。
+- git diff --check 通过。本机只枚举到一台 FHD Camera；双路验证使用模拟驱动，不声称已完成甲方 USB 双摄硬件验收。现场日志仍为 %LOCALAPPDATA%/VisionSanda/desktop.log。未提交或推送；原有未完成工作保留。
+
 ## 2026-09-28: [fix] Tk 双摄格式异常与启动失败后的进程级恢复
 
 ### 问题描述

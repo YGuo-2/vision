@@ -190,3 +190,30 @@ def test_process_pair_survives_warmup_thread_handoff_and_reopens():
             assert not any(lock.locked() for lock in locks)
     finally:
         pool.close()
+
+
+def test_tk_preview_student_switch_with_process_cameras(monkeypatch, tmp_path):
+    tk = pytest.importorskip("tkinter")
+    from apps import app_ui, desktop_smoke
+    from core import paths
+
+    monkeypatch.setattr(app_ui.App, "_start_enumeration", lambda self: None)
+    monkeypatch.setattr(paths, "outputs_dir", lambda: tmp_path)
+    monkeypatch.setattr(app_ui, "outputs_dir", lambda: tmp_path)
+    try:
+        root = tk.Tk()
+    except tk.TclError as exc:
+        pytest.skip(f"Tk display is unavailable: {exc}")
+    root.withdraw()
+    app = None
+    try:
+        app = app_ui.App(root)
+        root.update()
+        desktop_smoke._check_camera_mode_switch(app, root)
+    finally:
+        if app is not None:
+            app._on_close()
+        try:
+            root.destroy()
+        except tk.TclError:
+            pass

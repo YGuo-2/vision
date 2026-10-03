@@ -297,12 +297,87 @@ def test_blocked_open_is_quarantined_and_retry_does_not_duplicate_open() -> None
         with pytest.raises(CameraWarmupTimeout):
             pool.wait_pair(0, 1, timeout=0.01, stop_event=threading.Event())
         assert sorted(calls) == [0, 1]
-        with pytest.raises(CameraWarmupError, match="still shutting down"):
+        with pytest.raises(CameraWarmupTimeout, match="上次采集仍未释放"):
             pool.wait_pair(0, 1, timeout=0.01, stop_event=threading.Event())
         assert sorted(calls) == [0, 1]
     finally:
         allow_open.set()
         _eventually(lambda: all(cap.release_calls == 1 for cap in captures.values()))
+        pool.close()
+
+
+@pytest.mark.parametrize("prewarm", [False, True])
+@pytest.mark.parametrize("finish", ["ready", "stop", "timeout"])
+def test_restart_waits_for_cancelled_capture_release(prewarm, finish) -> None:
+    release_entered = threading.Event()
+    allow_release = threading.Event()
+    waiting = threading.Event()
+    stop = threading.Event()
+    result = {}
+    calls = []
+
+    class SlowReleaseCapture(ControlledCapture):
+        def release(self):
+            release_entered.set()
+            assert allow_release.wait(2.0)
+            super().release()
+
+    previous = SlowReleaseCapture(10)
+    current = {0: ControlledCapture(20), 1: ControlledCapture(30)}
+
+    def factory(index):
+        calls.append(index)
+        return previous if len(calls) == 1 else current[index]
+
+    pool = CameraWarmupPool(factory, join_timeout=0.01)
+
+    def restart():
+        waiting.set()
+        try:
+            if prewarm:
+                pool.warm(PRIMARY, 0)
+            result["pair"] = pool.wait_pair(
+                0, 1, timeout=0.2 if finish == "timeout" else 1.0, stop_event=stop
+            )
+        except BaseException as exc:
+            result["error"] = exc
+
+    worker = threading.Thread(target=restart)
+    try:
+        pool.warm(PRIMARY, 0)
+        _eventually(lambda: previous.read_calls >= 2)
+        pool.cancel(PRIMARY)
+        assert release_entered.wait(1.0)
+        worker.start()
+        assert waiting.wait(1.0)
+        # The new reader may be scheduled, but the physical device stays exclusive.
+        worker.join(0.05)
+        assert "error" not in result, result.get("error")
+        assert worker.is_alive()
+        assert calls.count(0) == 1
+        if finish != "ready":
+            if finish == "stop":
+                stop.set()
+            worker.join(1.0)
+            assert not worker.is_alive()
+            expected = CameraWarmupStopped if finish == "stop" else CameraWarmupTimeout
+            assert isinstance(result.get("error"), expected)
+            allow_release.set()
+            _eventually(lambda: previous.release_calls == 1)
+            assert pool.snapshot_pair(0, 1) is None
+            assert calls.count(0) == 1  # Cancelled retries must never open late.
+            return
+        allow_release.set()
+        worker.join(1.0)
+        assert not worker.is_alive()
+        assert "error" not in result, result.get("error")
+        assert [_value(frame.frame) for frame in result["pair"]] == [20, 30]
+        assert calls.count(0) == 2
+        assert previous.release_calls == 1
+    finally:
+        allow_release.set()
+        if worker.ident is not None:
+            worker.join(2.0)
         pool.close()
 
 

@@ -7,6 +7,7 @@ import shutil
 import socket
 import sys
 import tempfile
+import time
 import traceback
 import urllib.request
 from pathlib import Path
@@ -34,6 +35,85 @@ class _CameraSmokeCapture:
 class _CameraSmokeRecovered(_CameraSmokeCapture):
     def __init__(self, index, **kwargs):
         super().__init__(0, **kwargs)
+
+
+class _CameraSmokePreview(_CameraSmokeRecovered):
+    def __init__(self, index, *, width, height):
+        super().__init__(index)
+        self.width, self.height = width, height
+
+    def read(self):
+        import numpy as np
+        time.sleep(0.02)
+        return True, np.zeros((self.height, self.width, 3), dtype=np.uint8)
+
+    def release(self):
+        time.sleep(0.1)  # Realistic asynchronous driver shutdown across mode switches.
+
+
+def _check_camera_mode_switch(app, root):
+    """Exercise real Tk callbacks, pool, spawn and claim with simulated devices."""
+    from unittest.mock import patch
+    from apps.camera_capture import ProcessCamera
+    from apps.camera_enum import CameraEntry
+
+    def pump_until(predicate):
+        deadline = time.monotonic() + 20
+        errors = []
+
+        def poll():
+            try:
+                if predicate():
+                    root.quit()
+                    return
+                assert time.monotonic() < deadline, app.status_var.get()
+                root.after(10, poll)
+            except Exception as exc:
+                errors.append(exc)
+                root.quit()
+
+        root.after(0, poll)
+        root.mainloop()  # update() alone cannot dispatch worker-thread Tk calls.
+        if errors:
+            raise errors[0]
+
+    def stopped():
+        return not app._worker.is_alive() and app._current_session_generation == 0
+
+    def ready():
+        return app._dual_recording_ready and app._rec.session_size is not None
+
+    def capture(index, **kwargs):
+        return ProcessCamera(index, _factory=_CameraSmokePreview, **kwargs)
+
+    with patch("apps.app_ui.open_camera", side_effect=capture):
+        try:
+            app.record_skeleton_var.set(False)
+            app.auto_compare_var.set(False)
+            app._preferred_primary_camera_index = 0
+            app._preferred_secondary_camera_index = 1
+            app._apply_camera_entries([CameraEntry("摄像头 0", 0), CameraEntry("摄像头 1", 1)], True)
+            app.feedback_controls.student_id.set("offline-switch")
+            for _ in range(2):
+                app._start()
+                pump_until(ready)
+                assert app._rec.session_size == app._rec2.session_size == (1280, 720)
+                app._stop()
+                pump_until(stopped)
+                pump_until(lambda: app._camera_warmup_pool.snapshot_pair(0, 1) is not None)
+                app._enter_student_practice()
+                app._student_start()
+                pump_until(lambda: ready() and app._student_presence_gate is not None)
+                assert app._rec.session_size == app._rec2.session_size == (1920, 1080)
+                assert app._rec.state == "idle"  # Blank frames cannot start a recording.
+                app._exit_student_practice()
+                pump_until(stopped)
+        finally:
+            if app._worker is not None and app._worker.is_alive():
+                app._stop()
+                pump_until(stopped)
+            app._release_camera_warmups()
+            app._camera_warmup_pool.close()
 
 
 def run(report_path: Path) -> int:
@@ -151,6 +231,8 @@ def run(report_path: Path) -> int:
                 with patch.object(App, "_start_enumeration"):
                     app = App(root)
                 root.update()
+                _check_camera_mode_switch(app, root)
+                report["checks"].append("tk_preview_student_1080p_switch_twice_with_spawn")
                 app._enter_student_practice()
                 root.update()
                 assert app._student_practice_active

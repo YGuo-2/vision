@@ -98,7 +98,7 @@ class CameraWarmupPool:
         self._closed = False
 
     def warm(self, role: str, index: int) -> None:
-        """Start warming ``role/index`` or reuse its existing reader."""
+        """Schedule warming; the reader waits for any old device owner to exit."""
 
         role = self._validate_role(role)
         index = self._validate_index(index)
@@ -121,8 +121,6 @@ class CameraWarmupPool:
                 and not current.claimed
             ):
                 return
-            self._ensure_index_not_retiring_locked(index)
-
             other_role = SECONDARY if role == PRIMARY else PRIMARY
             other = self._slots[other_role]
             if other is not None and other.index == index:
@@ -185,8 +183,9 @@ class CameraWarmupPool:
     ) -> tuple[WarmFrame, WarmFrame]:
         """Wait until both roles have valid frames.
 
-        Missing roles are started concurrently. Any error, timeout, external
-        stop, or role replacement cancels only the pair observed by this call.
+        Missing roles are started concurrently, after any old owner releases
+        that device. The timeout includes this drain. Any error, timeout, stop,
+        or role replacement cancels only the pair observed by this call.
         """
 
         primary_index, secondary_index = self._validate_pair(
@@ -477,8 +476,16 @@ class CameraWarmupPool:
 
                 remaining = deadline - self._clock()
                 if remaining <= 0:
+                    retiring = [
+                        str(slot.index) for slot in expected
+                        if self._index_is_retiring_locked(slot.index)
+                    ]
+                    detail = (
+                        f"; 摄像头 {', '.join(retiring)} 的上次采集仍未释放"
+                        if retiring else ""
+                    )
                     raise CameraWarmupTimeout(
-                        "timed out waiting for both cameras to warm"
+                        "timed out waiting for both cameras to warm" + detail
                     )
                 self._condition.wait(
                     min(remaining, self._stop_poll_interval)
@@ -660,8 +667,6 @@ class CameraWarmupPool:
 
         with self._condition:
             self._ensure_open()
-            for index in desired.values():
-                self._ensure_index_not_retiring_locked(index)
             if any(
                 slot is not None and slot.claimed
                 for slot in self._slots.values()
@@ -722,21 +727,30 @@ class CameraWarmupPool:
         return expected
 
     def _open_capture(self, slot: _WarmupSlot) -> Any:
+        # cancel() is intentionally asynchronous. Mode switches, retries and
+        # role swaps must drain the old owner before touching the same device.
+        # Wait in this reader, never in the Tk caller or under a device lock.
+        with self._condition:
+            while True:
+                if slot.stop_event.is_set() or not self._slot_is_current(slot):
+                    raise CameraWarmupStopped("camera warmup was stopped")
+                if not self._index_is_retiring_locked(slot.index):
+                    break
+                self._condition.wait(self._stop_poll_interval)
         if self._factory_accepts_stop_event:
             return self._capture_factory(
                 slot.index, stop_event=slot.stop_event
             )
         return self._capture_factory(slot.index)
 
-    def _ensure_index_not_retiring_locked(self, index: int) -> None:
+    def _index_is_retiring_locked(self, index: int) -> bool:
         for slot in self._retired.values():
             if slot.index != index or slot.released:
                 continue
             thread = slot.thread
             if (thread is not None and thread.is_alive()) or slot.cap is not None:
-                raise CameraWarmupError(
-                    f"camera {index} is still shutting down"
-                )
+                return True
+        return False
 
     def _new_slot_locked(self, role: str, index: int) -> _WarmupSlot:
         self._generations[role] += 1
