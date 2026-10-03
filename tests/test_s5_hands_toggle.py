@@ -118,6 +118,33 @@ def test_ui_state_can_disable_hands():
     assert state.out_path == "out.mp4"
 
 
+def _occupancy_pipeline_configs(tree: ast.AST) -> list[ast.Call]:
+    """``occupancy_pipe = MediaPipePipeline(cfg=PipelineConfig(...))`` 中的 PipelineConfig。
+
+    考试 / 学生练习的站位检测只用髋部中点判断是否到位，固定跑 lite pose、不跑手部，
+    与界面的手部开关无关（bf8c908 引入）。
+    """
+    found: list[ast.Call] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(isinstance(t, ast.Name) and t.id == "occupancy_pipe" for t in node.targets):
+            continue
+        value = node.value
+        if not (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Name)
+            and value.func.id == "MediaPipePipeline"
+        ):
+            continue
+        found.extend(
+            keyword.value
+            for keyword in value.keywords
+            if keyword.arg == "cfg" and isinstance(keyword.value, ast.Call)
+        )
+    return found
+
+
 def test_ui_worker_pipelines_use_state_enable_hands():
     source = Path(app_ui.__file__).read_text(encoding="utf-8")
     tree = ast.parse(source)
@@ -131,13 +158,25 @@ def test_ui_worker_pipelines_use_state_enable_hands():
         and any(keyword.arg == "enable_hands" for keyword in node.keywords)
     ]
 
-    assert len(cfg_calls) >= 2
-    for call in cfg_calls:
+    # 站位检测管线是唯一的例外：恰有一处，且保持 lite、不跑手部。
+    occupancy_cfgs = _occupancy_pipeline_configs(tree)
+    assert len(occupancy_cfgs) == 1
+    occupancy_kwargs = {keyword.arg: keyword.value for keyword in occupancy_cfgs[0].keywords}
+    assert isinstance(occupancy_kwargs.get("enable_hands"), ast.Constant)
+    assert occupancy_kwargs["enable_hands"].value is False
+    assert isinstance(occupancy_kwargs.get("pose_variant"), ast.Constant)
+    assert occupancy_kwargs["pose_variant"].value == "lite"
+
+    # 其余实时 / 离线 worker 管线必须跟随界面的手部开关。
+    worker_calls = [call for call in cfg_calls if all(call is not occ for occ in occupancy_cfgs)]
+    assert len(worker_calls) >= 2
+    for call in worker_calls:
         enable_arg = next(keyword.value for keyword in call.keywords if keyword.arg == "enable_hands")
-        assert isinstance(enable_arg, ast.Attribute)
-        assert isinstance(enable_arg.value, ast.Name)
-        assert enable_arg.value.id == "state"
-        assert enable_arg.attr == "enable_hands"
+        where = f"apps/app_ui.py:{call.lineno}"
+        assert isinstance(enable_arg, ast.Attribute), where
+        assert isinstance(enable_arg.value, ast.Name), where
+        assert enable_arg.value.id == "state", where
+        assert enable_arg.attr == "enable_hands", where
 
 
 class _Var:

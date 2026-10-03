@@ -1,3 +1,16 @@
+## 2026-10-03（America/Los_Angeles）: [test] 推送 P0 基线、关闭 PR #75，修正两项过时的 Tk 测试
+
+- 问题描述：用户确认推送当前 main，并同意按已查明的根因修正 2 项失败的 Tk 测试。两项都是产品行为先变、测试没有跟上，产品代码无需修改。
+- 修改内容：
+  - 推送：`main` 以 958dd2f..eb6e16c 推送到 origin。推送前核对了 git/gh 身份（gy212）、仓库权限（WRITE）、远端 main 仍为 958dd2f，新增对象中没有大文件和敏感文件名。
+  - PR #75：留言说明内容已以 095aed2（`cherry-pick -x b667650`）合入，并附冲突处理与验证结果，随后关闭。`refactor/camera-session` 分支（本地与远端）和 worktree `D:/CodeProject/vision-camera-session` 保留未删。
+  - tests/test_ui_controls.py：运行态联动测试先按单摄会话设置 `_dual_recording_ready=True`，与真实 `_start` 经 `_begin_preview_session` 的设置一致（a3a605f 起录制按钮由该标志把关）；新增"双摄首帧就绪前录制按钮保持禁用"的用例。
+  - tests/test_s5_hands_toggle.py：AST 测试只豁免 `occupancy_pipe` 的站位检测管线（bf8c908 起固定 lite、`enable_hands=False`），并断言它保持 lite、不跑手部；其余 4 处 worker 管线仍须取 `state.enable_hands`，失败时报出行号。
+- 验证方法：
+  - 两个测试文件 12 passed。变异检查：worker 管线改为忽略开关、站位管线改为跟随开关或改用 full 时，AST 测试都失败；真实源码通过。
+  - 全量 pytest（D:\DevTools\venvs\vision）：1026 passed / 6 failed / 1 skipped，6 项均为已弃用的 web 端。
+  - 推送后 `git ls-remote` 确认远端 main 为 eb6e16c；`gh pr view 75` 为 CLOSED。git diff --check 通过。
+
 ## 2026-10-02（America/Los_Angeles）: [chore] P0 基线整合：学生练习 v4 等未提交工作入库，PR #75 rebase 合入（本地，未推送）
 
 - 问题描述：用户确认 P0 决策：v4 先提交到 main；工作区其余未提交改动按功能拆分提交；PR #75 在新基线上 rebase 后合入，合入后删除 recover 分支；web 端失败不再处理；2 项 Tk 失败先查原因。整合前 main 为 958dd2f，v4 分析、图文报告、结果页、9-29 摄像头补丁都只在工作区或 Codex 快照里，从未入库。
