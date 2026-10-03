@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import queue
 import subprocess
+import sys
 import threading
 from typing import Callable
 
@@ -70,10 +71,14 @@ def _default_windows_speak(text: str) -> None:
             "powershell",
             "-NoProfile",
             "-NonInteractive",
+            "-WindowStyle",
+            "Hidden",
             "-Command",
             ps,
         ],
         check=False,
         capture_output=True,
+        stdin=subprocess.DEVNULL,
+        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
         timeout=60,
     )

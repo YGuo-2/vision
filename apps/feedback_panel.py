@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+from dataclasses import replace
 from queue import Empty, Queue
 import threading
 from tkinter import StringVar, Text, Toplevel, filedialog, messagebox, ttk
 
-from core.action_feedback import ACTIONS, STANCES, STATE_LABELS, format_report
+from core.action_feedback import ACTIONS, STANCES, STATE_LABELS, format_report, format_fusion, analyze_feedback
+from core.feedback_geometry import load_feedback_config
 from core.feedback_history import FeedbackHistory, validate_identity
 
 
@@ -27,11 +29,14 @@ class FeedbackControls:
         self.student_name = StringVar(root, value="")
         self.action = StringVar(root, value=ACTIONS["straight_combo"])
         self.stance = StringVar(root, value=STANCES["left"])
+        self.model_choices = {"Full（精细分析）": "full", "Lite（快速对比）": "lite", "Heavy（较慢）": "heavy"}
+        self.analysis_model = StringVar(root, value="Full（精细分析）")
         self.fields = []
         frame = ttk.Frame(parent)
         frame.pack(fill="x", pady=(6, 0))
         for label, variable, values in (("学号", self.student_id, None), ("姓名（选填）", self.student_name, None),
-                                         ("动作", self.action, list(ACTIONS.values())), ("实战式", self.stance, list(STANCES.values()))):
+                                         ("动作", self.action, list(ACTIONS.values())), ("实战式", self.stance, list(STANCES.values())),
+                                         ("分析模型", self.analysis_model, list(self.model_choices))):
             row = ttk.Frame(frame)
             row.pack(fill="x", pady=2)
             ttk.Label(row, text=label, width=12).pack(side="left")
@@ -127,8 +132,18 @@ class FeedbackControls:
         self.poll_id = self.root.after(100, poll)
 
     def analyze_recording(self, identity, front, side, *, record_id=None, on_saved=None):
-        self._start(lambda: self.history().reanalyze(record_id, stopped=self.stop_event.is_set) if record_id else
-                    self.history().add(identity, front, side, stopped=self.stop_event.is_set), on_saved)
+        try:
+            analyzer = self._analyzer()
+        except (ValueError, OSError) as exc:
+            self.show_result(str(exc))
+            return
+        self._start(lambda: self.history().reanalyze(record_id, stopped=self.stop_event.is_set, analyzer=analyzer) if record_id else
+                    self.history().add(identity, front, side, stopped=self.stop_event.is_set, analyzer=analyzer), on_saved)
+
+    def _analyzer(self):
+        # Tk变量在主线程读取一次，后台任务与本次选择绑定。
+        config = replace(load_feedback_config(), pose_variant=self.model_choices[self.analysis_model.get()])
+        return lambda *args, **kwargs: analyze_feedback(*args, config=config, **kwargs)
 
     def cancel(self):
         self.stop_event.set()
@@ -194,6 +209,7 @@ class FeedbackControls:
         ttk.Button(buttons, text="刷新", command=self.refresh_history).pack(side="left")
         ttk.Button(buttons, text="补充分析所选记录", command=self.reanalyze_selected).pack(side="left", padx=8)
         ttk.Button(buttons, text="导出当前记录", command=self.export).pack(side="left")
+        ttk.Button(buttons, text="查看证据帧", command=self.show_evidence).pack(side="left", padx=5)
         ttk.Label(window, text="已存副本与结果从首次导入/分析起保留14天；重分析不延长。外部原视频不由此模块删除。", wraplength=990).pack(anchor="w", padx=12)
         check_frame = ttk.Frame(window)
         check_frame.pack(fill="both", expand=True, padx=12, pady=8)
@@ -270,7 +286,7 @@ class FeedbackControls:
             return
         check = next(c for c in self.current["result"]["checks"] if c["id"] == selection[0])
         audit = [entry for entry in self.current["result"]["reviewHistory"] if entry["checkId"] == check["id"]]
-        self._detail(f"{check['name']}\n标准：{check['standard']}\n出处：{check['source']}\n{check['reason']}\n" +
+        self._detail(f"{check['name']}\n标准：{check['standard']}\n出处：{check['source']}\n{check['reason']}\n{format_fusion(check)}\n" +
                      "\n".join(f"{e['at']} {e['teacher']}：{'确认' if e['after'] == 'confirmed' else '撤销'} {e['reason']}" for e in audit))
 
     def review(self, decision):
@@ -282,8 +298,61 @@ class FeedbackControls:
         except (OSError, ValueError) as exc:
             messagebox.showerror("复核失败", str(exc), parent=self.history_window)
 
+    def show_evidence(self):
+        if not self.current or not self.check_tree.selection():
+            return
+        import cv2
+        from PIL import Image, ImageTk
+        check = next(c for c in self.current["result"]["checks"] if c["id"] == self.check_tree.selection()[0])
+        refs = set(check["evidence"])
+        items = [e for e in self.current["result"]["evidence"] if e["id"] in refs]
+        window = Toplevel(self.root)
+        window.title("证据帧 · " + check["name"])
+        window._photos = []
+        if not items:
+            ttk.Label(window, text="该项没有足够有效证据帧，不能据此判断动作对错。", padding=20).pack()
+            return
+        directory = (self.history().root / self.current["id"]).resolve()
+        for row, view in enumerate(("front", "side")):
+            selected = [e for e in items if e["view"] == view][:3]
+            for col, item in enumerate(selected):
+                frame = None
+                name = self.current["videos"].get(view)
+                path = directory / name if name else None
+                if path and path.resolve().parent == directory and path.is_file() and not path.is_symlink():
+                    cap = cv2.VideoCapture(str(path))
+                    try:
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, item["frame"])
+                        ok, frame = cap.read()
+                        if not ok:
+                            frame = None
+                    finally:
+                        cap.release()
+                title = ("正面" if view == "front" else "侧面") + f" {item['timeSeconds']:.3f}s · 帧{item['frame']}"
+                panel = ttk.Frame(window, padding=5)
+                panel.grid(row=row, column=col)
+                ttk.Label(panel, text=title).pack()
+                if frame is None:
+                    ttk.Label(panel, text="原视频已不可用").pack()
+                    continue
+                h = frame.shape[0]
+                points, valid = item.get("landmarks", []), item.get("validMask", [])
+                for index, point in enumerate(points):
+                    if index < len(valid) and valid[index]:
+                        cv2.circle(frame, (round(point[0] * h), round(point[1] * h)), max(2, h // 300), (0, 230, 100), -1)
+                image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                image.thumbnail((340, 260))
+                photo = ImageTk.PhotoImage(image, master=window)
+                window._photos.append(photo)
+                ttk.Label(panel, image=photo).pack()
+
     def reanalyze_selected(self):
         if not self.history_tree.selection():
             return
         record_id = self.history_tree.selection()[0]
-        self._start(lambda: self.history().reanalyze(record_id, stopped=self.stop_event.is_set))
+        try:
+            analyzer = self._analyzer()
+        except (ValueError, OSError) as exc:
+            self.show_result(str(exc))
+            return
+        self._start(lambda: self.history().reanalyze(record_id, stopped=self.stop_event.is_set, analyzer=analyzer))

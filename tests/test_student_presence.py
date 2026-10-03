@@ -160,3 +160,15 @@ def test_failed_recording_does_not_announce_or_retry(monkeypatch):
     assert not app._student_pending_record
     app._student_announcer.announce.assert_not_called()
     app_ui.messagebox.showerror.assert_called_once()
+def test_windows_announcer_launches_without_console(monkeypatch):
+    from core import exam_announcer
+    calls = []
+    monkeypatch.setattr(exam_announcer.subprocess, "run", lambda *args, **kwargs: calls.append((args, kwargs)))
+    monkeypatch.setattr(exam_announcer.sys, "platform", "win32")
+    monkeypatch.setattr(exam_announcer.subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
+    exam_announcer._default_windows_speak("开始'测试")
+    command = calls[0][0][0]
+    assert command[command.index("-WindowStyle") + 1] == "Hidden"
+    assert "开始''测试" in command[-1]
+    assert calls[0][1]["creationflags"] == 0x08000000
+    assert calls[0][1]["stdin"] == exam_announcer.subprocess.DEVNULL

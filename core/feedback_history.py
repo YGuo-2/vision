@@ -103,6 +103,8 @@ class FeedbackHistory:
         sources = {k: Path(v).resolve() for k, v in (("front", front), ("side", side)) if v is not None}
         if not sources or any(not p.is_file() or p.suffix.lower() not in VIDEO_SUFFIXES for p in sources.values()):
             raise ValueError("请选择仍然存在的正面或侧面视频")
+        if len(sources) == 2 and sources["front"].samefile(sources["side"]):
+            raise ValueError("正侧面不能使用同一个视频，请选择同次录制的两路视频")
         self.cleanup()
         created = self.clock()
         record_id = uuid4().hex

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import socket
 import sys
 import tempfile
@@ -101,9 +102,19 @@ def run(report_path: Path) -> int:
                 report["checks"].append("video_record_transcode_decode")
 
                 history = FeedbackHistory()
+                side_video = video.with_name("侧面 测试.mp4")
+                shutil.copyfile(video, side_video)
                 record = history.add({"studentId": "offline-check", "studentName": "打包检查",
-                                      "action": next(iter(ACTIONS)), "stance": next(iter(STANCES))}, video, None)
+                                      "action": next(iter(ACTIONS)), "stance": next(iter(STANCES))}, video, side_video)
                 assert record["result"]["backend"] == "mediapipe"
+                assert record["result"]["fusionMethod"] == "action_rule_quality_weighted_v1"
+                assert record["result"]["inputViews"] == ["front", "side"]
+                assert record["result"]["ruleVersion"].endswith("-v4")
+                assert record["result"]["poseVariant"] == "full"
+                assert all(c["status"] in {"unable", "pending_rule"} for c in record["result"]["checks"])
+                assert all(c["analyzedFrames"] == 24 and c["stride"] == 1 for c in record["result"]["capture"].values())
+                report["feedbackVersion"] = record["result"]["ruleVersion"]
+                report["feedbackCapture"] = record["result"]["capture"]
                 assert history.get(record["id"])["id"] == record["id"]
                 history.export(record["id"], paths.outputs_dir() / "问题说明.txt")
                 assert (paths.outputs_dir() / "问题说明.txt").stat().st_size > 0
@@ -143,6 +154,7 @@ def run(report_path: Path) -> int:
                 app._enter_student_practice()
                 root.update()
                 assert app._student_practice_active
+                assert app.feedback_controls.analysis_model.get() == "Full（精细分析）"
                 report["checks"].append("tk_student_practice_ui")
                 app._on_close()
                 root = None
