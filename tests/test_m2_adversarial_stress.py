@@ -195,42 +195,44 @@ def test_worker_completion_after_cancellation():
 
 
 def test_worker_completion_after_cancellation_feedback_panel_integration():
-    """压力测试 1b：测试 FeedbackPanel._start 内部队列层级的取消防御。"""
-    from apps.feedback_panel import FeedbackPanel
+    """压力测试 1b：FeedbackControls._start 队列层级的取消防御（真实后台线程 + Tk poll）。"""
+    from apps.feedback_panel import FeedbackControls
 
     root = tk.Tk()
     root.withdraw()
+    panel = None
     try:
-        panel = FeedbackPanel(root)
-        panel.active_token = 42
+        show_result = Mock()
+        panel = FeedbackControls(root, root=root, set_busy=lambda _busy: None, show_result=show_result,
+                                 set_status=lambda _text: None, can_analyze=lambda: True)
         on_saved_mock = Mock()
+        finish = threading.Event()
 
-        # 模拟后台线程已向队列推入完成项
-        record = make_stress_record("001", token=42)
-        panel.queue.put((record, None, 42))
+        def work():
+            finish.wait(5)  # 后台分析在用户取消之后才完成
+            return make_stress_record("001", token=42)
 
-        # 用户在 poll 消费前点击了 cancel
+        panel._start(work, on_saved=on_saved_mock, token=42)
+        assert panel.active_token == 42
+
+        # 用户在 poll 消费结果前点击了 cancel
         panel.cancel()
         assert panel.active_token is None
         assert panel.stop_event.is_set()
+        finish.set()
 
-        # 手动执行一次 poll 中的消费逻辑
-        item = panel.queue.get_nowait()
-        rec, err, task_token = item
+        deadline = time.monotonic() + 5
+        while panel.busy and time.monotonic() < deadline:
+            root.update()
+            time.sleep(0.01)
 
-        # 验证 FeedbackPanel 内部的拦截逻辑生效
-        assert task_token != panel.active_token  # 42 != None
-        # 如果进入了 poll，它会直接 return 并调用 set_recording(False)，绝不触发 on_saved
-        if task_token is not None and task_token != panel.active_token:
-            dropped = True
-        else:
-            dropped = False
-            on_saved_mock(rec)
-
-        assert dropped is True
+        # 迟到的完成项由 poll 按代次丢弃：不回调 on_saved，也不展示结果
+        assert not panel.busy
         on_saved_mock.assert_not_called()
+        show_result.assert_not_called()
     finally:
-        panel.destroy()
+        if panel is not None:
+            panel.close()
         root.destroy()
 
 
@@ -504,6 +506,11 @@ def test_camera_loop_150_ticks_in_result_view():
         app._dual_preview_lock = threading.Lock()
         app._dual_render_lock = threading.Lock()
         app._dual_metrics_lock = threading.Lock()
+        app._record_pair_lock = threading.Lock()  # App.__init__ 自 2026-07-10 起创建，_refresh_recording_status 使用
+        # _refresh_recording_status 每 tick 读取的录制状态（取 App.__init__ 的空闲默认值）
+        app._dual_active = False
+        app._record_error_shown = False
+        app.recording_status_var = tk.StringVar(value="")
         app._dual_startup_metrics = {}
         app._dual_first_render_events = {}
         app._dual_preview_stage = "raw"
@@ -513,13 +520,13 @@ def test_camera_loop_150_ticks_in_result_view():
         # 录制与会话替身
         app._rec = SimpleNamespace(
             state="idle",
-            snapshot=lambda: SimpleNamespace(last_error=None),
+            snapshot=lambda: SimpleNamespace(state="idle", result_path=None, last_error=None),
             close_session=lambda: None,
             write_frame=lambda fr: None,
         )
         app._rec2 = SimpleNamespace(
             state="idle",
-            snapshot=lambda: SimpleNamespace(last_error=None),
+            snapshot=lambda: SimpleNamespace(state="idle", result_path=None, last_error=None),
             close_session=lambda: None,
             write_frame=lambda fr: None,
         )
@@ -589,7 +596,7 @@ def test_camera_loop_150_ticks_in_result_view():
 # 6. Presence Gate Completely Disarmed on "再练一次"
 # ===========================================================================
 
-def test_presence_gate_completely_disarmed_on_practice_again():
+def test_presence_gate_completely_disarmed_on_practice_again(monkeypatch):
     """压力测试 6：验证点击“再练一次”后，到场闸门被彻底解除，学生站入黄框绝不会自动触发录制。
 
     验证：
@@ -610,7 +617,8 @@ def test_presence_gate_completely_disarmed_on_practice_again():
     app._student_presence_gate = MagicMock()
 
     begin_record_mock = MagicMock(return_value=True)
-    app._begin_recording_segment = begin_record_mock
+    # 生产代码以 App._begin_recording_segment(self) 调用，须在类上替换才能拦截（同 test_student_presence）。
+    monkeypatch.setattr(app_ui.App, "_begin_recording_segment", lambda _self: begin_record_mock())
 
     # 2. 点击“再练一次”
     app._on_student_practice_again()
@@ -643,7 +651,17 @@ def test_presence_gate_completely_disarmed_on_practice_again():
     assert app._rec.state == "idle"
 
     # 6. 正向对照：只有当用户明确点击「开始」后，才激活等待到位
+    # _student_start 的前置检查（正/侧双摄选择、Lite 模型）按真实启动条件补齐；
+    # 弹窗换成 Mock，前置检查失败时直接断言失败，而不是弹出阻塞的模态框。
+    app.camera_choice_var = SimpleNamespace(get=lambda: "摄像头 0")
+    app.camera_choice_var_2 = SimpleNamespace(get=lambda: "摄像头 1")
+    for name in ("auto_compare_var", "auto_compare_scale_var", "record_skeleton_var", "enable_hands_var"):
+        setattr(app, name, MagicMock())
+    app._exam_lock = threading.Lock()
+    monkeypatch.setattr(app_ui.model_manager, "is_installed", lambda _model: True)
+    monkeypatch.setattr(app_ui, "messagebox", MagicMock())
     app._student_start()
+    app_ui.messagebox.showwarning.assert_not_called()
     assert app._student_pending_record is True
     assert app._student_presence_gate is not None
 
