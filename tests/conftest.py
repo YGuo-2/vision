@@ -18,3 +18,30 @@ from core import paths
 def _isolate_user_prefs(tmp_path_factory, monkeypatch):
     prefs = tmp_path_factory.mktemp("user_prefs") / "user_prefs.json"
     monkeypatch.setattr(paths, "_prefs_path", lambda: prefs)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _bind_tcl_std_channels(request):
+    """在 pytest 的 fd 捕获之外先建立 Tcl 标准通道，并保持到会话结束。
+
+    Windows 上同一进程反复 ``tk.Tk()`` 时，pytest 默认的 fd 捕获会在用例之间替换并关闭
+    stdin/stdout/stderr 句柄，新建解释器偶发 "Can't find a usable init.tcl …: No error"
+    （同一组用例在 ``-s`` / ``--capture=sys`` 下不出现）。先用真实句柄建立标准通道即可避免。
+    """
+    try:
+        import tkinter
+    except ImportError:  # pragma: no cover - 无 tkinter 的环境
+        yield None
+        return
+    capman = request.config.pluginmanager.getplugin("capturemanager")
+    try:
+        if capman is None:
+            interp = tkinter.Tcl()
+            interp.eval("fconfigure stdin; fconfigure stdout; fconfigure stderr")
+        else:
+            with capman.global_and_fixture_disabled():
+                interp = tkinter.Tcl()
+                interp.eval("fconfigure stdin; fconfigure stdout; fconfigure stderr")
+    except tkinter.TclError:  # pragma: no cover - Tcl 不可用时不影响其余用例
+        interp = None
+    yield interp
