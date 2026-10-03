@@ -1,3 +1,31 @@
+## 2026-10-02（America/Los_Angeles）: [chore] P0 基线整合：学生练习 v4 等未提交工作入库，PR #75 rebase 合入（本地，未推送）
+
+- 问题描述：用户确认 P0 决策：v4 先提交到 main；工作区其余未提交改动按功能拆分提交；PR #75 在新基线上 rebase 后合入，合入后删除 recover 分支；web 端失败不再处理；2 项 Tk 失败先查原因。整合前 main 为 958dd2f，v4 分析、图文报告、结果页、9-29 摄像头补丁都只在工作区或 Codex 快照里，从未入库。
+- 修改内容：本地 main 958dd2f → fe4b62f，共 8 个提交，均未推送：
+  - f7112f9 fix(student)：v4 逐帧分析与正侧面证据融合（含 feedback_phases、分析模型选择、同一视频不得当两路、播报隐藏窗口、v4 离线自检断言、.gitignore 的 feedback_config.json、实施文档），change.md 恢复当时的两条 09-20 记录。
+  - 1548e95 feat(student)：HTML 图文报告（Milestone 1）；a5b1704 feat(student)：结果页与生命周期集成（Milestone 2，含 24 个状态图标及生成脚本），change.md 恢复当时的两条 09-26 记录。
+  - 67861d1 fix(camera)：9-29 摄像头补丁；1a7934d docs(camera)：摄像头架构设计交接说明。
+  - 095aed2 refactor(camera)：PR #75（cherry-pick -x b667650）。冲突处理：camera_warmup.py 取 PR #75 版本（它重写了 9-29 补丁，补丁的测试已在 PR #75 测试文件中）；desktop_smoke.py 取 PR #75 的模式切换检查并保留 v4 自检断言；change.md 中 PR #75 记录置顶；app_ui.py 自动合并结果正好是 PR #75 版本加结果页改动。
+  - c3d63bb test：tests/conftest.py 新增会话级 fixture，在 pytest fd 捕获之外先建立 Tcl 标准通道，消除反复创建 Tk 时偶发的 "Can't find a usable init.tcl … No error"。
+  - fe4b62f test(student)：修正 test_m2_adversarial_stress 中自创建起即失败的 3 个用例（导入不存在的 FeedbackPanel；半成品 App 缺 _record_pair_lock 等属性；_student_start 前置条件缺失、实例属性拦截不到类方法调用），产品代码不变。
+  - 来源：v4 及 09-20 相关文件取自 Codex 快照（09-26 06:22、09-28 20:43），其余取自主工作区。两份 M2 测试仅去掉行尾空白。与本任务无关的 pelican-bike.html（及其 change.md 改动）、docs/动作识别需求调查问卷(2).docx、.agents/ 保持未提交。
+  - 清理：删除本地分支 recover/practice-v4-snapshot（其树仍由 Codex checkpoint ref 引用）和临时 worktree。整合前主工作区的完整状态（含未跟踪文件）备份为 refs/kiro-backup/main-worktree-before-p0（4b60b4c）。
+- 验证方法：
+  - 每个提交都在干净的临时 worktree 中跑全量 pytest（D:\DevTools\venvs\vision）：958dd2f 为 8 failed / 777 passed；补丁提交处为 11 failed / 1020 passed；最终 fe4b62f 跑两次均为 8 failed / 1023 passed / 1 skipped。8 项 = web 桥 6 项 + 陈旧 Tk 测试 2 项，均为 958dd2f 上已有的失败。
+  - 字节码：f7112f9 中 action_feedback、feedback_geometry、feedback_phases、feedback_panel、feedback_history、exam_announcer 与 dist/散打动作练习_精度优化版_20260920 EXE 完全一致（含行号表）；67861d1 的 core/apps/analysis/batch 源码与 dist/camera-mode-fix-20260929 EXE 全部 37 个项目模块一致（36 个含行号表一致，feedback_report 仅差一行注释）。
+  - PR #75：摄像头、预热、生命周期、双摄、学生练习、控件、枚举测试 223 passed；真实 Tk + spawn 模式切换检查 test_tk_preview_student_switch_with_process_cameras 通过。
+  - Tk 偶发失败：同一组新建解释器的对照中，fd 捕获下 16/360 次失败，加 fixture 后 0/360；test_action_feedback.py 连跑 12 次、test_m2_adversarial_stress.py 连跑 10 次均 0 失败。
+  - 2 项 Tk 失败根因（未修，待用户确认后改测试）：test_ui_controls::test_set_running_controls_enable_disable_linkage 自 a3a605f（07-10）起失败，录制按钮改由 _dual_recording_ready 把关，测试未经 _begin_preview_session 就直接调用 _set_running_controls(True)；test_s5_hands_toggle::test_ui_worker_pipelines_use_state_enable_hands 自 bf8c908（07-11）起失败，考试/练习站位检测管线有意固定 enable_hands=False，而该 AST 测试要求全部取 state.enable_hands。两项均在引入提交的父提交上通过、在引入提交上失败。
+  - 每个提交 git diff --check 通过。未构建 EXE，未推送，GitHub 上的 PR #75 仍为 open，未做甲方双摄实机验收。
+
+## 2026-10-02（America/Los_Angeles）: [docs] 整体架构重构设计（待审阅）
+
+- 问题描述：用户在全量盘查（单文件行数、模块耦合、总体与模块架构、可扩展性、"理应复用却各写各的"清单）之后，要求重新设计 Tk 侧整体架构：保持现有能力不变，优化可扩展性与可维护性，消除重复实现；web 端已弃用，不纳入设计。随后要求同步 main 并确保文档无误。
+- 修改内容：新增 docs/整体架构重构设计.md：七层分层与依赖规则、目标包结构、41 项唯一实现登记表；各层设计（偏好、原子写、任务取消与 epoch、诊断日志；视频解码与摄像头设备所有权、状态与完成条件、竞争请求与恢复；PoseSequence 与提取策略；测量库、规则引擎与 profile、模板契约、统一比对与计分方案；冻结/可调会话配置、唯一逐帧循环、片段录制与录后处理、模式要求与工作流命令执行）；Tk 拆分与关窗协调；可扩展性对照；8 项可见行为变化、14 项决策（D-1、D-14 已完成）；P0–P9 迁移计划与门禁、当前测试基线；架构测试与验收场景；能力清单与现有文件去向。摄像头子系统以 PR #75 的"池 + 租约"为基础；学生练习按 v4 描述（默认 Full、逐帧、feedback_config.json、正侧证据融合）。未修改业务代码。
+- 更正记录：核对代码后修正初稿的错误。D-6 原写"现状会提示尺寸不符"，实际只在状态栏显示驱动报告的尺寸。ExamPanel 访问的 11 个 App 私有成员原写全部经 _run_command，实际分布在 8 个方法中。cv2.VideoCapture（35 处/22 个文件）、写死的 3.0（9 处）等计数按代码重核。PR #75 合入后的 App 规模（4855 行、135 个方法、162 个实例属性）、threading.Thread（27 处）和两份 App 测试文件中的半成品构造（48 处）已按 fe4b62f 更新。
+- 同步依据：AST 依赖图与行数统计；app_ui、camera_*、recording_postprocess、exam_panel、action_compare、rule_scoring、tech_eval、feedback_* 等源码；PR #75 源码与 docs/camera_session_architecture.md；docs/摄像头架构设计交接说明.md；AGENTS.md 硬约束；Codex 快照与交付 EXE 的字节码比对。
+- 验证方法：文档检查脚本确认无行尾空白和制表符，代码块闭合，§ 交叉引用可解析，V-1～V-8、D-1～D-14 均有定义且编号有序，登记表 41 行与摘要一致，表格列数一致，引用的现有文件路径均存在（缺失的 9 个均为规划中的新文件）；git diff --check。
+
 ## 2026-09-30: [refactor] Tk 摄像头统一设备所有者与会话 lease
 
 ### 问题描述
