@@ -13,14 +13,17 @@ from core.feedback_history import FeedbackHistory, validate_identity
 
 
 class FeedbackControls:
-    def __init__(self, parent, *, root, set_busy, show_result, set_status, can_analyze):
+    def __init__(self, parent, *, root, set_busy, show_result, set_status, can_analyze, on_identity_changed=None, on_cancelled=None):
         self.root = root
         self.set_busy, self.show_result, self.set_status = set_busy, show_result, set_status
         self.can_analyze = can_analyze
+        self.on_identity_changed = on_identity_changed
+        self.on_cancelled = on_cancelled
         self.store = None
         self.current = None
         self.busy = False
         self.closed = False
+        self.active_token = None
         self.stop_event = threading.Event()
         self.queue = Queue()
         self.poll_id = None
@@ -57,11 +60,17 @@ class FeedbackControls:
         self.student_id.trace_add("write", self.identity_changed)
 
     def identity_changed(self, *_args):
+        self.active_token = None
         self.current = None
         self.export_button.configure(state="disabled")
         if self.history_window is not None and self.history_window.winfo_exists():
             self.history_window.destroy()
         self.history_window = None
+        if hasattr(self, "on_identity_changed") and self.on_identity_changed:
+            try:
+                self.on_identity_changed()
+            except Exception:
+                pass
 
     def history(self):
         if self.store is None:
@@ -80,10 +89,11 @@ class FeedbackControls:
         self.history_button.configure(state="disabled" if recording or self.busy else "normal")
         self.export_button.configure(state="normal" if self.current and not self.busy else "disabled")
 
-    def _start(self, work, on_saved=None):
+    def _start(self, work, on_saved=None, token=None):
         if self.busy or not self.can_analyze():
             messagebox.showinfo("动作问题说明", "请先结束录制并等待当前任务完成。", parent=self.root)
             return
+        self.active_token = token
         self.busy = True
         self.stop_event.clear()
         self.set_busy(True)
@@ -93,7 +103,7 @@ class FeedbackControls:
 
         def run():
             try:
-                self.queue.put((work(), None))
+                self.queue.put((work(), None, token))
             except Exception as exc:
                 if isinstance(exc, InterruptedError):
                     error = "分析已取消"
@@ -101,13 +111,18 @@ class FeedbackControls:
                     error = str(exc)
                 else:
                     error = "分析或保存失败，请检查MediaPipe模型、视频和保存目录后重试。"
-                self.queue.put((None, error))
+                self.queue.put((None, error, token))
 
         def poll():
             if self.closed:
                 return
             try:
-                record, error = self.queue.get_nowait()
+                item = self.queue.get_nowait()
+                if len(item) == 3:
+                    record, error, task_token = item
+                else:
+                    record, error = item
+                    task_token = None
             except Empty:
                 self.poll_id = self.root.after(100, poll)
                 return
@@ -115,6 +130,14 @@ class FeedbackControls:
             self.busy = False
             self.set_busy(False)
             self.cancel_button.configure(state="disabled")
+
+            if task_token is not None and task_token != self.active_token:
+                self.set_recording(False)
+                return
+            if self.stop_event.is_set():
+                self.set_recording(False)
+                return
+
             if error:
                 self.set_status(error)
                 self.show_result(error)
@@ -131,14 +154,18 @@ class FeedbackControls:
         threading.Thread(target=run, name="student-action-feedback", daemon=True).start()
         self.poll_id = self.root.after(100, poll)
 
-    def analyze_recording(self, identity, front, side, *, record_id=None, on_saved=None):
+    def analyze_recording(self, identity, front, side, *, record_id=None, on_saved=None, token=None):
         try:
             analyzer = self._analyzer()
         except (ValueError, OSError) as exc:
             self.show_result(str(exc))
             return
-        self._start(lambda: self.history().reanalyze(record_id, stopped=self.stop_event.is_set, analyzer=analyzer) if record_id else
-                    self.history().add(identity, front, side, stopped=self.stop_event.is_set, analyzer=analyzer), on_saved)
+        self._start(
+            lambda: self.history().reanalyze(record_id, stopped=self.stop_event.is_set, analyzer=analyzer) if record_id else
+            self.history().add(identity, front, side, stopped=self.stop_event.is_set, analyzer=analyzer),
+            on_saved=on_saved,
+            token=token,
+        )
 
     def _analyzer(self):
         # Tk变量在主线程读取一次，后台任务与本次选择绑定。
@@ -146,12 +173,19 @@ class FeedbackControls:
         return lambda *args, **kwargs: analyze_feedback(*args, config=config, **kwargs)
 
     def cancel(self):
+        self.active_token = None
         self.stop_event.set()
         self.cancel_button.configure(state="disabled")
         self.set_status("正在取消；当前帧处理结束后释放任务…")
+        if hasattr(self, "on_cancelled") and self.on_cancelled:
+            try:
+                self.on_cancelled()
+            except Exception:
+                pass
 
     def close(self):
         self.closed = True
+        self.active_token = None
         self.stop_event.set()
         if self.poll_id is not None:
             self.root.after_cancel(self.poll_id)

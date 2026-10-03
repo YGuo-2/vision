@@ -41,6 +41,40 @@
 - 内存模拟阻塞采集与释放异常：确认连续重试被拒绝及设备锁保留；模拟结束主动解除阻塞并关闭 pool，未访问物理摄像头。
 - 核对当前模型配置、录像写入、离线时间轴及官方 MediaPipe / Ultralytics / MMPose / MotionBERT 文档；以 change.md 定向 diff 检查作为本次文档验证。
 
+## 2026-09-26: [feat] 学生练习分析结果页展示与生命周期集成 (Milestone 2)
+
+### 问题描述
+
+散打系统学生练习模式原有分析结果仅挤在左侧侧边栏底部仅9行高度的文本框内，无法直观呈现四分类状态、动作阶段时序、正侧双视角代表帧及结构化依据，查看历史或证据帧需要弹出多层独立子窗口，割裂教学体验。同时，异步分析工作线程缺少任务代次（generation token）防护，在快速切换学生、取消分析、点击再练或关闭窗口时容易发生晚到回调串页、覆写新界面或抛出 TclError 异常。
+
+### 修改内容
+
+1. **Tkinter 分析结果面板 (`apps/feedback_result_panel.py`)**：
+   - 严格遵循 Style A「简洁教学风」视觉规范（页面底色 `#F5F7FB`、卡片白底 `#FFFFFF`、细边线 `#D8E0EA`、主要操作蓝 `#2563EB`）。
+   - 头部卡片展示学号、姓名、动作、实战式、本地带时区分析时间及记录标识。
+   - 四态概览卡片使用本地静态 PNG 图标（`candidate`、`not_observed`、`unable`、`pending_rule`），附带独立撤销项计数标签，严格遵守检查项总数守恒，禁止任何总分、扣分、合格率或评分进度条。
+   - 核心结论横幅基于 7 级优先级结论逻辑展示主副标题与警示色调。
+   - 动态动作阶段导航栏基于真实阶段动态生成（如开始实战式、前手直拳★等），支持按阶段筛选左侧问题列表。
+   - 左侧问题列表（~40%）支持状态分类筛选、同原因合并与教师复核标签展示。
+   - 右侧证据区（~60%）安全加载正侧代表帧（`extract_evidence_frame` 骨架高度归一化投影）、展示一句话检查依据、提供教师复核确认/撤销控件，以及可折叠的技术诊断与测量依据。
+   - 底部操作栏支持“再练一次”、“导出图文报告”（支持 HTML/TXT）和“个人历史”。
+2. **生命周期与主窗口平滑切换 (`apps/app_ui.py`)**：
+   - `FeedbackResultPanel` 挂载在主容器 `outer` 跨列 0-1 展示。
+   - 实现 `_show_student_result_view(record)` 与 `_show_student_preview_view()`，通过 `grid_remove()` / `grid()` 实现录制预览与分析结果两态无冲突切换，保持后台摄像头采集线程与渲染定时器 `_tick()` 持续安全运行，切回预览即刻恢复。
+   - 实现 `_on_student_practice_again()`：安全切回预览，显式清空 `_student_presence_gate = None`、`_student_pending_record = False` 并作废任务代次，使学生开始按钮可用，绝不误触自动录制。
+3. **任务代次并发安全防御 (`apps/app_ui.py`, `apps/feedback_panel.py`)**：
+   - 引入单调递增任务代次 `_feedback_task_token` 与活跃代次 `_active_feedback_token`。
+   - 在 `_on_student_analysis_saved(token, student_id, record)` 中严格核对代次、当前学号、窗口关闭态和录制状态，彻底拦截取消、切学生、再练一次及关闭后的晚到迟滞回调。
+
+### 验证方法
+
+- 运行全部练习反馈与结果面板测试集：`$env:PYTHONIOENCODING = "utf-8"; & "D:\DevTools\venvs\vision\Scripts\python.exe" -m pytest tests/test_action_feedback.py tests/test_app_controls.py tests/test_student_presence.py tests/test_feedback_report.py tests/test_feedback_html_export.py tests/test_feedback_result_panel.py -v`，96 项测试全部通过（100% pass）。
+- 运行核心 golden 与考试回归测试：`& "D:\DevTools\venvs\vision\Scripts\python.exe" -m pytest tests/test_pose33_v3_golden.py tests/test_exam_session.py tests/test_exam_roster.py tests/test_exam_clip.py tests/test_presence_gate.py tests/test_recording_postprocess.py -q`，110 项测试全部通过。
+- 格式检查：`git diff --check` 验证无空白与语法格式错误。
+- 语法编译检查：`python -m py_compile apps/feedback_result_panel.py apps/app_ui.py apps/feedback_panel.py` 通过。
+
+---
+
 ## 2026-09-26: [fix] 学生练习图文报告Milestone 1红蓝对抗缺陷修复
 
 ### 问题描述

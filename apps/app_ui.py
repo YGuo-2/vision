@@ -1310,6 +1310,7 @@ class App:
         # Left: scrollable controls container（可滚动 Canvas + 垂直 Scrollbar + 内嵌 inner Frame，需求 1.5/1.6）。
         # outer 列 0 固定宽度容器；列 1 预览区可伸展。
         left_container = ttk.Frame(outer)
+        self.left_container = left_container
         left_container.grid(row=0, column=0, sticky="ns", padx=(0, 12))
         left_container.rowconfigure(0, weight=1)
 
@@ -1659,6 +1660,7 @@ class App:
         self.preview.bind("<Button-1>", self._on_preview_click_rotate)
 
         # 第二路预览（双摄像头双面视图，issue #58）：默认隐藏，仅 source2 选中真实摄像头时显示。
+        self.right = right
         self._preview_right = right
         self._dual_preview_visible = False
         self._dual_preview_layout = "stacked"
@@ -1667,6 +1669,29 @@ class App:
         self.preview2.bind("<Configure>", self._on_preview2_configure)
         self.preview2.bind("<Button-1>", self._on_preview2_click_rotate)
         self._set_dual_preview_visible(False)
+
+        # 任务代次并发防御与学生练习分析结果主视图 (Milestone 2)
+        self._feedback_task_token: int = 0
+        self._active_feedback_token: int | None = None
+        self._active_feedback_student_id: str | None = None
+        self._current_student_record: dict | None = None
+        self.current_student_id = self.feedback_controls.student_id
+
+        from apps.feedback_result_panel import FeedbackResultPanel
+
+        self.feedback_result_panel = FeedbackResultPanel(
+            outer,
+            on_practice_again=self._on_student_practice_again,
+            on_export_report=self._on_student_export_report,
+            on_view_history=self._on_student_view_history,
+            on_review_toggle=self._on_student_review_toggle,
+            on_switch_to_preview=self._show_student_preview_view,
+            history_store=self.feedback_controls.history(),
+        )
+        self.feedback_result_panel.grid_remove()
+
+        self.feedback_controls.on_identity_changed = self._on_student_identity_changed
+        self.feedback_controls.on_cancelled = self._on_student_cancelled
 
     def _on_preview_configure(self, event) -> None:
         """主预览 Label 尺寸变化（主线程）：缓存供 worker 线程 _post_frame 做 resize（点1）。"""
@@ -2443,6 +2468,12 @@ class App:
         self._student_front_video = None
         self._student_side_video = None
         self._student_segment_ready = False
+        self._active_feedback_token = None
+        self._active_feedback_student_id = None
+        self._current_student_record = None
+        if hasattr(self, "feedback_result_panel"):
+            self.feedback_result_panel.clear()
+            self._show_student_preview_view()
 
         # 省 GPU：关骨架/手部/自动比对（不改正式评分算法，仅本模式会话策略）
         self._student_saved_auto_compare = bool(self.auto_compare_var.get())
@@ -2519,6 +2550,12 @@ class App:
         self._student_segment_ready = False
         self._student_front_video = None
         self._student_side_video = None
+        self._active_feedback_token = None
+        self._active_feedback_student_id = None
+        self._current_student_record = None
+        if hasattr(self, "feedback_result_panel"):
+            self.feedback_result_panel.clear()
+            self._show_student_preview_view()
 
         if self._student_saved_auto_compare is not None:
             self.auto_compare_var.set(bool(self._student_saved_auto_compare))
@@ -2906,13 +2943,167 @@ class App:
             messagebox.showinfo("动作评判", "这段录像未绑定学生，请使用「导入旧视频」分析。")
             return
 
+        self._feedback_task_token = getattr(self, "_feedback_task_token", 0) + 1
+        token = self._feedback_task_token
+        self._active_feedback_token = token
+        student_id = identity.get("studentId") if isinstance(identity, dict) else None
+        self._active_feedback_student_id = student_id
+
         def on_saved(record):
             self._student_feedback_record_id = record["id"]
+            if hasattr(self, "_on_student_analysis_saved"):
+                self._on_student_analysis_saved(token=token, student_id=student_id, record=record)
 
         self.feedback_controls.analyze_recording(
             identity, self._student_front_video, self._student_side_video,
             record_id=self._student_feedback_record_id, on_saved=on_saved,
+            token=token,
         )
+
+
+
+    def _on_student_identity_changed(self) -> None:
+        """用户在学生练习界面修改了学号：作废当前任务代次，清空旧记录。"""
+        self._active_feedback_token = None
+        self._active_feedback_student_id = None
+        self._current_student_record = None
+
+    def _on_student_cancelled(self) -> None:
+        """用户点击了取消分析：作废任务代次。"""
+        self._active_feedback_token = None
+
+    def _show_student_result_view(self, record: dict) -> None:
+        """切换至学生练习分析结果视图：平滑隐藏预览和左侧控制栏，展示结果面板。"""
+        try:
+            self.left_container.grid_remove()
+        except Exception:
+            pass
+        try:
+            self._preview_right.grid_remove()
+        except Exception:
+            pass
+        self.feedback_result_panel.grid(row=0, column=0, columnspan=2, sticky="nsew")
+        self.feedback_result_panel.set_record(record)
+        try:
+            self.status_var.set("学生练习分析结果")
+        except Exception:
+            pass
+
+    def _show_student_preview_view(self) -> None:
+        """切回学生练习录制预览视图：隐藏结果面板，恢复左侧控制栏与双摄预览。"""
+        try:
+            self.feedback_result_panel.grid_remove()
+        except Exception:
+            pass
+        try:
+            self.left_container.grid()
+        except Exception:
+            pass
+        try:
+            self._preview_right.grid()
+        except Exception:
+            pass
+        try:
+            self.status_var.set("学生练习模式")
+        except Exception:
+            pass
+
+    def _on_student_practice_again(self) -> None:
+        """从分析结果页切回录制预览，重置状态，但严格禁止自动启动录制。"""
+        if not bool(getattr(self, "_student_practice_active", False)):
+            return
+        if bool(getattr(self, "_student_judging", False)):
+            return
+
+        # 1. 视图平滑切回预览
+        self._show_student_preview_view()
+
+        # 2. 状态硬复位：解除闸门，清空就绪态，作废代次
+        self._student_presence_gate = None
+        self._student_pending_record = False
+        self._student_segment_ready = False
+        self._student_front_video = None
+        self._student_side_video = None
+        self._active_feedback_token = None
+
+        # 3. 按钮与文案同步，不自动触发录制
+        try:
+            self.student_status_var.set("已返回录制预览。进入黄框就位后请点击「开始」")
+            self._sync_student_buttons()
+        except Exception:
+            pass
+
+    def _on_student_analysis_saved(self, token: int, student_id: str, record: dict) -> None:
+        """分析完成且保存后的主线程回调：通过任务代次与学号双重拦截晚到/作废结果。"""
+        if bool(getattr(self, "_closing", False)):
+            return
+
+        active_token = getattr(self, "_active_feedback_token", None)
+        if active_token is None or token != active_token:
+            return
+
+        curr_student_id = None
+        if hasattr(self, "current_student_id") and hasattr(self.current_student_id, "get"):
+            curr_student_id = self.current_student_id.get()
+        elif hasattr(self, "feedback_controls") and hasattr(self.feedback_controls, "student_id"):
+            curr_student_id = self.feedback_controls.student_id.get()
+
+        if curr_student_id is not None and curr_student_id != student_id:
+            return
+
+        rec = getattr(self, "_rec", None)
+        if rec is not None and getattr(rec, "state", "idle") in ("recording", "paused"):
+            return
+
+        self._current_student_record = record
+        self._student_feedback_record_id = record.get("id")
+        self._show_student_result_view(record)
+
+    def _on_student_export_report(self, record: dict) -> None:
+        """从结果面板导出 HTML / TXT 图文报告。"""
+        from core.feedback_report import render_html_report
+
+        student_id = record.get("studentId", "student")
+        action = record.get("action", "action")
+        action_label = ACTIONS.get(action, action)
+        default_name = f"{student_id}_{action_label}_练习分析报告"
+
+        dest = filedialog.asksaveasfilename(
+            parent=self.root,
+            title="导出动作问题说明报告",
+            initialfile=default_name,
+            defaultextension=".html",
+            filetypes=[("图文报告网页 (*.html)", "*.html"), ("详细文字报告 (*.txt)", "*.txt")],
+        )
+        if not dest:
+            return
+
+        path = Path(dest)
+        try:
+            if path.suffix.lower() == ".txt":
+                self.feedback_controls.history().export(record["id"], path)
+            else:
+                html_content = render_html_report(record, history_root=self.feedback_controls.history().root)
+                path.write_text(html_content, encoding="utf-8")
+            self.student_status_var.set(f"报告已成功导出至：{path.name}")
+            messagebox.showinfo("导出成功", f"报告已导出至：\n{path}", parent=self.root)
+        except Exception as exc:
+            messagebox.showerror("导出失败", f"无法写入报告文件：{exc}", parent=self.root)
+
+    def _on_student_view_history(self) -> None:
+        """从结果面板打开个人历史对话框。"""
+        self.feedback_controls.open_history()
+
+    def _on_student_review_toggle(self, record_id: str, check_id: str, decision: str, teacher: str, reason: str) -> None:
+        """教师在结果页切换复核状态并即时刷新结果面板。"""
+        try:
+            updated = self.feedback_controls.history().review(
+                record_id, check_id, decision, teacher, reason
+            )
+            self._current_student_record = updated
+            self.feedback_result_panel.set_record(updated)
+        except Exception as exc:
+            messagebox.showerror("复核失败", str(exc), parent=self.root)
 
     def _exam_primary_rotate(self) -> int:
         try:
@@ -4380,6 +4571,7 @@ class App:
                 pass
         if hasattr(self, "feedback_controls"):
             self.feedback_controls.close()
+        self._active_feedback_token = None
         self._student_presence_gate = None
         self._student_pending_record = False
         announcer = getattr(self, "_student_announcer", None)
